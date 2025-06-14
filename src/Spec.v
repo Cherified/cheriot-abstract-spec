@@ -85,6 +85,12 @@ Section Machine.
         restrictSealedKeepPermsSubset: z.(capKeepPerms) = y.(capKeepPerms);
         restrictSealedKeepStRegionsSubset: z.(capKeepStRegions) = y.(capKeepStRegions) }.
 
+    Definition Restrict : Prop :=
+      match z.(capSealed) with
+      | None => RestrictUnsealed
+      | Some k => RestrictSealed
+      end.
+
     Variable x: Cap.
     (* When a cap y is loaded using a cap x, then the attentuation of x comes into play to create z *)
 
@@ -95,25 +101,36 @@ Section Machine.
         nonRestrictUnsealingKeysEq: z.(capUnsealingKeys) = y.(capUnsealingKeys);
         nonRestrictAddrsEq: z.(capAddrs) = y.(capAddrs) }.
 
+    Record AttenuatePerms : Prop := {
+        attenuatePerms: forall p, In p z.(capPerms) -> (In p x.(capKeepPerms) /\ In p y.(capPerms));
+        attenuateKeepPerms: forall p, In p z.(capKeepPerms) ->
+                                      (In p x.(capKeepPerms) /\ In p y.(capKeepPerms)) }.
+
+    Record NonAttenuatePerms : Prop := {
+        nonAttenuatePerms: z.(capPerms) = y.(capPerms);
+        nonAttenuateKeepPerms: z.(capKeepPerms) = y.(capKeepPerms) }.
+
     Record LoadCap : Prop := {
         loadNonRestrictEqs: NonRestrictEqs;
         loadAuthPerm: In Perm.Load x.(capPerms) /\ In Perm.Cap x.(capPerms);
         loadFromAuth: exists a, In a x.(capAddrs) /\ In y (snd (Memory a));
         loadSealedEq: z.(capSealed) = y.(capSealed);
-        loadAttenuatePerms: forall p, In p z.(capPerms) -> (In p x.(capKeepPerms) /\ In p y.(capPerms));
+        loadAttenuatePerms: match y.(capSealed) with
+                            | None => AttenuatePerms
+                            | Some k => NonAttenuatePerms
+                            end;
         loadAttenuateStRegions: forall r, In r z.(capStRegions) ->
                                           (In r x.(capKeepStRegions) /\ In r y.(capStRegions));
-        loadAttenuateKeepPerms: forall p, In p z.(capKeepPerms) ->
-                                          (In p x.(capKeepPerms) /\ In p y.(capKeepPerms));
-        loadAttenuateKeepStRegions: forall r, In r z.(capKeepStRegions) ->
-                                              (In r x.(capKeepStRegions) /\
-                                                 In r y.(capKeepStRegions)) }.
+        loadKeepStRegions: match y.(capSealed) with
+                           | None => forall r, In r z.(capKeepStRegions) ->
+                                               (In r x.(capKeepStRegions) /\ In r y.(capKeepStRegions))
+                           | Some k => z.(capKeepStRegions) = y.(capKeepStRegions)
+                           end}.
 
     Record SealUnsealEqs : Prop := {
         sealUnsealNonRestrictEqs: NonRestrictEqs;
-        sealUnsealPermsEq: z.(capPerms) = y.(capPerms);
+        sealUnsealNonAttenuatePerms: NonAttenuatePerms;
         sealUnsealStRegionsEq: z.(capStRegions) = y.(capStRegions);
-        sealUnsealKeepPermsEq: z.(capKeepPerms) = y.(capKeepPerms);
         sealUnsealKeepStRegionsEq: z.(capKeepStRegions) = y.(capKeepStRegions) }.
 
     (* Cap z is the sealed version of cap y using a key in x *)
@@ -132,8 +149,7 @@ Section Machine.
     (* Transitively reachable cap with permissions removed according to transitive properties *)
     Inductive ReachableCap: Cap -> Prop :=
     | Refl (c: Cap) (inPf: In c origSet) : ReachableCap c
-    | StepRestrictUnsealed y (yPf: ReachableCap y) z (yz: RestrictUnsealed y z) : ReachableCap z
-    | StepRestrictSealed y (yPf: ReachableCap y) z (yz: RestrictSealed y z): ReachableCap z
+    | StepRestrict y (yPf: ReachableCap y) z (yz: Restrict y z) : ReachableCap z
     | StepLoadCap x (xPf: ReachableCap x) y z (xyz: LoadCap x y z): ReachableCap z
     | StepSeal x (xPf: ReachableCap x) y z (xyz: Seal x y z): ReachableCap z
     | StepUnseal x (xPf: ReachableCap x) y z (xyz: Unseal x y z): ReachableCap z.
