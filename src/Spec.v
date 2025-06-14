@@ -160,8 +160,8 @@ Section Machine.
     | Refl (c: Cap) (inPf: In c origSet) : ReachableCap c
     | StepRestrict y (yPf: ReachableCap y) z (yz: Restrict y z) : ReachableCap z
     | StepLoadCap x (xPf: ReachableCap x) y z (xyz: LoadCap x y z): ReachableCap z
-    | StepSeal x (xPf: ReachableCap x) y z (xyz: Seal x y z): ReachableCap z
-    | StepUnseal x (xPf: ReachableCap x) y z (xyz: Unseal x y z): ReachableCap z.
+    | StepSeal x (xPf: ReachableCap x) y (yPf: ReachableCap y) z (xyz: Seal x y z): ReachableCap z
+    | StepUnseal x (xPf: ReachableCap x) y (yPf: ReachableCap y) z (xyz: Unseal x y z): ReachableCap z.
 
     (* Transitively reachable addr listed with permissions and stRegions *)
     Inductive ReachableAddr: Addr -> list Perm.t -> list Region -> Prop :=
