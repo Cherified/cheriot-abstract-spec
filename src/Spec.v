@@ -65,7 +65,7 @@ Section Machine.
         restrictUnsealedPermsSubset: forall p, In p z.(capPerms) -> In p y.(capPerms);
         restrictUnsealedStRegionsSubset: forall r, In r z.(capStRegions) -> In r y.(capStRegions);
         restrictUnsealedSealingKeysSubset: forall k, In k z.(capSealingKeys) -> In k y.(capSealingKeys);
-        restrictUnsealedUnsealingKeysSubset: forall k, In k z.(capUnsealingKeys) = In k y.(capUnsealingKeys);
+        restrictUnsealedUnsealingKeysSubset: forall k, In k z.(capUnsealingKeys) -> In k y.(capUnsealingKeys);
         restrictUnsealedAddrsSubset: forall a, In a z.(capAddrs) -> In a y.(capAddrs);
         restrictUnsealedKeepPermsSubset: forall p, In p z.(capKeepPerms) -> In p y.(capKeepPerms);
         restrictUnsealedKeepStRegionsSubset: forall p, In p z.(capKeepStRegions) -> In p y.(capKeepStRegions) }.
@@ -170,6 +170,176 @@ Section Machine.
       : ReachableAddr a perms stRegions.
   End Transitivity.
 End Machine.
+
+Module CHERIoTValidation.
+  From Stdlib Require Import ZArith.
+  Import ListNotations.
+  Local Open Scope N_scope.
+  Inductive CompressedPerm :=
+  | MemCapRW (GL: bool) (SL: bool) (LM: bool) (LG: bool) (* Implicit: LD, MC, SD *)
+  | MemCapRO (GL: bool) (LM: bool) (LG: bool) (* Implicit: LD, MC *)
+  | MemCapWO (GL: bool) (* Implicit: SD, MC *)
+  | MemDataOnly (GL: bool) (LD: bool) (SD: bool) (* Implicit: None *)
+  | Executable (GL: bool) (SR: bool) (LM: bool) (LG: bool) (* Implicit: EX, LD, MC *)
+  | Sealing (GL: bool) (U0: bool) (SE: bool) (US: bool) (* Implicit: None *).
+
+  Record cheriot_cap :=
+  { reserved: bool;
+    permissions: CompressedPerm;
+    otype: N; (* < 8 *)
+    base: N;
+    top: N;
+    addr: N;
+  }.
+
+  Record Perm :=
+    {
+      EX : bool; (* PERMIT_EXECuTE *)
+      GL : bool; (* GLOBAL *)
+      LD : bool; (* PERMIT_LOAD *)
+      SD : bool; (* PERMIT_STORE *)
+      SL : bool; (* PERMIT_STORE_LOCAL_CAPABILITY *)
+      SR : bool; (* PERMIT_ACCESS_SYSTEM_REGISTERS *)
+      SE : bool; (* PERMIT_SEAL *)
+      US : bool; (* PERMIT_UNSEAL *)
+      U0 : bool; (* USER_PERM0 *)
+      LM : bool; (* PERMIT_LOAD_MUTABLE *)
+      LG : bool; (* PERMIT_LOAD_GLOBAL *)
+      MC : bool; (* PERMIT_LOAD_STORE_CAPABILITY *)
+    }.
+
+  Definition decompress_perm (p: CompressedPerm) : Perm :=
+    match p with
+    | MemCapRW gl sl lm lg =>
+        {| EX := false;
+           GL := gl;
+           LD := true;
+           SD := true;
+           SL := sl;
+           SR := false;
+           SE := false;
+           US := false;
+           U0 := false;
+           LM := lm;
+           LG := lg;
+           MC := true
+        |}
+    | MemCapRO gl lm lg =>
+        {| EX := false;
+           GL := gl;
+           LD := true;
+           SD := false;
+           SL := false;
+           SR := false;
+           SE := false;
+           US := false;
+           U0 := false;
+           LM := lm;
+           LG := lg;
+           MC := true
+        |}
+    | MemCapWO gl =>
+        {| EX := false;
+           GL := gl;
+           LD := false;
+           SD := true;
+           SL := false;
+           SR := false;
+           SE := false;
+           US := false;
+           U0 := false;
+           LM := false;
+           LG := false;
+           MC := true
+        |}
+    | MemDataOnly gl ld sd =>
+        {| EX := false;
+           GL := gl;
+           LD := ld;
+           SD := sd;
+           SL := false;
+           SR := false;
+           SE := false;
+           US := false;
+           U0 := false;
+           LM := false;
+           LG := false;
+           MC := false
+        |}
+    | Executable gl sr lm lg =>
+        {| EX := true;
+           GL := gl;
+           LD := true;
+           SD := false;
+           SL := false;
+           SR := sr;
+           SE := false;
+           US := false;
+           U0 := false;
+           LM := lm;
+           LG := lg;
+           MC := true
+        |}
+    | Sealing gl u0 se us =>
+        {| EX := false;
+           GL := gl;
+           LD := false;
+           SD := false;
+           SL := false;
+           SR := false;
+           SE := se;
+           US := us;
+           U0 := u0;
+           LM := false;
+           LG := false;
+           MC := false
+        |}
+    end.
+
+  Definition mk_abstract_cap (c: cheriot_cap) : Cap nat N :=
+    let d := decompress_perm c.(permissions) in
+    {| capThisRegion := if d.(SL) then Stack else Global;
+       capSentry := match c.(otype) with
+                    | 0 => UnsealedJump
+                    | 1 => CallInheritInterrupt
+                    | 2 => CallDisableInterrupt
+                    | 3 => CallEnableInterrupt
+                    | 4 => RetDisableInterrupt
+                    | 5 => RetEnableInterrupt
+                    | (* 6 & 7 *) _ => UnsealedJump (* TODO! capSentry ⊆ capSealed *)
+                    end;
+       capSealed := match c.(otype) with
+                    | 0 => None
+                    | _ => Some c.(otype)
+                    end;
+       capPerms := filter (fun p => match p with
+                                 | Perm.Exec => d.(EX)
+                                 | Perm.System => d.(SR)
+                                 | Perm.Load => d.(LD)
+                                 | Perm.Cap => d.(MC)
+                                 | Perm.Sealing => d.(SE)
+                                 | Perm.Unsealing => d.(US)
+                                 end)
+                     [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
+       capStRegions := if d.(GL) then [Global;Stack] else [Stack];
+       capSealingKeys := [c.(addr)];
+       capUnsealingKeys := [c.(addr)];
+       capAddrs := seq (N.to_nat c.(base)) (N.to_nat (c.(top) - c.(base)));
+       capKeepPerms := filter (fun p => match p with
+                                 | Perm.Exec => true
+                                 | Perm.System => true
+                                 | Perm.Load => true
+                                 (* Perm.Store => d.(LM) *) (* TODO! LM clears SD *)
+                                 | Perm.Cap => true
+                                 | Perm.Sealing => true
+                                 | Perm.Unsealing => true
+                                 end)
+                         [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
+       capKeepStRegions := if d.(LG) then [Global;Stack] else [Stack]
+     |}.
+
+End CHERIoTValidation.
+
 
 Require Import coqutil.Map.Interface.
 Require Import coqutil.Byte.
