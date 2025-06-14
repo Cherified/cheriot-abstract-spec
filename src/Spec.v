@@ -8,7 +8,7 @@ Module Perm.
   | Exec
   | System
   | Load
-  | Store
+  (* Store is not needed as StRegions give a granular way to state this *)
   | Cap
   | Sealing
   | Unsealing.
@@ -34,48 +34,116 @@ Section Machine.
   Variable Key: Type.
 
   Record Cap := {
+      capThisRegion: Region; (* The provenant region from which this cap was derived (SL in CHERIoT) *)
+      capSentry: Sentry;
       capSealed: option Key; (* Whether a cap is sealed, and the sealing key *)
       capPerms: list Perm.t;
-      capThisRegion: Region; (* The provenant region from which this cap was derived *)
-      capStRegions: list Region; (* The regions where this cap can be stored *)
-      capSentry: Sentry;
+      capStRegions: list Region; (* The regions where this cap can be stored (G and not G in CHERIoT) *)
       capSealingKeys: list Key; (* List of sealing keys owned by this cap *)
       capUnsealingKeys: list Key; (* List of unsealing keys owned by this cap *)
       capAddrs: list Addr; (* List of addresses representing this cap's bounds *)
-      capTransKeepPerms: list Perm.t; (* Permissions to be the only ones kept on load using this cap *)
-      capTransKeepStRegions: list Region (* Regions-where-this-cap-can-be-store to be the only ones kept
-                                            on load using this cap *)
+      capKeepPerms: list Perm.t; (* Permissions to be the only ones kept when loading using this cap *)
+      capKeepStRegions: list Region (* Regions-where-this-cap-can-be-stored to be the only ones kept
+                                       when loading using this cap *)
     }.
-
-  (* When a cap y is loaded using a cap x, then the transitiveRm* of x comes into play *)
-  Record fixLoadedCap (x: Cap) (y: Cap) (z: Cap) : Prop := {
-      sealedEq: z.(capSealed) = y.(capSealed);
-      capPermsEq: forall p, In p z.(capPerms) -> (In p x.(capTransKeepPerms) /\ In p y.(capPerms));
-      capThisRegionEq: z.(capThisRegion) = y.(capThisRegion);
-      capStRegionsEq: forall r, In r z.(capStRegions) -> (In r x.(capStRegions) /\ In r y.(capStRegions));
-      capSentryEq: z.(capSentry) = y.(capSentry);
-      capSealingKeysEq: z.(capSealingKeys) = y.(capSealingKeys);
-      capUnsealingKeysEq: z.(capUnsealingKeys) = y.(capUnsealingKeys);
-      capAddrsEq: z.(capAddrs) = y.(capAddrs);
-      capTransKeepPermsRel: forall p, In p z.(capTransKeepPerms) ->
-                                      (In p x.(capTransKeepPerms) /\ In p y.(capTransKeepPerms));
-      capTransKeepStRegionsRel: forall r, In r z.(capTransKeepStRegions) ->
-                                          (In r x.(capTransKeepStRegions) /\ In r y.(capTransKeepStRegions)) }.
 
   Variable Memory: Addr -> (Value * list Cap).
 
-  (* Transitively reachable cap with permissions removed according to transitive properties *)
-  Inductive TransCapCap: Cap -> Cap -> Prop :=
-  | Refl (c: Cap): TransCapCap c c
-  | Step (c: Cap) (prev: Cap) (trans: TransCapCap c prev)
-      (next: Cap) (inBounds: exists a, In a prev.(capAddrs) /\ In next (snd (Memory a)))
-      (fixedNext: Cap) (correct: fixLoadedCap prev next fixedNext):
-    TransCapCap c next.
+  Section CapStep.
+    Variable y z: Cap.
 
-  (* Transitively reachable addr listed with permissions (using the previous relation on Cap x Cap) *)
-  Inductive TransCapAddr: Cap -> Addr -> list Perm.t -> Prop :=
-  | HasAddr (c1 c2: Cap) (tr: TransCapCap c1 c2) (a: Addr) (ina: In a c2.(capAddrs))
-      perms (permsEq: perms = c2.(capPerms)): TransCapAddr c1 a perms.
+    Record AlwaysEqs : Prop := {
+        restrictThisRegionEq: z.(capThisRegion) = y.(capThisRegion);
+        restrictSentryEq: z.(capSentry) = y.(capSentry) }.
+
+    Record RestrictEqs : Prop := {
+        restrictAlwaysEqs: AlwaysEqs;
+        restrictSealedEq: z.(capSealed) = y.(capSealed) }.
+
+    Record RestrictUnsealed : Prop := {
+        restrictUnsealedEqs: RestrictEqs;
+        restrictUnsealed: z.(capSealed) = None;
+        restrictUnsealedPermsSubset: forall p, In p z.(capPerms) -> In p y.(capPerms);
+        restrictUnsealedStRegionsSubset: forall r, In r z.(capStRegions) -> In r y.(capStRegions);
+        restrictUnsealedSealingKeysSubset: forall k, In k z.(capSealingKeys) -> In k y.(capSealingKeys);
+        restrictUnsealedUnsealingKeysSubset: forall k, In k z.(capUnsealingKeys) = In k y.(capUnsealingKeys);
+        restrictUnsealedAddrsSubset: forall a, In a z.(capAddrs) -> In a y.(capAddrs);
+        restrictUnsealedKeepPermsSubset: forall p, In p z.(capKeepPerms) -> In p y.(capKeepPerms);
+        restrictUnsealedKeepStRegionsSubset: forall p, In p z.(capKeepStRegions) -> In p y.(capKeepStRegions) }.
+
+    Record RestrictSealed : Prop := {
+        restrictSealedEqs: RestrictEqs;
+        restrictSealed: exists k, z.(capSealed) = Some k;
+        restrictSealedPermsEq: z.(capPerms) = y.(capPerms);
+        (* The following seems to be a quirk of CHERIoT,
+           maybe make it equal in CHERIoT ISA if there's no use case for this behavio
+           and merge with RestrictUnsealed? *)
+        restrictSealedStRegionsSubset: forall r, In r z.(capStRegions) -> In r y.(capStRegions);
+        restrictSealedSealingKeysEq: z.(capSealingKeys) = y.(capSealingKeys);
+        restrictSealedUnsealingKeysSubset: z.(capUnsealingKeys) = y.(capUnsealingKeys);
+        restrictSealedAddrsEq: z.(capAddrs) = y.(capAddrs);
+        restrictSealedKeepPermsSubset: z.(capKeepPerms) = y.(capKeepPerms);
+        restrictSealedKeepStRegionsSubset: z.(capKeepStRegions) = y.(capKeepStRegions) }.
+
+    Variable x: Cap.
+    (* When a cap y is loaded using a cap x, then the attentuation of x comes into play to create z *)
+
+    Record NonRestrictEqs : Prop := {
+        nonRestrictAlwaysEqs: AlwaysEqs;
+        nonRestrictAuthUnsealed: x.(capSealed) = None;
+        nonRestrictSealingKeysEq: z.(capSealingKeys) = y.(capSealingKeys);
+        nonRestrictUnsealingKeysEq: z.(capUnsealingKeys) = y.(capUnsealingKeys);
+        nonRestrictAddrsEq: z.(capAddrs) = y.(capAddrs) }.
+
+    Record LoadCap : Prop := {
+        loadNonRestrictEqs: NonRestrictEqs;
+        loadAuthPerm: In Perm.Load x.(capPerms) /\ In Perm.Cap x.(capPerms);
+        loadFromAuth: exists a, In a x.(capAddrs) /\ In y (snd (Memory a));
+        loadSealedEq: z.(capSealed) = y.(capSealed);
+        loadAttenuatePerms: forall p, In p z.(capPerms) -> (In p x.(capKeepPerms) /\ In p y.(capPerms));
+        loadAttenuateStRegions: forall r, In r z.(capStRegions) ->
+                                          (In r x.(capKeepStRegions) /\ In r y.(capStRegions));
+        loadAttenuateKeepPerms: forall p, In p z.(capKeepPerms) ->
+                                          (In p x.(capKeepPerms) /\ In p y.(capKeepPerms));
+        loadAttenuateKeepStRegions: forall r, In r z.(capKeepStRegions) ->
+                                              (In r x.(capKeepStRegions) /\
+                                                 In r y.(capKeepStRegions)) }.
+
+    Record SealUnsealEqs : Prop := {
+        sealUnsealNonRestrictEqs: NonRestrictEqs;
+        sealUnsealPermsEq: z.(capPerms) = y.(capPerms);
+        sealUnsealStRegionsEq: z.(capStRegions) = y.(capStRegions);
+        sealUnsealKeepPermsEq: z.(capKeepPerms) = y.(capKeepPerms);
+        sealUnsealKeepStRegionsEq: z.(capKeepStRegions) = y.(capKeepStRegions) }.
+
+    (* Cap z is the sealed version of cap y using a key in x *)
+    Record Seal : Prop := {
+        sealOrigUnsealed: y.(capSealed) = None;
+        sealNewSealed: exists k, In k x.(capSealingKeys) /\ z.(capSealed) = Some k }.
+
+    Record Unseal : Prop := {
+        unsealOrigSealed: exists k, In k x.(capUnsealingKeys) /\ y.(capSealed) = Some k ;
+        unsealNewUnsealed: z.(capSealed) = None }.
+  End CapStep.
+
+  Section Transitivity.
+    Variable origSet: list Cap.
+
+    (* Transitively reachable cap with permissions removed according to transitive properties *)
+    Inductive ReachableCap: Cap -> Prop :=
+    | Refl (c: Cap) (inPf: In c origSet) : ReachableCap c
+    | StepRestrictUnsealed y (yPf: ReachableCap y) z (yz: RestrictUnsealed y z) : ReachableCap z
+    | StepRestrictSealed y (yPf: ReachableCap y) z (yz: RestrictSealed y z): ReachableCap z
+    | StepLoadCap x (xPf: ReachableCap x) y z (xyz: LoadCap x y z): ReachableCap z
+    | StepSeal x (xPf: ReachableCap x) y z (xyz: Seal x y z): ReachableCap z
+    | StepUnseal x (xPf: ReachableCap x) y z (xyz: Unseal x y z): ReachableCap z.
+
+    (* Transitively reachable addr listed with permissions and stRegions *)
+    Inductive ReachableAddr: Addr -> list Perm.t -> list Region -> Prop :=
+    | HasAddr c (cPf: ReachableCap c) a (ina: In a c.(capAddrs)) (notSealed: c.(capSealed) = None)
+        perms (permsEq: perms = c.(capPerms)) stRegions (stRegionsEq: stRegions = c.(capStRegions))
+      : ReachableAddr a perms stRegions.
+  End Transitivity.
 End Machine.
 
 Require Import coqutil.Map.Interface.
