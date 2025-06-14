@@ -62,7 +62,6 @@ Section Machine.
 
     Record RestrictUnsealed : Prop := {
         restrictUnsealedEqs: RestrictEqs;
-        restrictUnsealed: z.(capSealed) = None;
         restrictUnsealedPermsSubset: forall p, In p z.(capPerms) -> In p y.(capPerms);
         restrictUnsealedStRegionsSubset: forall r, In r z.(capStRegions) -> In r y.(capStRegions);
         restrictUnsealedSealingKeysSubset: forall k, In k z.(capSealingKeys) -> In k y.(capSealingKeys);
@@ -73,11 +72,17 @@ Section Machine.
 
     Record RestrictSealed : Prop := {
         restrictSealedEqs: RestrictEqs;
-        restrictSealed: exists k, z.(capSealed) = Some k;
         restrictSealedPermsEq: z.(capPerms) = y.(capPerms);
         (* The following seems to be a quirk of CHERIoT,
            maybe make it equal in CHERIoT ISA if there's no use case for this behavio
-           and merge with RestrictUnsealed? *)
+           and merge with RestrictUnsealed?
+           Here's a concrete example why this is bad:
+             I have objects in Global and a set of pointers to these objects also in Global.
+             I seal an element of that set (which points to an object) and send to a client.
+             Client gets a Global sealed cap, makes it Stack and sends it back to me after finishing processing.
+             I unseal it, but I lost my ability to store it back into that set in Global.
+             Instead, I need to rederive the Global for the unsealed cap to be able to store into the Global set.
+         *)
         restrictSealedStRegionsSubset: forall r, In r z.(capStRegions) -> In r y.(capStRegions);
         restrictSealedSealingKeysEq: z.(capSealingKeys) = y.(capSealingKeys);
         restrictSealedUnsealingKeysSubset: z.(capUnsealingKeys) = y.(capUnsealingKeys);
@@ -86,7 +91,7 @@ Section Machine.
         restrictSealedKeepStRegionsSubset: z.(capKeepStRegions) = y.(capKeepStRegions) }.
 
     Definition Restrict : Prop :=
-      match z.(capSealed) with
+      match y.(capSealed) with
       | None => RestrictUnsealed
       | Some k => RestrictSealed
       end.
@@ -119,6 +124,8 @@ Section Machine.
                             | None => AttenuatePerms
                             | Some k => NonAttenuatePerms
                             end;
+        (* This is also a quirk of CHERIoT as in the case of restricting caps.
+           Ideally, no attenuation (implicit or explicit) must happen under a seal *)
         loadAttenuateStRegions: forall r, In r z.(capStRegions) ->
                                           (In r x.(capKeepStRegions) /\ In r y.(capStRegions));
         loadKeepStRegions: match y.(capSealed) with
