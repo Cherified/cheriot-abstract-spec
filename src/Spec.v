@@ -142,10 +142,12 @@ Section Machine.
 
     (* Cap z is the sealed version of cap y using a key in x *)
     Record Seal : Prop := {
+        sealEqs: SealUnsealEqs;
         sealOrigUnsealed: y.(capSealed) = None;
         sealNewSealed: exists k, In k x.(capSealingKeys) /\ z.(capSealed) = Some k }.
 
     Record Unseal : Prop := {
+        unsealEqs: SealUnsealEqs;
         unsealOrigSealed: exists k, In k x.(capUnsealingKeys) /\ y.(capSealed) = Some k ;
         unsealNewUnsealed: z.(capSealed) = None }.
   End CapStep.
