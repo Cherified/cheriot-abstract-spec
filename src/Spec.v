@@ -8,7 +8,7 @@ Module Perm.
   | Exec
   | System
   | Load
-  (* Store is not needed as StRegions give a granular way to state this *)
+  | Store (* Needed as regions only control storage of Caps *)
   | Cap
   | Sealing
   | Unsealing.
@@ -27,6 +27,8 @@ Inductive Sentry :=
 | CallInheritInterrupt
 | RetEnableInterrupt
 | RetDisableInterrupt.
+
+Definition EqSet [A] (l1 l2: list A) := forall x, In x l1 <-> In x l2.
 
 Section Machine.
   Variable Value: Type.
@@ -72,7 +74,7 @@ Section Machine.
 
     Record RestrictSealed : Prop := {
         restrictSealedEqs: RestrictEqs;
-        restrictSealedPermsEq: z.(capPerms) = y.(capPerms);
+        restrictSealedPermsEq: EqSet z.(capPerms) y.(capPerms);
         (* The following seems to be a quirk of CHERIoT,
            maybe make it equal in CHERIoT ISA if there's no use case for this behavio
            and merge with RestrictUnsealed?
@@ -84,11 +86,11 @@ Section Machine.
              Instead, I need to rederive the Global for the unsealed cap to be able to store into the Global set.
          *)
         restrictSealedStRegionsSubset: forall r, In r z.(capStRegions) -> In r y.(capStRegions);
-        restrictSealedSealingKeysEq: z.(capSealingKeys) = y.(capSealingKeys);
-        restrictSealedUnsealingKeysSubset: z.(capUnsealingKeys) = y.(capUnsealingKeys);
-        restrictSealedAddrsEq: z.(capAddrs) = y.(capAddrs);
-        restrictSealedKeepPermsSubset: z.(capKeepPerms) = y.(capKeepPerms);
-        restrictSealedKeepStRegionsSubset: z.(capKeepStRegions) = y.(capKeepStRegions) }.
+        restrictSealedSealingKeysEq: EqSet z.(capSealingKeys) y.(capSealingKeys);
+        restrictSealedUnsealingKeysSubset: EqSet z.(capUnsealingKeys) y.(capUnsealingKeys);
+        restrictSealedAddrsEq: EqSet z.(capAddrs) y.(capAddrs);
+        restrictSealedKeepPermsSubset: EqSet z.(capKeepPerms) y.(capKeepPerms);
+        restrictSealedKeepStRegionsSubset: EqSet z.(capKeepStRegions) y.(capKeepStRegions) }.
 
     Definition Restrict : Prop :=
       match y.(capSealed) with
@@ -102,9 +104,9 @@ Section Machine.
     Record NonRestrictEqs : Prop := {
         nonRestrictAlwaysEqs: AlwaysEqs;
         nonRestrictAuthUnsealed: x.(capSealed) = None;
-        nonRestrictSealingKeysEq: z.(capSealingKeys) = y.(capSealingKeys);
-        nonRestrictUnsealingKeysEq: z.(capUnsealingKeys) = y.(capUnsealingKeys);
-        nonRestrictAddrsEq: z.(capAddrs) = y.(capAddrs) }.
+        nonRestrictSealingKeysEq: EqSet z.(capSealingKeys) y.(capSealingKeys);
+        nonRestrictUnsealingKeysEq: EqSet z.(capUnsealingKeys) y.(capUnsealingKeys);
+        nonRestrictAddrsEq: EqSet z.(capAddrs) y.(capAddrs) }.
 
     Record AttenuatePerms : Prop := {
         attenuatePerms: forall p, In p z.(capPerms) -> (In p x.(capKeepPerms) /\ In p y.(capPerms));
@@ -112,8 +114,8 @@ Section Machine.
                                       (In p x.(capKeepPerms) /\ In p y.(capKeepPerms)) }.
 
     Record NonAttenuatePerms : Prop := {
-        nonAttenuatePerms: z.(capPerms) = y.(capPerms);
-        nonAttenuateKeepPerms: z.(capKeepPerms) = y.(capKeepPerms) }.
+        nonAttenuatePerms: EqSet z.(capPerms) y.(capPerms);
+        nonAttenuateKeepPerms: EqSet z.(capKeepPerms) y.(capKeepPerms) }.
 
     Record LoadCap : Prop := {
         loadNonRestrictEqs: NonRestrictEqs;
@@ -131,14 +133,14 @@ Section Machine.
         loadKeepStRegions: match y.(capSealed) with
                            | None => forall r, In r z.(capKeepStRegions) ->
                                                (In r x.(capKeepStRegions) /\ In r y.(capKeepStRegions))
-                           | Some k => z.(capKeepStRegions) = y.(capKeepStRegions)
+                           | Some k => EqSet z.(capKeepStRegions) y.(capKeepStRegions)
                            end}.
 
     Record SealUnsealEqs : Prop := {
         sealUnsealNonRestrictEqs: NonRestrictEqs;
         sealUnsealNonAttenuatePerms: NonAttenuatePerms;
-        sealUnsealStRegionsEq: z.(capStRegions) = y.(capStRegions);
-        sealUnsealKeepStRegionsEq: z.(capKeepStRegions) = y.(capKeepStRegions) }.
+        sealUnsealStRegionsEq: EqSet z.(capStRegions) y.(capStRegions);
+        sealUnsealKeepStRegionsEq: EqSet z.(capKeepStRegions) y.(capKeepStRegions) }.
 
     (* Cap z is the sealed version of cap y using a key in x *)
     Record Seal : Prop := {
@@ -313,12 +315,13 @@ Module CHERIoTValidation.
                     | _ => Some c.(otype)
                     end;
        capPerms := filter (fun p => match p with
-                                 | Perm.Exec => d.(EX)
-                                 | Perm.System => d.(SR)
-                                 | Perm.Load => d.(LD)
-                                 | Perm.Cap => d.(MC)
-                                 | Perm.Sealing => d.(SE)
-                                 | Perm.Unsealing => d.(US)
+                                    | Perm.Exec => d.(EX)
+                                    | Perm.System => d.(SR)
+                                    | Perm.Load => d.(LD)
+                                    | Perm.Store => d.(SD)
+                                    | Perm.Cap => d.(MC)
+                                    | Perm.Sealing => d.(SE)
+                                    | Perm.Unsealing => d.(US)
                                  end)
                      [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
        capStRegions := if d.(GL) then [Global;Stack] else [Stack];
@@ -329,7 +332,7 @@ Module CHERIoTValidation.
                                  | Perm.Exec => true
                                  | Perm.System => true
                                  | Perm.Load => true
-                                 (* Perm.Store => d.(LM) *) (* TODO! LM clears SD *)
+                                 | Perm.Store => d.(LM)
                                  | Perm.Cap => true
                                  | Perm.Sealing => true
                                  | Perm.Unsealing => true
@@ -339,7 +342,6 @@ Module CHERIoTValidation.
      |}.
 
 End CHERIoTValidation.
-
 
 Require Import coqutil.Map.Interface.
 Require Import coqutil.Byte.
