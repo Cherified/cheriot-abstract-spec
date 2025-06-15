@@ -15,6 +15,12 @@ Module Perm.
 End Perm.
 
 (* A cap X can be stored in a cap Y only if X can be stored in a Label that Y provides *)
+(* An example where restricting the label of what can be stored in a cap is useful:
+   If a callee fills a cap supplied by the caller, then the callee should not store a cap to its stack into it.
+   In CHERIoT, a pointer to its stack is always !GL and can only be stored in SL.
+   So to prevent the pointer to the callee's stack from getting stored, the cap supplied by the caller should be !SL
+   eventhough the underlying pointer is really in the stack.
+ *)
 Inductive Label :=
 | Local
 | NonLocal.
@@ -54,6 +60,8 @@ Section Machine.
       capUnsealingKeys: list Key; (* List of unsealing keys owned by this cap *)
       capAddrs: list Addr; (* List of addresses representing this cap's bounds *)
       capKeepPerms: list Perm.t; (* Permissions to be the only ones kept when loading using this cap *)
+      capKeepCanStore: list Label; (* Labels-of-caps-that-this-cap-can-store to be the only ones kept
+                                      when loading using this cap *)
       capKeepCanBeStored: list Label (* Labels-of-caps-where-this-cap-can-be-stored to be the only ones kept
                                         when loading using this cap *)
     }.
@@ -76,6 +84,7 @@ Section Machine.
         restrictUnsealedUnsealingKeysSubset: forall k, In k z.(capUnsealingKeys) -> In k y.(capUnsealingKeys);
         restrictUnsealedAddrsSubset: forall a, In a z.(capAddrs) -> In a y.(capAddrs);
         restrictUnsealedKeepPermsSubset: forall p, In p z.(capKeepPerms) -> In p y.(capKeepPerms);
+        restrictUnsealedKeepCanStoreSubset: forall p, In p z.(capKeepCanStore) -> In p y.(capKeepCanStore);
         restrictUnsealedKeepCanBeStoredSubset: forall p, In p z.(capKeepCanBeStored) -> In p y.(capKeepCanBeStored) }.
 
     Record RestrictSealed : Prop := {
@@ -97,6 +106,7 @@ Section Machine.
         restrictSealedUnsealingKeysSubset: EqSet z.(capUnsealingKeys) y.(capUnsealingKeys);
         restrictSealedAddrsEq: EqSet z.(capAddrs) y.(capAddrs);
         restrictSealedKeepPermsSubset: EqSet z.(capKeepPerms) y.(capKeepPerms);
+        restrictSealedKeepCanStoreSubset: EqSet z.(capKeepCanStore) y.(capKeepCanStore);
         restrictSealedKeepCanBeStoredSubset: EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored) }.
 
     Definition Restrict : Prop :=
@@ -125,6 +135,15 @@ Section Machine.
         nonAttenuatePerms: EqSet z.(capPerms) y.(capPerms);
         nonAttenuateKeepPerms: EqSet z.(capKeepPerms) y.(capKeepPerms) }.
 
+    Record AttenuateCanStore : Prop := {
+        attenuateCanStore: forall p, In p z.(capCanStore) -> (In p x.(capKeepCanStore) /\ In p y.(capCanStore));
+        attenuateKeepCanStore: forall p, In p z.(capKeepCanStore) ->
+                                         (In p x.(capKeepCanStore) /\ In p y.(capKeepCanStore)) }.
+
+    Record NonAttenuateCanStore : Prop := {
+        nonAttenuateCanStore: EqSet z.(capCanStore) y.(capCanStore);
+        nonAttenuateKeepCanStore: EqSet z.(capKeepCanStore) y.(capKeepCanStore) }.
+
     Record LoadCap : Prop := {
         loadNonRestrictEqs: NonRestrictEqs;
         loadAuthPerm: In Perm.Load x.(capPerms) /\ In Perm.Cap x.(capPerms);
@@ -134,6 +153,10 @@ Section Machine.
                             | None => AttenuatePerms
                             | Some k => NonAttenuatePerms
                             end;
+        loadAttenuateCanStore: match y.(capSealed) with
+                               | None => AttenuateCanStore
+                               | Some k => NonAttenuateCanStore
+                               end;
         (* This is also a quirk of CHERIoT as in the case of restricting caps.
            Ideally, no attenuation (implicit or explicit) must happen under a seal *)
         loadAttenuateCanBeStored: forall r, In r z.(capCanBeStored) ->
@@ -147,6 +170,7 @@ Section Machine.
     Record SealUnsealEqs : Prop := {
         sealUnsealNonRestrictEqs: NonRestrictEqs;
         sealUnsealNonAttenuatePerms: NonAttenuatePerms;
+        sealUnsealNonAttenuateCanStore: NonAttenuateCanStore;
         sealUnsealCanBeStoredEq: EqSet z.(capCanBeStored) y.(capCanBeStored);
         sealUnsealKeepCanBeStoredEq: EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored) }.
 
@@ -345,6 +369,7 @@ Module CHERIoTValidation.
                                  | Perm.Unsealing => true
                                  end)
                          [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
+       capKeepCanStore := [Local;NonLocal];
        capKeepCanBeStored := if d.(LG) then [Local;NonLocal] else [Local]
      |}.
 
