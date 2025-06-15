@@ -1,3 +1,348 @@
+From Stdlib Require Import List.
+
+Set Primitive Projections.
+
+(* Represents basic permissions *)
+Module Perm.
+  Inductive t :=
+  | Exec
+  | System
+  | Load
+  | Store (* Needed as regions only control storage of Caps *)
+  | Cap
+  | Sealing
+  | Unsealing.
+End Perm.
+
+(* Represents disjoint semantics regions of memory *)
+Inductive Region :=
+| Stack
+| Global.
+
+(* Represents Call and Return sentries *)
+Inductive Sentry :=
+| UnsealedJump
+| CallEnableInterrupt
+| CallDisableInterrupt
+| CallInheritInterrupt
+| RetEnableInterrupt
+| RetDisableInterrupt.
+
+Definition EqSet [A] (l1 l2: list A) := forall x, In x l1 <-> In x l2.
+
+Section Machine.
+  Variable Value: Type.
+  Variable Addr: Type.
+  Variable Key: Type.
+
+  Record Cap := {
+      capThisRegion: Region; (* The provenant region from which this cap was derived (SL in CHERIoT) *)
+      capSentry: Sentry;
+      capSealed: option Key; (* Whether a cap is sealed, and the sealing key *)
+      capPerms: list Perm.t;
+      capStRegions: list Region; (* The regions where this cap can be stored (G and not G in CHERIoT) *)
+      capSealingKeys: list Key; (* List of sealing keys owned by this cap *)
+      capUnsealingKeys: list Key; (* List of unsealing keys owned by this cap *)
+      capAddrs: list Addr; (* List of addresses representing this cap's bounds *)
+      capKeepPerms: list Perm.t; (* Permissions to be the only ones kept when loading using this cap *)
+      capKeepStRegions: list Region (* Regions-where-this-cap-can-be-stored to be the only ones kept
+                                       when loading using this cap *)
+    }.
+
+  Variable Memory: Addr -> (Value * list Cap).
+
+  Section CapStep.
+    Variable y z: Cap.
+
+    Record AlwaysEqs : Prop := {
+        restrictThisRegionEq: z.(capThisRegion) = y.(capThisRegion);
+        restrictSentryEq: z.(capSentry) = y.(capSentry) }.
+
+    Record RestrictEqs : Prop := {
+        restrictAlwaysEqs: AlwaysEqs;
+        restrictSealedEq: z.(capSealed) = y.(capSealed) }.
+
+    Record RestrictUnsealed : Prop := {
+        restrictUnsealedEqs: RestrictEqs;
+        restrictUnsealedPermsSubset: forall p, In p z.(capPerms) -> In p y.(capPerms);
+        restrictUnsealedStRegionsSubset: forall r, In r z.(capStRegions) -> In r y.(capStRegions);
+        restrictUnsealedSealingKeysSubset: forall k, In k z.(capSealingKeys) -> In k y.(capSealingKeys);
+        restrictUnsealedUnsealingKeysSubset: forall k, In k z.(capUnsealingKeys) -> In k y.(capUnsealingKeys);
+        restrictUnsealedAddrsSubset: forall a, In a z.(capAddrs) -> In a y.(capAddrs);
+        restrictUnsealedKeepPermsSubset: forall p, In p z.(capKeepPerms) -> In p y.(capKeepPerms);
+        restrictUnsealedKeepStRegionsSubset: forall p, In p z.(capKeepStRegions) -> In p y.(capKeepStRegions) }.
+
+    Record RestrictSealed : Prop := {
+        restrictSealedEqs: RestrictEqs;
+        restrictSealedPermsEq: EqSet z.(capPerms) y.(capPerms);
+        (* The following seems to be a quirk of CHERIoT,
+           maybe make it equal in CHERIoT ISA if there's no use case for this behavio
+           and merge with RestrictUnsealed?
+           Here's a concrete example why this is bad:
+             I have objects in Global and a set of pointers to these objects also in Global.
+             I seal an element of that set (which points to an object) and send to a client.
+             Client gets a Global sealed cap, makes it Stack and sends it back to me after finishing processing.
+             I unseal it, but I lost my ability to store it back into that set in Global.
+             Instead, I need to rederive the Global for the unsealed cap to be able to store into the Global set.
+         *)
+        restrictSealedStRegionsSubset: forall r, In r z.(capStRegions) -> In r y.(capStRegions);
+        restrictSealedSealingKeysEq: EqSet z.(capSealingKeys) y.(capSealingKeys);
+        restrictSealedUnsealingKeysSubset: EqSet z.(capUnsealingKeys) y.(capUnsealingKeys);
+        restrictSealedAddrsEq: EqSet z.(capAddrs) y.(capAddrs);
+        restrictSealedKeepPermsSubset: EqSet z.(capKeepPerms) y.(capKeepPerms);
+        restrictSealedKeepStRegionsSubset: EqSet z.(capKeepStRegions) y.(capKeepStRegions) }.
+
+    Definition Restrict : Prop :=
+      match y.(capSealed) with
+      | None => RestrictUnsealed
+      | Some k => RestrictSealed
+      end.
+
+    Variable x: Cap.
+    (* When a cap y is loaded using a cap x, then the attentuation of x comes into play to create z *)
+
+    Record NonRestrictEqs : Prop := {
+        nonRestrictAlwaysEqs: AlwaysEqs;
+        nonRestrictAuthUnsealed: x.(capSealed) = None;
+        nonRestrictSealingKeysEq: EqSet z.(capSealingKeys) y.(capSealingKeys);
+        nonRestrictUnsealingKeysEq: EqSet z.(capUnsealingKeys) y.(capUnsealingKeys);
+        nonRestrictAddrsEq: EqSet z.(capAddrs) y.(capAddrs) }.
+
+    Record AttenuatePerms : Prop := {
+        attenuatePerms: forall p, In p z.(capPerms) -> (In p x.(capKeepPerms) /\ In p y.(capPerms));
+        attenuateKeepPerms: forall p, In p z.(capKeepPerms) ->
+                                      (In p x.(capKeepPerms) /\ In p y.(capKeepPerms)) }.
+
+    Record NonAttenuatePerms : Prop := {
+        nonAttenuatePerms: EqSet z.(capPerms) y.(capPerms);
+        nonAttenuateKeepPerms: EqSet z.(capKeepPerms) y.(capKeepPerms) }.
+
+    Record LoadCap : Prop := {
+        loadNonRestrictEqs: NonRestrictEqs;
+        loadAuthPerm: In Perm.Load x.(capPerms) /\ In Perm.Cap x.(capPerms);
+        loadFromAuth: exists a, In a x.(capAddrs) /\ In y (snd (Memory a));
+        loadSealedEq: z.(capSealed) = y.(capSealed);
+        loadAttenuatePerms: match y.(capSealed) with
+                            | None => AttenuatePerms
+                            | Some k => NonAttenuatePerms
+                            end;
+        (* This is also a quirk of CHERIoT as in the case of restricting caps.
+           Ideally, no attenuation (implicit or explicit) must happen under a seal *)
+        loadAttenuateStRegions: forall r, In r z.(capStRegions) ->
+                                          (In r x.(capKeepStRegions) /\ In r y.(capStRegions));
+        loadKeepStRegions: match y.(capSealed) with
+                           | None => forall r, In r z.(capKeepStRegions) ->
+                                               (In r x.(capKeepStRegions) /\ In r y.(capKeepStRegions))
+                           | Some k => EqSet z.(capKeepStRegions) y.(capKeepStRegions)
+                           end}.
+
+    Record SealUnsealEqs : Prop := {
+        sealUnsealNonRestrictEqs: NonRestrictEqs;
+        sealUnsealNonAttenuatePerms: NonAttenuatePerms;
+        sealUnsealStRegionsEq: EqSet z.(capStRegions) y.(capStRegions);
+        sealUnsealKeepStRegionsEq: EqSet z.(capKeepStRegions) y.(capKeepStRegions) }.
+
+    (* Cap z is the sealed version of cap y using a key in x *)
+    Record Seal : Prop := {
+        sealEqs: SealUnsealEqs;
+        sealOrigUnsealed: y.(capSealed) = None;
+        sealNewSealed: exists k, In k x.(capSealingKeys) /\ z.(capSealed) = Some k }.
+
+    Record Unseal : Prop := {
+        unsealEqs: SealUnsealEqs;
+        unsealOrigSealed: exists k, In k x.(capUnsealingKeys) /\ y.(capSealed) = Some k ;
+        unsealNewUnsealed: z.(capSealed) = None }.
+  End CapStep.
+
+  Section Transitivity.
+    Variable origSet: list Cap.
+
+    (* Transitively reachable cap with permissions removed according to transitive properties *)
+    Inductive ReachableCap: Cap -> Prop :=
+    | Refl (c: Cap) (inPf: In c origSet) : ReachableCap c
+    | StepRestrict y (yPf: ReachableCap y) z (yz: Restrict y z) : ReachableCap z
+    | StepLoadCap x (xPf: ReachableCap x) y z (xyz: LoadCap x y z): ReachableCap z
+    | StepSeal x (xPf: ReachableCap x) y (yPf: ReachableCap y) z (xyz: Seal x y z): ReachableCap z
+    | StepUnseal x (xPf: ReachableCap x) y (yPf: ReachableCap y) z (xyz: Unseal x y z): ReachableCap z.
+
+    (* Transitively reachable addr listed with permissions and stRegions *)
+    Inductive ReachableAddr: Addr -> list Perm.t -> list Region -> Prop :=
+    | HasAddr c (cPf: ReachableCap c) a (ina: In a c.(capAddrs)) (notSealed: c.(capSealed) = None)
+        perms (permsEq: perms = c.(capPerms)) stRegions (stRegionsEq: stRegions = c.(capStRegions))
+      : ReachableAddr a perms stRegions.
+  End Transitivity.
+End Machine.
+
+Module CHERIoTValidation.
+  From Stdlib Require Import ZArith.
+  Import ListNotations.
+  Local Open Scope N_scope.
+  Inductive CompressedPerm :=
+  | MemCapRW (GL: bool) (SL: bool) (LM: bool) (LG: bool) (* Implicit: LD, MC, SD *)
+  | MemCapRO (GL: bool) (LM: bool) (LG: bool) (* Implicit: LD, MC *)
+  | MemCapWO (GL: bool) (* Implicit: SD, MC *)
+  | MemDataOnly (GL: bool) (LD: bool) (SD: bool) (* Implicit: None *)
+  | Executable (GL: bool) (SR: bool) (LM: bool) (LG: bool) (* Implicit: EX, LD, MC *)
+  | Sealing (GL: bool) (U0: bool) (SE: bool) (US: bool) (* Implicit: None *).
+
+  Record cheriot_cap :=
+  { reserved: bool;
+    permissions: CompressedPerm;
+    otype: N; (* < 8 *)
+    base: N;
+    top: N;
+    addr: N;
+  }.
+
+  Record Perm :=
+    {
+      EX : bool; (* PERMIT_EXECuTE *)
+      GL : bool; (* GLOBAL *)
+      LD : bool; (* PERMIT_LOAD *)
+      SD : bool; (* PERMIT_STORE *)
+      SL : bool; (* PERMIT_STORE_LOCAL_CAPABILITY *)
+      SR : bool; (* PERMIT_ACCESS_SYSTEM_REGISTERS *)
+      SE : bool; (* PERMIT_SEAL *)
+      US : bool; (* PERMIT_UNSEAL *)
+      U0 : bool; (* USER_PERM0 *)
+      LM : bool; (* PERMIT_LOAD_MUTABLE *)
+      LG : bool; (* PERMIT_LOAD_GLOBAL *)
+      MC : bool; (* PERMIT_LOAD_STORE_CAPABILITY *)
+    }.
+
+  Definition decompress_perm (p: CompressedPerm) : Perm :=
+    match p with
+    | MemCapRW gl sl lm lg =>
+        {| EX := false;
+           GL := gl;
+           LD := true;
+           SD := true;
+           SL := sl;
+           SR := false;
+           SE := false;
+           US := false;
+           U0 := false;
+           LM := lm;
+           LG := lg;
+           MC := true
+        |}
+    | MemCapRO gl lm lg =>
+        {| EX := false;
+           GL := gl;
+           LD := true;
+           SD := false;
+           SL := false;
+           SR := false;
+           SE := false;
+           US := false;
+           U0 := false;
+           LM := lm;
+           LG := lg;
+           MC := true
+        |}
+    | MemCapWO gl =>
+        {| EX := false;
+           GL := gl;
+           LD := false;
+           SD := true;
+           SL := false;
+           SR := false;
+           SE := false;
+           US := false;
+           U0 := false;
+           LM := false;
+           LG := false;
+           MC := true
+        |}
+    | MemDataOnly gl ld sd =>
+        {| EX := false;
+           GL := gl;
+           LD := ld;
+           SD := sd;
+           SL := false;
+           SR := false;
+           SE := false;
+           US := false;
+           U0 := false;
+           LM := false;
+           LG := false;
+           MC := false
+        |}
+    | Executable gl sr lm lg =>
+        {| EX := true;
+           GL := gl;
+           LD := true;
+           SD := false;
+           SL := false;
+           SR := sr;
+           SE := false;
+           US := false;
+           U0 := false;
+           LM := lm;
+           LG := lg;
+           MC := true
+        |}
+    | Sealing gl u0 se us =>
+        {| EX := false;
+           GL := gl;
+           LD := false;
+           SD := false;
+           SL := false;
+           SR := false;
+           SE := se;
+           US := us;
+           U0 := u0;
+           LM := false;
+           LG := false;
+           MC := false
+        |}
+    end.
+
+  Definition mk_abstract_cap (c: cheriot_cap) : Cap nat N :=
+    let d := decompress_perm c.(permissions) in
+    {| capThisRegion := if d.(SL) then Stack else Global;
+       capSentry := match c.(otype) with
+                    | 0 => UnsealedJump
+                    | 1 => CallInheritInterrupt
+                    | 2 => CallDisableInterrupt
+                    | 3 => CallEnableInterrupt
+                    | 4 => RetDisableInterrupt
+                    | 5 => RetEnableInterrupt
+                    | (* 6 & 7 *) _ => UnsealedJump (* TODO! capSentry ⊆ capSealed *)
+                    end;
+       capSealed := match c.(otype) with
+                    | 0 => None
+                    | _ => Some c.(otype)
+                    end;
+       capPerms := filter (fun p => match p with
+                                    | Perm.Exec => d.(EX)
+                                    | Perm.System => d.(SR)
+                                    | Perm.Load => d.(LD)
+                                    | Perm.Store => d.(SD)
+                                    | Perm.Cap => d.(MC)
+                                    | Perm.Sealing => d.(SE)
+                                    | Perm.Unsealing => d.(US)
+                                 end)
+                     [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
+       capStRegions := if d.(GL) then [Global;Stack] else [Stack];
+       capSealingKeys := [c.(addr)];
+       capUnsealingKeys := [c.(addr)];
+       capAddrs := seq (N.to_nat c.(base)) (N.to_nat (c.(top) - c.(base)));
+       capKeepPerms := filter (fun p => match p with
+                                 | Perm.Exec => true
+                                 | Perm.System => true
+                                 | Perm.Load => true
+                                 | Perm.Store => d.(LM)
+                                 | Perm.Cap => true
+                                 | Perm.Sealing => true
+                                 | Perm.Unsealing => true
+                                 end)
+                         [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
+       capKeepStRegions := if d.(LG) then [Global;Stack] else [Stack]
+     |}.
+
+End CHERIoTValidation.
+
 Require Import coqutil.Map.Interface.
 Require Import coqutil.Byte.
 Require Import coqutil.Word.Interface.
