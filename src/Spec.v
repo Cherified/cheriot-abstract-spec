@@ -28,7 +28,16 @@ Inductive Sentry :=
 | RetEnableInterrupt
 | RetDisableInterrupt.
 
-Definition EqSet [A] (l1 l2: list A) := forall x, In x l1 <-> In x l2.
+Section EqSet.
+  Context [A: Type].
+  Variable l1 l2: list A.
+  Definition EqSet := forall x, In x l1 <-> In x l2.
+
+  Theorem Eq_imp_EqSet: l1 = l2 -> EqSet.
+  Proof.
+    unfold EqSet; intros; subst; tauto.
+  Qed.
+End EqSet.
 
 Section Machine.
   Variable Value: Type.
