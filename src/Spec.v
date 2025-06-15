@@ -14,10 +14,10 @@ Module Perm.
   | Unsealing.
 End Perm.
 
-(* Represents disjoint semantics regions of memory *)
-Inductive Region :=
-| Stack
-| Global.
+(* A cap X can be stored in a cap Y only if X can be stored in a Label that Y provides *)
+Inductive Label :=
+| Local
+| NonLocal.
 
 (* Represents Call and Return sentries *)
 Inductive Sentry :=
@@ -45,17 +45,17 @@ Section Machine.
   Variable Key: Type.
 
   Record Cap := {
-      capThisRegion: Region; (* The provenant region from which this cap was derived (SL in CHERIoT) *)
       capSentry: Sentry;
       capSealed: option Key; (* Whether a cap is sealed, and the sealing key *)
       capPerms: list Perm.t;
-      capStRegions: list Region; (* The regions where this cap can be stored (G and not G in CHERIoT) *)
+      capCanStore: list Label; (* The labels of caps that this cap can store (SL in CHERIoT) *)
+      capCanBeStored: list Label; (* The labels of caps where this cap can be stored in (GL and not GL in CHERIoT) *)
       capSealingKeys: list Key; (* List of sealing keys owned by this cap *)
       capUnsealingKeys: list Key; (* List of unsealing keys owned by this cap *)
       capAddrs: list Addr; (* List of addresses representing this cap's bounds *)
       capKeepPerms: list Perm.t; (* Permissions to be the only ones kept when loading using this cap *)
-      capKeepStRegions: list Region (* Regions-where-this-cap-can-be-stored to be the only ones kept
-                                       when loading using this cap *)
+      capKeepCanBeStored: list Label (* Labels-of-caps-where-this-cap-can-be-stored to be the only ones kept
+                                        when loading using this cap *)
     }.
 
   Variable Memory: Addr -> (Value * list Cap).
@@ -63,29 +63,27 @@ Section Machine.
   Section CapStep.
     Variable y z: Cap.
 
-    Record AlwaysEqs : Prop := {
-        restrictThisRegionEq: z.(capThisRegion) = y.(capThisRegion);
-        restrictSentryEq: z.(capSentry) = y.(capSentry) }.
-
     Record RestrictEqs : Prop := {
-        restrictAlwaysEqs: AlwaysEqs;
+        restrictSentryEq: z.(capSentry) = y.(capSentry);
         restrictSealedEq: z.(capSealed) = y.(capSealed) }.
 
     Record RestrictUnsealed : Prop := {
         restrictUnsealedEqs: RestrictEqs;
         restrictUnsealedPermsSubset: forall p, In p z.(capPerms) -> In p y.(capPerms);
-        restrictUnsealedStRegionsSubset: forall r, In r z.(capStRegions) -> In r y.(capStRegions);
+        restrictUnsealedCanStoreSubset: forall r, In r z.(capCanStore) -> In r y.(capCanStore);
+        restrictUnsealedCanBeStoredSubset: forall r, In r z.(capCanBeStored) -> In r y.(capCanBeStored);
         restrictUnsealedSealingKeysSubset: forall k, In k z.(capSealingKeys) -> In k y.(capSealingKeys);
         restrictUnsealedUnsealingKeysSubset: forall k, In k z.(capUnsealingKeys) -> In k y.(capUnsealingKeys);
         restrictUnsealedAddrsSubset: forall a, In a z.(capAddrs) -> In a y.(capAddrs);
         restrictUnsealedKeepPermsSubset: forall p, In p z.(capKeepPerms) -> In p y.(capKeepPerms);
-        restrictUnsealedKeepStRegionsSubset: forall p, In p z.(capKeepStRegions) -> In p y.(capKeepStRegions) }.
+        restrictUnsealedKeepCanBeStoredSubset: forall p, In p z.(capKeepCanBeStored) -> In p y.(capKeepCanBeStored) }.
 
     Record RestrictSealed : Prop := {
         restrictSealedEqs: RestrictEqs;
         restrictSealedPermsEq: EqSet z.(capPerms) y.(capPerms);
+        restrictSealedCanStore: forall r, In r z.(capCanStore) -> In r y.(capCanStore);
         (* The following seems to be a quirk of CHERIoT,
-           maybe make it equal in CHERIoT ISA if there's no use case for this behavio
+           maybe make it equal in CHERIoT ISA if there's no use case for this behavior
            and merge with RestrictUnsealed?
            Here's a concrete example why this is bad:
              I have objects in Global and a set of pointers to these objects also in Global.
@@ -94,12 +92,12 @@ Section Machine.
              I unseal it, but I lost my ability to store it back into that set in Global.
              Instead, I need to rederive the Global for the unsealed cap to be able to store into the Global set.
          *)
-        restrictSealedStRegionsSubset: forall r, In r z.(capStRegions) -> In r y.(capStRegions);
+        restrictSealedCanBeStoredSubset: forall r, In r z.(capCanBeStored) -> In r y.(capCanBeStored);
         restrictSealedSealingKeysEq: EqSet z.(capSealingKeys) y.(capSealingKeys);
         restrictSealedUnsealingKeysSubset: EqSet z.(capUnsealingKeys) y.(capUnsealingKeys);
         restrictSealedAddrsEq: EqSet z.(capAddrs) y.(capAddrs);
         restrictSealedKeepPermsSubset: EqSet z.(capKeepPerms) y.(capKeepPerms);
-        restrictSealedKeepStRegionsSubset: EqSet z.(capKeepStRegions) y.(capKeepStRegions) }.
+        restrictSealedKeepCanBeStoredSubset: EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored) }.
 
     Definition Restrict : Prop :=
       match y.(capSealed) with
@@ -111,7 +109,8 @@ Section Machine.
     (* When a cap y is loaded using a cap x, then the attentuation of x comes into play to create z *)
 
     Record NonRestrictEqs : Prop := {
-        nonRestrictAlwaysEqs: AlwaysEqs;
+        nonRestrictCanStoreEq: z.(capCanStore) = y.(capCanStore);
+        nonRestrictSentryEq: z.(capSentry) = y.(capSentry);
         nonRestrictAuthUnsealed: x.(capSealed) = None;
         nonRestrictSealingKeysEq: EqSet z.(capSealingKeys) y.(capSealingKeys);
         nonRestrictUnsealingKeysEq: EqSet z.(capUnsealingKeys) y.(capUnsealingKeys);
@@ -137,19 +136,19 @@ Section Machine.
                             end;
         (* This is also a quirk of CHERIoT as in the case of restricting caps.
            Ideally, no attenuation (implicit or explicit) must happen under a seal *)
-        loadAttenuateStRegions: forall r, In r z.(capStRegions) ->
-                                          (In r x.(capKeepStRegions) /\ In r y.(capStRegions));
-        loadKeepStRegions: match y.(capSealed) with
-                           | None => forall r, In r z.(capKeepStRegions) ->
-                                               (In r x.(capKeepStRegions) /\ In r y.(capKeepStRegions))
-                           | Some k => EqSet z.(capKeepStRegions) y.(capKeepStRegions)
-                           end}.
+        loadAttenuateCanBeStored: forall r, In r z.(capCanBeStored) ->
+                                            (In r x.(capKeepCanBeStored) /\ In r y.(capCanBeStored));
+        loadKeepCanBeStored: match y.(capSealed) with
+                             | None => forall r, In r z.(capKeepCanBeStored) ->
+                                                 (In r x.(capKeepCanBeStored) /\ In r y.(capKeepCanBeStored))
+                             | Some k => EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored)
+                             end}.
 
     Record SealUnsealEqs : Prop := {
         sealUnsealNonRestrictEqs: NonRestrictEqs;
         sealUnsealNonAttenuatePerms: NonAttenuatePerms;
-        sealUnsealStRegionsEq: EqSet z.(capStRegions) y.(capStRegions);
-        sealUnsealKeepStRegionsEq: EqSet z.(capKeepStRegions) y.(capKeepStRegions) }.
+        sealUnsealCanBeStoredEq: EqSet z.(capCanBeStored) y.(capCanBeStored);
+        sealUnsealKeepCanBeStoredEq: EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored) }.
 
     (* Cap z is the sealed version of cap y using a key in x *)
     Record Seal : Prop := {
@@ -174,11 +173,10 @@ Section Machine.
     | StepSeal x (xPf: ReachableCap x) y (yPf: ReachableCap y) z (xyz: Seal x y z): ReachableCap z
     | StepUnseal x (xPf: ReachableCap x) y (yPf: ReachableCap y) z (xyz: Unseal x y z): ReachableCap z.
 
-    (* Transitively reachable addr listed with permissions and stRegions *)
-    Inductive ReachableAddr: Addr -> list Perm.t -> list Region -> Prop :=
+    (* Transitively reachable addr listed with permissions, canStore and canBeStored *)
+    Inductive ReachableAddr: Addr -> list Perm.t -> list Label -> list Label -> Prop :=
     | HasAddr c (cPf: ReachableCap c) a (ina: In a c.(capAddrs)) (notSealed: c.(capSealed) = None)
-        perms (permsEq: perms = c.(capPerms)) stRegions (stRegionsEq: stRegions = c.(capStRegions))
-      : ReachableAddr a perms stRegions.
+      : ReachableAddr a c.(capPerms) c.(capCanStore) c.(capCanBeStored).
   End Transitivity.
 End Machine.
 
@@ -309,7 +307,7 @@ Module CHERIoTValidation.
 
   Definition mk_abstract_cap (c: cheriot_cap) : Cap nat N :=
     let d := decompress_perm c.(permissions) in
-    {| capThisRegion := if d.(SL) then Stack else Global;
+    {| capCanStore := if d.(SL) then [Local;NonLocal] else [NonLocal];
        capSentry := match c.(otype) with
                     | 0 => UnsealedJump
                     | 1 => CallInheritInterrupt
@@ -333,7 +331,7 @@ Module CHERIoTValidation.
                                     | Perm.Unsealing => d.(US)
                                  end)
                      [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
-       capStRegions := if d.(GL) then [Global;Stack] else [Stack];
+       capCanBeStored := if d.(GL) then [Local;NonLocal] else [Local];
        capSealingKeys := [c.(addr)];
        capUnsealingKeys := [c.(addr)];
        capAddrs := seq (N.to_nat c.(base)) (N.to_nat (c.(top) - c.(base)));
@@ -347,7 +345,7 @@ Module CHERIoTValidation.
                                  | Perm.Unsealing => true
                                  end)
                          [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
-       capKeepStRegions := if d.(LG) then [Global;Stack] else [Stack]
+       capKeepCanBeStored := if d.(LG) then [Local;NonLocal] else [Local]
      |}.
 
 End CHERIoTValidation.
