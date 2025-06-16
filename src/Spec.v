@@ -266,15 +266,35 @@ Section Machine.
         machineMemory : Memory_t;
     }.
 
+    Definition setMachineThread (m: MachineState) (tid: nat): MachineState :=
+      {| machineCompartments := m.(machineCompartments);
+         machineThreads := m.(machineThreads);
+         machineCurrentThreadIdx := tid;
+         machineMemory := m.(machineMemory)
+      |}.
+
     Inductive TraceEvent :=
     | Event_SwitchThreads (newIdx: nat)
     | Event_Exception (rf: RegisterFile) (exn: Exn)
     | Event_CompartmentCall (rf: RegisterFile)
     | Event_CompartmentReturn (rf: RegisterFile).
 
+
     Inductive SameDomainStep := .
 
-    Inductive DifferentDomainStep := .
+    Inductive DifferentDomainStep : MachineState -> (MachineState -> TraceEvent -> Prop) -> Prop :=
+    | Step_SwitchThreads :
+      forall m1 thread tid' post,
+      nth_error m1.(machineThreads) m1.(machineCurrentThreadIdx) = Some thread ->
+      thread.(threadInterruptible) = true ->
+      tid' < List.length m1.(machineThreads) ->
+      post (setMachineThread m1 tid') (Event_SwitchThreads tid') ->
+      DifferentDomainStep m1 post
+    (* | Step_CompartmentCallViaSwitcher  *)
+    (* | Step_CompartmentReturnViaSwitcher  *)
+    (* | Step_CompartmentCallWithoutSwitcher *)
+    (* | Step_CompartmentReturnWithoutSwitcher *)
+    .
 
   End MachineState.
 End Machine.
