@@ -304,15 +304,12 @@ Section Machine.
       let tid := m.(machineCurThreadIdx) in
       let threads := m.(machineThreads) in
       exists thread, nth_error threads tid = Some thread /\
-                (forall postUpdate,
-                    update_fn thread m.(machineMemory) postUpdate ->
-                    (forall thread' memory' event',
-                       postUpdate thread' memory' event' ->
-                       post {| machineCompartments := m.(machineCompartments); (* TODO: update ghost state *)
-                               machineThreads := listUpdate threads tid thread';
-                               machineCurThreadIdx := tid;
-                               machineMemory := memory'
-                            |})).
+                update_fn thread m.(machineMemory) (fun thread' memory' event' =>
+                   post {| machineCompartments := m.(machineCompartments); (* TODO: update ghost state *)
+                           machineThreads := listUpdate threads tid thread';
+                           machineCurThreadIdx := tid;
+                           machineMemory := memory'
+                        |}).
 
     Definition SameDomainStep : MachineState -> (MachineState -> list TraceEvent -> Prop) -> Prop.
     Admitted.
@@ -347,25 +344,25 @@ Section Machine.
        (forall m', mid m' ->
               post m' [Event_Exception thread.(threadPCC) thread.(threadRF) exn]) ->
        DifferentDomainStep m post
-    | Step_XCompartmentCallViaSiwtcher:
+    | Step_XCompartmentCallViaSwitcher:
       forall m thread post mid,
         SameThreadStep m StepXCompartmentCallViaSwitcher mid ->
        (forall m', mid m' ->
               post m' [Event_XCompartmentCallViaSwitcher thread.(threadRF) ]) ->
        DifferentDomainStep m post
-    | Step_XCompartmentReturnViaSiwtcher:
+    | Step_XCompartmentReturnViaSwitcher:
       forall m thread post mid,
         SameThreadStep m StepXCompartmentReturnViaSwitcher mid ->
        (forall m', mid m' ->
               post m' [Event_XCompartmentReturnViaSwitcher thread.(threadRF) ]) ->
        DifferentDomainStep m post
-    | Step_XCompartmentCallWithoutSiwtcher:
+    | Step_XCompartmentCallWithoutSwitcher:
       forall m thread post mid,
         SameThreadStep m StepXCompartmentCallWithoutSwitcher mid ->
        (forall m', mid m' ->
               post m' [Event_XCompartmentCallWithoutSwitcher thread.(threadRF) ]) ->
        DifferentDomainStep m post
-    | Step_XCompartmentReturnWithoutSiwtcher:
+    | Step_XCompartmentReturnWithoutSwitcher:
       forall m thread post mid,
         SameThreadStep m StepXCompartmentReturnWithoutSwitcher mid ->
        (forall m', mid m' ->
