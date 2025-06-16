@@ -46,7 +46,6 @@ Section EqSet.
 End EqSet.
 
 Section Machine.
-  Variable Value: Type.
   Variable Addr: Type.
   Variable Key: Type.
 
@@ -66,6 +65,7 @@ Section Machine.
                                         when loading using this cap *)
     }.
 
+  Variable Value: Type.
   Variable Memory: Addr -> (Value * list Cap).
 
   Section CapStep.
@@ -201,6 +201,17 @@ Section Machine.
     Inductive ReachableAddr: Addr -> list Perm.t -> list Label -> list Label -> Prop :=
     | HasAddr c (cPf: ReachableCap c) a (ina: In a c.(capAddrs)) (notSealed: c.(capSealed) = None)
       : ReachableAddr a c.(capPerms) c.(capCanStore) c.(capCanBeStored).
+
+    Definition ReachableCaps newCaps := forall c, In c newCaps -> ReachableCap c.
+
+    Section UpdMem.
+      Variable NewMemory: Addr -> (Value * list Cap).
+      Definition NonReachableMemSame := forall a, ~ (forall p cs cbs, ReachableAddr a p cs cbs) ->
+                                                  NewMemory a = Memory a.
+      (* Model store, i.e. there should be a reachable store cap for that address. *)
+      (* Cap update can happen only with appropriate canStore in the store cap
+         and the cap to be stored has appropriate canBeStored *)
+    End UpdMem.
   End Transitivity.
 End Machine.
 
