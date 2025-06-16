@@ -45,6 +45,12 @@ Section EqSet.
   Qed.
 End EqSet.
 
+Section ListUtils.
+  Import ListNotations.
+  Definition listUpdate{E: Type}(l: list E)(i: nat)(e: E): list E :=
+    firstn i l ++ [e] ++ skipn (S i) l.
+End ListUtils.
+
 Section Machine.
   Variable Addr: Type.
   Variable Key: Type.
@@ -227,12 +233,17 @@ Section Machine.
   Definition CapWithValue : Type := Cap * Value.
   Definition CapOrValue : Type:= Value * list Cap.
 
+  Definition CallArgs : Type. Admitted.
+  Definition ReturnArgs : Type. Admitted.
+
   Record Compartment := {
       compartmentPCC : CapWithValue;
       compartmentCGP : CapWithValue;
       compartmentErrorHandlers : list Value; (* offset from PCC *)
       compartmentImportTable : list CapWithValue; (* In CHERIoT: sealed caps to export table entries, sentry caps to library functions, and caps to MMIO regions *)
       (* compartmentExportTable : list (Addr * ExportTableEntry) *)
+      compartmentGhostCallArgs : list CallArgs; (* TODO *)
+      compartmentGhostReturnArgs : list ReturnArgs
   }.
 
   Record RegisterFile := {
@@ -249,52 +260,127 @@ Section Machine.
   | ThreadEvent_XCompartmentCall (rf: RegisterFile)
   | ThreadEvent_XCompartmentReturn (rf: RegisterFile).
 
+  Definition StackFrame : Type.
+  Admitted.
+
   Record Thread := {
       threadPCC: CapWithValue; (* Offset relative to compartment PCC *)
       threadRF: RegisterFile;
       threadInterruptible: bool;
       threadGhostCompartmentIdx: nat; (* Ghost state *)
+      threadStackFrame : list StackFrame
   }.
 
   Section MachineState.
     Variable Exn : Type.
 
+    Import ListNotations.
+
     Record MachineState := {
         machineCompartments : list Compartment;
         machineThreads: list Thread;
-        machineCurrentThreadIdx : nat;
+        machineCurThreadIdx : nat;
         machineMemory : Memory_t;
     }.
 
     Definition setMachineThread (m: MachineState) (tid: nat): MachineState :=
       {| machineCompartments := m.(machineCompartments);
          machineThreads := m.(machineThreads);
-         machineCurrentThreadIdx := tid;
+         machineCurThreadIdx := tid;
          machineMemory := m.(machineMemory)
       |}.
 
     Inductive TraceEvent :=
     | Event_SwitchThreads (newIdx: nat)
-    | Event_Exception (rf: RegisterFile) (exn: Exn)
-    | Event_CompartmentCall (rf: RegisterFile)
-    | Event_CompartmentReturn (rf: RegisterFile).
+    | Event_Exception (pc: CapWithValue) (rf: RegisterFile) (exn: Exn)
+    | Event_XCompartmentCallViaSwitcher (rf: RegisterFile)
+    | Event_XCompartmentReturnViaSwitcher (rf: RegisterFile)
+    | Event_XCompartmentCallWithoutSwitcher (rf: RegisterFile)
+    | Event_XCompartmentReturnWithoutSwitcher (rf: RegisterFile).
 
+    Definition SameThreadStep (m: MachineState)
+                              (update_fn: Thread -> Memory_t -> (Thread -> Memory_t -> list TraceEvent -> Prop) -> Prop)
+                              (post: MachineState -> Prop) : Prop :=
+      let tid := m.(machineCurThreadIdx) in
+      let threads := m.(machineThreads) in
+      exists thread, nth_error threads tid = Some thread /\
+                (forall postUpdate,
+                    update_fn thread m.(machineMemory) postUpdate ->
+                    (forall thread' memory' event',
+                       postUpdate thread' memory' event' ->
+                       post {| machineCompartments := m.(machineCompartments); (* TODO: update ghost state *)
+                               machineThreads := listUpdate threads tid thread';
+                               machineCurThreadIdx := tid;
+                               machineMemory := memory'
+                            |})).
 
-    Inductive SameDomainStep := .
+    Definition SameDomainStep : MachineState -> (MachineState -> list TraceEvent -> Prop) -> Prop.
+    Admitted.
 
-    Inductive DifferentDomainStep : MachineState -> (MachineState -> TraceEvent -> Prop) -> Prop :=
+    Definition StepThrowException (t: Thread) (m: Memory_t) (post: Thread -> Memory_t -> list TraceEvent -> Prop) : Prop.
+    Admitted.
+
+    Definition StepXCompartmentCallViaSwitcher (t: Thread) (m: Memory_t) (post: Thread -> Memory_t -> list TraceEvent -> Prop) : Prop.
+    Admitted.
+    Definition StepXCompartmentReturnViaSwitcher (t: Thread) (m: Memory_t) (post: Thread -> Memory_t -> list TraceEvent -> Prop) : Prop.
+    Admitted.
+    Definition StepXCompartmentCallWithoutSwitcher (t: Thread) (m: Memory_t) (post: Thread -> Memory_t -> list TraceEvent -> Prop) : Prop.
+    Admitted.
+    Definition StepXCompartmentReturnWithoutSwitcher (t: Thread) (m: Memory_t) (post: Thread -> Memory_t -> list TraceEvent -> Prop) : Prop.
+    Admitted.
+
+    Definition CanSwitchThread (m: MachineState) (newTid: nat) : Prop :=
+      exists thread,
+      nth_error m.(machineThreads) m.(machineCurThreadIdx) = Some thread /\
+      thread.(threadInterruptible) = true /\
+      newTid < List.length m.(machineThreads).
+
+    Inductive DifferentDomainStep : MachineState -> (MachineState -> list TraceEvent -> Prop) -> Prop :=
     | Step_SwitchThreads :
-      forall m1 thread tid' post,
-      nth_error m1.(machineThreads) m1.(machineCurrentThreadIdx) = Some thread ->
-      thread.(threadInterruptible) = true ->
-      tid' < List.length m1.(machineThreads) ->
-      post (setMachineThread m1 tid') (Event_SwitchThreads tid') ->
-      DifferentDomainStep m1 post
-    (* | Step_CompartmentCallViaSwitcher  *)
-    (* | Step_CompartmentReturnViaSwitcher  *)
-    (* | Step_CompartmentCallWithoutSwitcher *)
-    (* | Step_CompartmentReturnWithoutSwitcher *)
-    .
+      forall m post tid',
+      CanSwitchThread m tid' ->
+      post (setMachineThread m tid') [Event_SwitchThreads tid'] ->
+      DifferentDomainStep m post
+    | Step_ThrowException :
+      forall m thread post exn mid,
+        SameThreadStep m StepThrowException mid ->
+       (forall m', mid m' ->
+              post m' [Event_Exception thread.(threadPCC) thread.(threadRF) exn]) ->
+       DifferentDomainStep m post
+    | Step_XCompartmentCallViaSiwtcher:
+      forall m thread post mid,
+        SameThreadStep m StepXCompartmentCallViaSwitcher mid ->
+       (forall m', mid m' ->
+              post m' [Event_XCompartmentCallViaSwitcher thread.(threadRF) ]) ->
+       DifferentDomainStep m post
+    | Step_XCompartmentReturnViaSiwtcher:
+      forall m thread post mid,
+        SameThreadStep m StepXCompartmentReturnViaSwitcher mid ->
+       (forall m', mid m' ->
+              post m' [Event_XCompartmentReturnViaSwitcher thread.(threadRF) ]) ->
+       DifferentDomainStep m post
+    | Step_XCompartmentCallWithoutSiwtcher:
+      forall m thread post mid,
+        SameThreadStep m StepXCompartmentCallWithoutSwitcher mid ->
+       (forall m', mid m' ->
+              post m' [Event_XCompartmentCallWithoutSwitcher thread.(threadRF) ]) ->
+       DifferentDomainStep m post
+    | Step_XCompartmentReturnWithoutSiwtcher:
+      forall m thread post mid,
+        SameThreadStep m StepXCompartmentReturnWithoutSwitcher mid ->
+       (forall m', mid m' ->
+              post m' [Event_XCompartmentReturnWithoutSwitcher thread.(threadRF) ]) ->
+       DifferentDomainStep m post.
+
+    Inductive Step : MachineState -> (MachineState -> list TraceEvent -> Prop) -> Prop :=
+    | Step_SameDomain :
+      forall m1 post,
+      SameDomainStep m1 post ->
+      Step m1 post
+    | Step_DifferentDomain:
+      forall m1 post,
+      DifferentDomainStep m1 post ->
+      Step m1 post.
 
   End MachineState.
 End Machine.
