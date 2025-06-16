@@ -236,6 +236,7 @@ Section Machine.
   }.
 
   Record RegisterFile := {
+      rfRa : CapWithValue;
       rfCGP : CapWithValue;
       rfCSP: CapWithValue;
       rfCallerSavedRegs : list CapOrValue;
@@ -245,8 +246,7 @@ Section Machine.
   }.
 
   Inductive ThreadEvent :=
-  | ThreadEvent_XCompartmentCall (returnAddress: CapWithValue)
-                                 (rf: RegisterFile)
+  | ThreadEvent_XCompartmentCall (rf: RegisterFile)
   | ThreadEvent_XCompartmentReturn (rf: RegisterFile).
 
   Record Thread := {
