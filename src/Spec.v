@@ -66,7 +66,10 @@ Section Machine.
     }.
 
   Variable Value: Type.
-  Variable Memory: Addr -> (Value * list Cap).
+
+  Notation Memory_t := (Addr -> (Value * list Cap)).
+
+  Variable Memory: Memory_t.
 
   Section CapStep.
     Variable y z: Cap.
@@ -213,6 +216,67 @@ Section Machine.
          and the cap to be stored has appropriate canBeStored *)
     End UpdMem.
   End Transitivity.
+
+  (* Record ExportTableEntry := { *)
+  (*     exportEntryPCC: Value; (* In CHERIoT, offset from compartment PCC *) *)
+  (*     exportEntryStackSize: Value; *)
+  (*     exportEntryNumArgs : nat; *)
+  (*     exportEntryInterruptStatus: bool; *)
+  (* }. *)
+
+  Definition CapWithValue : Type := Cap * Value.
+  Definition CapOrValue : Type:= Value * list Cap.
+
+  Record Compartment := {
+      compartmentPCC : CapWithValue;
+      compartmentCGP : CapWithValue;
+      compartmentErrorHandlers : list Value; (* offset from PCC *)
+      compartmentImportTable : list CapWithValue; (* In CHERIoT: sealed caps to export table entries, sentry caps to library functions, and caps to MMIO regions *)
+      (* compartmentExportTable : list (Addr * ExportTableEntry) *)
+  }.
+
+  Record RegisterFile := {
+      rfCGP : CapWithValue;
+      rfCSP: CapWithValue;
+      rfCallerSavedRegs : list CapOrValue;
+      rfCalleeSavedRegs : list CapOrValue;
+      rfArgRegs : list CapOrValue;
+      rfMiscRegisters : list CapOrValue;
+  }.
+
+  Inductive ThreadEvent :=
+  | ThreadEvent_XCompartmentCall (returnAddress: CapWithValue)
+                                 (rf: RegisterFile)
+  | ThreadEvent_XCompartmentReturn (rf: RegisterFile).
+
+  Record Thread := {
+      threadPCC: CapWithValue; (* Offset relative to compartment PCC *)
+      threadRF: RegisterFile;
+      threadInterruptible: bool;
+      threadGhostCompartmentIdx: nat; (* Ghost state *)
+  }.
+
+  Section MachineState.
+    Variable Exn : Type.
+
+    Record MachineState := {
+        machineCompartments : list Compartment;
+        machineThreads: list Thread;
+        machineCurrentThreadIdx : nat;
+        machineMemory : Memory_t;
+    }.
+
+    Inductive TraceEvent :=
+    | Event_SwitchThreads (newIdx: nat)
+    | Event_Exception (rf: RegisterFile) (exn: Exn)
+    | Event_CompartmentCall (rf: RegisterFile)
+    | Event_CompartmentReturn (rf: RegisterFile).
+
+    Inductive SameDomainStep := .
+
+    Inductive DifferentDomainStep := .
+
+  End MachineState.
 End Machine.
 
 Module CHERIoTValidation.
