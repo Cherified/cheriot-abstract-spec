@@ -73,7 +73,7 @@ Section Machine.
 
   Variable Value: Type.
 
-  Notation Memory_t := (Addr -> (Value * list Cap)).
+  Notation Memory_t := (Addr -> (list Cap * Value)).
 
   Variable Memory: Memory_t.
 
@@ -156,7 +156,7 @@ Section Machine.
     Record LoadCap : Prop := {
         loadNonRestrictEqs: NonRestrictEqs;
         loadAuthPerm: In Perm.Load x.(capPerms) /\ In Perm.Cap x.(capPerms);
-        loadFromAuth: exists a, In a x.(capAddrs) /\ In y (snd (Memory a));
+        loadFromAuth: exists a, In a x.(capAddrs) /\ In y (fst (Memory a));
         loadSealedEq: z.(capSealed) = y.(capSealed);
         loadAttenuatePerms: match y.(capSealed) with
                             | None => AttenuatePerms
@@ -214,7 +214,7 @@ Section Machine.
     Definition ReachableCaps newCaps := forall c, In c newCaps -> ReachableCap c.
 
     Section UpdMem.
-      Variable NewMemory: Addr -> (Value * list Cap).
+      Variable NewMemory: Memory_t.
       Definition NonReachableMemSame := forall a, ~ (forall p cs cbs, ReachableAddr a p cs cbs) ->
                                                   NewMemory a = Memory a.
       (* Model store, i.e. there should be a reachable store cap for that address. *)
@@ -266,7 +266,6 @@ Section Machine.
   Record Thread := {
       threadPCC: CapWithValue; (* Offset relative to compartment PCC *)
       threadRF: RegisterFile;
-      threadInterruptible: bool;
       threadGhostCompartmentIdx: nat; (* Ghost state *)
       threadStackFrame : list StackFrame
   }.
@@ -281,13 +280,15 @@ Section Machine.
         machineThreads: list Thread;
         machineCurThreadIdx : nat;
         machineMemory : Memory_t;
+        machineInterruptible : bool
     }.
 
     Definition setMachineThread (m: MachineState) (tid: nat): MachineState :=
       {| machineCompartments := m.(machineCompartments);
          machineThreads := m.(machineThreads);
          machineCurThreadIdx := tid;
-         machineMemory := m.(machineMemory)
+         machineMemory := m.(machineMemory);
+         machineInterruptible := m.(machineInterruptible)
       |}.
 
     Inductive TraceEvent :=
@@ -299,38 +300,37 @@ Section Machine.
     | Event_XCompartmentReturnWithoutSwitcher (rf: RegisterFile).
 
     Definition SameThreadStep (m: MachineState)
-                              (update_fn: Thread -> Memory_t -> (Thread -> Memory_t -> list TraceEvent -> Prop) -> Prop)
+                              (update_fn: Thread -> Memory_t -> (Thread -> Memory_t -> bool -> list TraceEvent -> Prop) -> Prop)
                               (post: MachineState -> Prop) : Prop :=
       let tid := m.(machineCurThreadIdx) in
       let threads := m.(machineThreads) in
       exists thread, nth_error threads tid = Some thread /\
-                update_fn thread m.(machineMemory) (fun thread' memory' event' =>
+                update_fn thread m.(machineMemory) (fun thread' memory' interrupt' event' =>
                    post {| machineCompartments := m.(machineCompartments); (* TODO: update ghost state *)
                            machineThreads := listUpdate threads tid thread';
                            machineCurThreadIdx := tid;
-                           machineMemory := memory'
+                           machineMemory := memory';
+                           machineInterruptible := interrupt'
                         |}).
 
     Definition SameDomainStep : MachineState -> (MachineState -> list TraceEvent -> Prop) -> Prop.
     Admitted.
 
-    Definition StepThrowException (t: Thread) (m: Memory_t) (post: Thread -> Memory_t -> list TraceEvent -> Prop) : Prop.
+    Definition StepThrowException (t: Thread) (m: Memory_t) (post: Thread -> Memory_t -> bool -> list TraceEvent -> Prop) : Prop.
     Admitted.
 
-    Definition StepXCompartmentCallViaSwitcher (t: Thread) (m: Memory_t) (post: Thread -> Memory_t -> list TraceEvent -> Prop) : Prop.
+    Definition StepXCompartmentCallViaSwitcher (t: Thread) (m: Memory_t) (post: Thread -> Memory_t -> bool -> list TraceEvent -> Prop) : Prop.
     Admitted.
-    Definition StepXCompartmentReturnViaSwitcher (t: Thread) (m: Memory_t) (post: Thread -> Memory_t -> list TraceEvent -> Prop) : Prop.
+    Definition StepXCompartmentReturnViaSwitcher (t: Thread) (m: Memory_t) (post: Thread -> Memory_t -> bool -> list TraceEvent -> Prop) : Prop.
     Admitted.
-    Definition StepXCompartmentCallWithoutSwitcher (t: Thread) (m: Memory_t) (post: Thread -> Memory_t -> list TraceEvent -> Prop) : Prop.
+    Definition StepXCompartmentCallWithoutSwitcher (t: Thread) (m: Memory_t) (post: Thread -> Memory_t -> bool -> list TraceEvent -> Prop) : Prop.
     Admitted.
-    Definition StepXCompartmentReturnWithoutSwitcher (t: Thread) (m: Memory_t) (post: Thread -> Memory_t -> list TraceEvent -> Prop) : Prop.
+    Definition StepXCompartmentReturnWithoutSwitcher (t: Thread) (m: Memory_t) (post: Thread -> Memory_t -> bool -> list TraceEvent -> Prop) : Prop.
     Admitted.
 
     Definition CanSwitchThread (m: MachineState) (newTid: nat) : Prop :=
-      exists thread,
-      nth_error m.(machineThreads) m.(machineCurThreadIdx) = Some thread /\
-      thread.(threadInterruptible) = true /\
-      newTid < List.length m.(machineThreads).
+      m.(machineInterruptible) = true /\
+        newTid < List.length m.(machineThreads).
 
     Inductive DifferentDomainStep : MachineState -> (MachineState -> list TraceEvent -> Prop) -> Prop :=
     | Step_SwitchThreads :
