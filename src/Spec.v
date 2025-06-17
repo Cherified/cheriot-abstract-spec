@@ -261,6 +261,7 @@ Section Machine.
                 -> list CapOrValue (* Caps reachable by CSP? *)
                 -> RegisterFile
                 -> Prop.
+    Variable getHandlerReturnValue : RegisterFile -> CapOrValue.
     (* Variable ConcretizeRf : SemanticRegisterFile -> RegisterFile. *)
 
     (* Capabilities should not increase *)
@@ -282,7 +283,8 @@ Section Machine.
     | ThreadEvent_XCompartmentReturnWithoutSwitcher (rf: RegisterFile)
     | ThreadEvent_XCompartmentCall (rf: RegisterFile)
     | ThreadEvent_XCompartmentReturn (rf: RegisterFile)
-    | ThreadEvent_Exception (pc: CapOrValue) (rf: RegisterFile) (exn: ExnInfo).
+    | ThreadEvent_Exception (pc: CapOrValue) (rf: RegisterFile) (exn: ExnInfo)
+    | ThreadEvent_ExceptionReturn (pc: CapOrValue) (rf: RegisterFile).
 
 
     Definition is_some {A: Type} (opt: option A) : bool :=
@@ -299,8 +301,15 @@ Section Machine.
 
     Definition StackFrame := list CapOrValue.
 
-    Inductive TrustedStackEntry :=
-    | ExceptionCall (pcc: CapOrValue) (rf: RegisterFile).
+    Inductive InterruptStatus :=
+    | InterruptsEnabled
+    | InterruptsDisabled.
+
+    Record TrustedStackEntry :=
+      { TrustedEntryPCC : CapOrValue;
+        TrustedEntryRf : RegisterFile;
+        TrustedEntryIStatus : InterruptStatus
+      }.
 
     (* TODO: Trusted stack frame should contain (among other things), CSP that compartment had on entry. *)
     Record Thread := {
@@ -310,10 +319,6 @@ Section Machine.
         threadStack : list StackFrame; (* A thread can reach any caps in its topmost stackframe? *)
         threadTrustedStack : list TrustedStackEntry
     }.
-
-    Inductive InterruptStatus :=
-    | InterruptsEnabled
-    | InterruptsDisabled.
 
     Record MachineState := {
         machineCompartments : list Compartment;
@@ -336,13 +341,13 @@ Section Machine.
     | Event_ThreadEvent (tid: nat) (ev: ThreadEvent).
 
     Definition SameThreadStep (m: MachineState)
-                              (update_fn: Thread -> Memory_t -> list Compartment -> (Thread -> Memory_t -> InterruptStatus -> list ThreadEvent -> Prop) -> Prop)
+                              (update_fn: Thread -> Memory_t -> list Compartment -> InterruptStatus -> (Thread -> Memory_t -> InterruptStatus -> list ThreadEvent -> Prop) -> Prop)
                               (post: MachineState -> list TraceEvent -> Prop) : Prop :=
       let tid := m.(machineCurThreadIdx) in
       let threads := m.(machineThreads) in
       let compartments := m.(machineCompartments) in
       exists thread, nth_error threads tid = Some thread /\
-                update_fn thread m.(machineGlobalMemory) compartments (fun thread' memory' interrupt' event' =>
+                update_fn thread m.(machineGlobalMemory) compartments m.(machineInterruptible) (fun thread' memory' interrupt' event' =>
                    post {| machineCompartments := m.(machineCompartments); (* TODO: update ghost state *)
                            machineThreads := listUpdate threads tid thread';
                            machineCurThreadIdx := tid;
@@ -367,9 +372,15 @@ Section Machine.
       | x::xs =>  Some ((x ++ caps)::xs)
       end.
 
-    Inductive StepThrowException : Thread -> Memory_t -> list Compartment -> (Thread -> Memory_t -> InterruptStatus -> list ThreadEvent -> Prop) -> Prop :=
-    | StepThrowException_EnterHandler :
-      forall thread mem compartments compartment pcc' stack' rf' exn stackFrame post,
+    (* Handler asks to return to pcc; ensure it's within bounds of the compartment *)
+    Definition fixPCC (pcc: CapOrValue) (basePCC : CapOrValue) : option CapOrValue.
+    Admitted.
+
+    Definition restoreRegisters (rf: RegisterFile) (rf': RegisterFile) : Prop. Admitted.
+
+    Inductive StepException : Thread -> Memory_t -> list Compartment -> InterruptStatus -> (Thread -> Memory_t -> InterruptStatus -> list ThreadEvent -> Prop) -> Prop :=
+    | StepException_EnterHandler :
+      forall thread mem compartments istatus compartment pcc' stack' rf' exn stackFrame post,
       nth_error compartments thread.(threadCompartmentIdx) = Some compartment ->
       validErrorHandlerPCC pcc' compartment ->
       List.hd_error thread.(threadStack) = Some stackFrame ->
@@ -381,25 +392,40 @@ Section Machine.
               threadRF := rf';
               threadCompartmentIdx := thread.(threadCompartmentIdx);
               threadStack := stack';
-              threadTrustedStack:= (ExceptionCall thread.(threadPCC) thread.(threadRF))::thread.(threadTrustedStack)
+              threadTrustedStack:= (Build_TrustedStackEntry thread.(threadPCC) thread.(threadRF) istatus)::thread.(threadTrustedStack)
            |}
            mem InterruptsEnabled [ThreadEvent_Exception thread.(threadPCC) thread.(threadRF) exn] ->
       (* Enable interrupts when entering exception handler *)
       (* Global memory should not change *) (* TODO: technically stack memory does change ... *)
-      StepThrowException thread mem compartments post
-    .
+      StepException thread mem compartments istatus post
+    | StepException_HandlerReturn :
+      forall thread mem compartments istatus post compartment trustedStackEntry pcc' rf',
+        nth_error compartments thread.(threadCompartmentIdx) = Some compartment ->
+        List.hd_error thread.(threadTrustedStack) = Some trustedStackEntry ->
+        fixPCC (getHandlerReturnValue thread.(threadRF)) compartment.(compartmentPCC) = Some pcc' ->
+        restoreRegisters trustedStackEntry.(TrustedEntryRf) rf' ->
+        post {| threadPCC := pcc';
+                threadRF := rf';
+                threadCompartmentIdx := thread.(threadCompartmentIdx);
+                threadStack := List.tl thread.(threadStack); (* ??? *)
+                threadTrustedStack:= List.tl thread.(threadTrustedStack) (* ??? *)
+             |}
+           mem
+           trustedStackEntry.(TrustedEntryIStatus) (* ??? *)
+           [ThreadEvent_ExceptionReturn thread.(threadPCC) thread.(threadRF) ] ->
+      StepException thread mem compartments istatus post.
     (* TODO: ExitHandler; Unwind stack *)
 
-    Definition StepXCompartmentCallViaSwitcher (t: Thread) (m: Memory_t) (compartments: list Compartment)
+    Definition StepXCompartmentCallViaSwitcher (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus)
                                                (post: Thread -> Memory_t -> InterruptStatus -> list ThreadEvent -> Prop) : Prop.
     Admitted.
-    Definition StepXCompartmentReturnViaSwitcher (t: Thread) (m: Memory_t) (compartments: list Compartment)
+    Definition StepXCompartmentReturnViaSwitcher (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus)
                                                  (post: Thread -> Memory_t -> InterruptStatus -> list ThreadEvent -> Prop) : Prop.
     Admitted.
-    Definition StepXCompartmentCallWithoutSwitcher (t: Thread) (m: Memory_t) (compartments: list Compartment)
+    Definition StepXCompartmentCallWithoutSwitcher (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus)
                                                    (post: Thread -> Memory_t -> InterruptStatus -> list ThreadEvent -> Prop) : Prop.
     Admitted.
-    Definition StepXCompartmentReturnWithoutSwitcher (t: Thread) (m: Memory_t) (compartments: list Compartment)
+    Definition StepXCompartmentReturnWithoutSwitcher (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus)
                                                      (post: Thread -> Memory_t -> InterruptStatus -> list ThreadEvent -> Prop) : Prop.
     Admitted.
 
@@ -415,7 +441,7 @@ Section Machine.
       DifferentDomainStep m post
     | Step_ThrowException :
       forall m post mid,
-        SameThreadStep m StepThrowException mid ->
+        SameThreadStep m StepException mid ->
        (forall m' tr, mid m' tr -> post m' tr) ->
        DifferentDomainStep m post
     | Step_XCompartmentCallViaSwitcher:
