@@ -215,12 +215,17 @@ Section Machine.
 
     Section UpdMem.
       Variable NewMemory: Memory_t.
-
-      Definition NonReachableNonStorableMemSame := forall a, ~ (forall p cs cbs, ReachableAddr a p cs cbs /\ In Perm.Store p) ->
-                                                             NewMemory a = Memory a.
-      (* Model store, i.e. there should be a reachable store cap for that address. *)
-      (* Cap update can happen only with appropriate canStore in the store cap
-         and the cap to be stored has appropriate canBeStored *)
+      Variable stAddrCap: Cap.
+      Definition BasicStPerm := ReachableCap stAddrCap /\ In Perm.Store stAddrCap.(capPerms).
+      Definition modifyMemValue := (exists a, In a stAddrCap.(capAddrs) /\ snd (Memory a) <> snd (NewMemory a)) ->
+                                   BasicStPerm.
+      Definition removeMemCap := (exists a, In a stAddrCap.(capAddrs) /\ fst (Memory a) <> None /\ fst (NewMemory a) = None) ->
+                                 BasicStPerm.
+      Variable stDataCap: Cap.
+      Definition modifyMemCap := (exists a, In a stAddrCap.(capAddrs) /\
+                                              fst (NewMemory a) = Some stDataCap /\ fst (Memory a) <> Some stDataCap) ->
+                                 BasicStPerm /\ ReachableCap stDataCap /\
+                                   exists l, In l stAddrCap.(capCanStore) /\ In l stDataCap.(capCanBeStored).
     End UpdMem.
   End Transitivity.
 
