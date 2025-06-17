@@ -391,7 +391,7 @@ Section Machine.
       post {| threadPCC := pcc';
               threadRF := rf';
               threadCompartmentIdx := thread.(threadCompartmentIdx);
-              threadStack := stack';
+              threadStack := stack'; (* TODO: This is incorrect --> maybe add new frame with everything from the previous frame? *)
               threadTrustedStack:= (Build_TrustedStackEntry thread.(threadPCC) thread.(threadRF) istatus)::thread.(threadTrustedStack)
            |}
            mem InterruptsEnabled [ThreadEvent_Exception thread.(threadPCC) thread.(threadRF) exn] ->
