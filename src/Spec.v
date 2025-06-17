@@ -72,8 +72,8 @@ Section Machine.
     }.
 
   Variable Value: Type.
-
-  Notation Memory_t := (Addr -> (list Cap * Value)).
+  Definition CapOrValue : Type:= option Cap * Value.
+  Notation Memory_t := (Addr -> CapOrValue).
 
   Variable Memory: Memory_t.
 
@@ -156,7 +156,7 @@ Section Machine.
     Record LoadCap : Prop := {
         loadNonRestrictEqs: NonRestrictEqs;
         loadAuthPerm: In Perm.Load x.(capPerms) /\ In Perm.Cap x.(capPerms);
-        loadFromAuth: exists a, In a x.(capAddrs) /\ In y (fst (Memory a));
+        loadFromAuth: exists a, In a x.(capAddrs) /\ fst (Memory a) = Some y;
         loadSealedEq: z.(capSealed) = y.(capSealed);
         loadAttenuatePerms: match y.(capSealed) with
                             | None => AttenuatePerms
@@ -215,8 +215,9 @@ Section Machine.
 
     Section UpdMem.
       Variable NewMemory: Memory_t.
-      Definition NonReachableMemSame := forall a, ~ (forall p cs cbs, ReachableAddr a p cs cbs) ->
-                                                  NewMemory a = Memory a.
+
+      Definition NonReachableNonStorableMemSame := forall a, ~ (forall p cs cbs, ReachableAddr a p cs cbs /\ In Perm.Store p) ->
+                                                             NewMemory a = Memory a.
       (* Model store, i.e. there should be a reachable store cap for that address. *)
       (* Cap update can happen only with appropriate canStore in the store cap
          and the cap to be stored has appropriate canBeStored *)
@@ -231,7 +232,6 @@ Section Machine.
   (* }. *)
 
   Definition CapWithValue : Type := Cap * Value.
-  Definition CapOrValue : Type:= Value * list Cap.
 
   Definition CallArgs : Type. Admitted.
   Definition ReturnArgs : Type. Admitted.
