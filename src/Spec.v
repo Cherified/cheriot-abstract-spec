@@ -387,7 +387,6 @@ Section Machine.
       (* NB: not entirely correct. Technically this alters memory. *)
       PutCapOrValuesOntoStack ((None, snd thread.(threadPCC))::thread.(threadRF)) thread.(threadStack) = Some stack' ->
       validExnHandlerRf exn compartment.(compartmentCGP) stackFrame rf' ->
-      (* Technically: switcher should put PC (without cap) onto the stack too *)
       post {| threadPCC := pcc';
               threadRF := rf';
               threadCompartmentIdx := thread.(threadCompartmentIdx);
@@ -414,7 +413,7 @@ Section Machine.
            trustedStackEntry.(TrustedEntryIStatus) (* ??? *)
            [ThreadEvent_ExceptionReturn thread.(threadPCC) thread.(threadRF) ] ->
       StepException thread mem compartments istatus post.
-    (* TODO: ExitHandler; Unwind stack *)
+    (* TODO: Unwind stack *)
 
     Definition StepXCompartmentCallViaSwitcher (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus)
                                                (post: Thread -> Memory_t -> InterruptStatus -> list ThreadEvent -> Prop) : Prop.
