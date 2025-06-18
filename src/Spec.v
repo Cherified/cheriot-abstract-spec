@@ -229,13 +229,8 @@ Section Machine.
     End UpdMem.
   End Transitivity.
 
-  (* Record ExportTableEntry := { *)
-  (*     exportEntryPCC: Value; (* In CHERIoT, offset from compartment PCC *) *)
-  (*     exportEntryStackSize: Value; *)
-  (*     exportEntryNumArgs : nat; *)
-  (*     exportEntryInterruptStatus: bool; *)
-  (* }. *)
-  (* Definition CapWithValue : Type := Cap * Value. *)
+
+
   Definition CallArgs : Type. Admitted.
   Definition ReturnArgs : Type. Admitted.
 
@@ -248,11 +243,150 @@ Section Machine.
   (*     rfMiscCalleeSavedRegs : list CapOrValue; *)
   Definition RegisterFile := list CapOrValue.
 
-  Section MachineState.
+  Section Machine.
     Import ListNotations.
+    Variable ExnHandlerType : Type. (* In CHERIoT: rich or stackless *)
+
+    Inductive InterruptStatus :=
+    | InterruptsEnabled
+    | InterruptsDisabled.
+
+    Inductive ImportTableEntry :=
+    | ImportEntry_SealedCapToExportEntry (cap: CapOrValue)
+    | ImportEntry_SentryToLibraryFunction (cap: CapOrValue)
+    | ImportEntry_MMIOCap (cap: CapOrValue).
+
+    Record ExportTableEntry := {
+        exportEntryPCC: Value; (* In CHERIoT, offset from compartment PCC *)
+        exportEntryStackSize: Value;
+        exportEntryNumArgs : nat;
+        exportEntryInterruptStatus: InterruptStatus;
+    }.
+
+    Record Compartment := {
+        compartmentPCC : CapOrValue;
+        compartmentCGP : CapOrValue;
+        compartmentErrorHandlers : list (Value * ExnHandlerType); (* offset from PCC *)
+        compartmentImportTable : list ImportTableEntry;
+        compartmentExportTable : list (Addr * ExportTableEntry) (* Address where export table entry is stored *)
+        (* compartmentGhostCallArgs : list CallArgs; (* TODO *) *)
+        (* compartmentGhostReturnArgs : list ReturnArgs *)
+    }.
+
+    Definition Thread: Type.
+    Admitted.
+
+    Record Machine := {
+        machineCompartments : list Compartment;
+        machineThreads: list Thread;
+        machineThreadId : nat;
+        machineMemory : Memory_t;
+        machineInterruptible : InterruptStatus
+    }.
+
+    Section MachineHelpers.
+      Definition setMachineThread (m: Machine) (tid: nat): Machine :=
+        {| machineCompartments := m.(machineCompartments);
+           machineThreads := m.(machineThreads);
+           machineThreadId := tid;
+           machineMemory := m.(machineMemory);
+           machineInterruptible := m.(machineInterruptible)
+        |}.
+
+      Definition SameThreadStep (m: Machine)
+                                (update_fn: Thread -> Memory_t -> list Compartment -> InterruptStatus -> (Thread -> Memory_t -> InterruptStatus  -> Prop) -> Prop)
+                                (post: Machine -> Prop) : Prop :=
+        let tid := m.(machineThreadId) in
+        let threads := m.(machineThreads) in
+        let compartments := m.(machineCompartments) in
+        exists thread, nth_error threads tid = Some thread /\
+                  update_fn thread m.(machineMemory) compartments m.(machineInterruptible) (fun thread' memory' interrupt' =>
+                     post {| machineCompartments := compartments; (* TODO: update ghost state *)
+                             machineThreads := listUpdate threads tid thread';
+                             machineThreadId := tid;
+                             machineMemory := memory';
+                             machineInterruptible := interrupt'
+                          |}).
+
+    End MachineHelpers.
+
+    (* Load/store data; load/store cap; restrict cap; seal cap *)
+    Definition KeepDomainStep : Machine -> (Machine -> Prop) -> Prop.
+    Admitted.
+
+    Definition StepInvokeCapability
+      (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus)
+      (post: Thread -> Memory_t -> InterruptStatus -> Prop) : Prop.
+    Admitted.
+
+    Definition StepRaiseException
+      (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus)
+      (post: Thread -> Memory_t -> InterruptStatus -> Prop) : Prop.
+    Admitted.
+
+
+    Inductive SwitchDomainStep : Machine -> (Machine -> Prop) -> Prop :=
+    | Step_SwitchThreads :
+      forall m post tid',
+      m.(machineInterruptible) = InterruptsEnabled ->
+      tid' < List.length m.(machineThreads) ->
+      post (setMachineThread m tid') ->
+      SwitchDomainStep m post
+    | Step_RaiseException:
+      forall m post mid,
+        SameThreadStep m StepRaiseException mid ->
+       (forall m' , mid m' -> post m') ->
+       SwitchDomainStep m post
+    | Step_InvokeCapability:
+      forall m post mid,
+        SameThreadStep m StepInvokeCapability mid ->
+       (forall m' , mid m' -> post m') ->
+       SwitchDomainStep m post.
+
+    (* TODO: Add trace events as needed to state properties *)
+    Inductive Step : Machine -> (Machine -> Prop) -> Prop :=
+    | Step_KeepDomain :
+      forall m1 post,
+      KeepDomainStep m1 post ->
+      Step m1 post
+    | Step_SwitchDomain:
+      forall m1 post,
+      SwitchDomainStep m1 post ->
+      Step m1 post.
+
+    (* ========= OLD CODE BELOW ========== *)
+
+
+    Definition capsFromRf (rf: RegisterFile) : list Cap :=
+      concat (map (fun '(opt_cap, _) => match opt_cap with
+                                     | Some cap => [cap]
+                                     | None => []
+                                     end) rf).
+
+    Definition StackFrame := list CapOrValue.
+
+    Record TrustedStackEntry :=
+      { TrustedEntryPCC : CapOrValue;
+        TrustedEntryCSP : CapOrValue;
+        TrustedEntryRf : RegisterFile;
+        TrustedEntryIStatus : InterruptStatus
+      }.
+
+    (* TODO: Trusted stack frame should contain (among other things), CSP that compartment had on entry. *)
+    Record Thread := {
+        threadPCC: CapOrValue; (* Offset relative to compartment PCC *)
+        threadCSP: CapOrValue; (* Semantic CSP? *)
+        threadRF: RegisterFile;
+        threadCompartmentIdx: nat; (* Ghost state *)
+        threadStack : list StackFrame; (* A thread can reach any caps in its topmost stackframe? *)
+        threadTrustedStack : list TrustedStackEntry
+    }.
+
+
+
+
 
     Variable ExnInfo : Type. (* CHERIoT: mtval and mcause *)
-    Variable ExnHandlerType : Type. (* In CHERIoT: rich or stackless *)
     Variable validErrorHandlerOffset: CapOrValue -> Value -> CapOrValue -> Prop.
     Variable validExnHandlerRf
       : ExnInfo (* CapWithValue (* Return sentry to switcher *) *)
@@ -262,21 +396,15 @@ Section Machine.
                 -> RegisterFile
                 -> Prop.
     Variable getHandlerReturnValue : RegisterFile -> CapOrValue.
-    (* Variable ConcretizeRf : SemanticRegisterFile -> RegisterFile. *)
 
-    (* Capabilities should not increase *)
-    Definition validErrorHandlerOffset_ok : (CapOrValue -> Value -> CapOrValue-> Prop) -> Prop.
-    Admitted.
 
-    Record Compartment := {
-        compartmentPCC : CapOrValue;
-        compartmentCGP : CapOrValue;
-        compartmentErrorHandlers : list (Value * ExnHandlerType); (* offset from PCC *)
-        compartmentImportTable : list CapOrValue; (* In CHERIoT: sealed caps to export table entries, sentry caps to library functions, and caps to MMIO regions *)
-        (* compartmentExportTable : list (Addr * ExportTableEntry) *)
-        compartmentGhostCallArgs : list CallArgs; (* TODO *)
-        compartmentGhostReturnArgs : list ReturnArgs
-    }.
+    (* Inductive ThreadEvent := *)
+    (* | ThreadEvent_KeepDomain (* This could contain information about caps read/stored from memory *) *)
+    (* | ThreadEvent_InvokeCap (codeCap: CapOrValue) (dataCap: CapOrValue). *)
+    (* Inductive TraceEvent := *)
+    (* | Event_SwitchThreads (newidx: nat) *)
+    (* | Event_ThreadEvent (tid: nat) (ev: ThreadEvent). *)
+
 
     Inductive ThreadEvent :=
     | ThreadEvent_XCompartmentCallWithoutSwitcher (rf: RegisterFile)
@@ -287,83 +415,41 @@ Section Machine.
     | ThreadEvent_ExceptionReturn (pc: CapOrValue) (rf: RegisterFile).
 
 
-    Definition is_some {A: Type} (opt: option A) : bool :=
-      match opt with
-      | Some _ => true
-      | None => false
-      end.
 
-    Definition capsFromRf (rf: RegisterFile) : list Cap :=
-      concat (map (fun '(opt_cap, _) => match opt_cap with
-                                     | Some cap => [cap]
-                                     | None => []
-                                     end) rf).
 
-    Definition StackFrame := list CapOrValue.
 
-    Inductive InterruptStatus :=
-    | InterruptsEnabled
-    | InterruptsDisabled.
-
-    Record TrustedStackEntry :=
-      { TrustedEntryPCC : CapOrValue;
-        TrustedEntryRf : RegisterFile;
-        TrustedEntryIStatus : InterruptStatus
-      }.
-
-    (* TODO: Trusted stack frame should contain (among other things), CSP that compartment had on entry. *)
-    Record Thread := {
-        threadPCC: CapOrValue; (* Offset relative to compartment PCC *)
-        threadRF: RegisterFile;
-        threadCompartmentIdx: nat; (* Ghost state *)
-        threadStack : list StackFrame; (* A thread can reach any caps in its topmost stackframe? *)
-        threadTrustedStack : list TrustedStackEntry
-    }.
-
-    Record MachineState := {
-        machineCompartments : list Compartment;
-        machineThreads: list Thread;
-        machineCurThreadIdx : nat;
-        machineGlobalMemory : Memory_t;
-        machineInterruptible : InterruptStatus
-    }.
-
-    Definition setMachineThread (m: MachineState) (tid: nat): MachineState :=
-      {| machineCompartments := m.(machineCompartments);
-         machineThreads := m.(machineThreads);
-         machineCurThreadIdx := tid;
-         machineGlobalMemory := m.(machineGlobalMemory);
-         machineInterruptible := m.(machineInterruptible)
-      |}.
 
     Inductive TraceEvent :=
     | Event_SwitchThreads (newIdx: nat)
     | Event_ThreadEvent (tid: nat) (ev: ThreadEvent).
 
-    Definition SameThreadStep (m: MachineState)
+    Definition SameThreadStep (m: Machine)
                               (update_fn: Thread -> Memory_t -> list Compartment -> InterruptStatus -> (Thread -> Memory_t -> InterruptStatus -> list ThreadEvent -> Prop) -> Prop)
-                              (post: MachineState -> list TraceEvent -> Prop) : Prop :=
-      let tid := m.(machineCurThreadIdx) in
+                              (post: Machine -> list TraceEvent -> Prop) : Prop :=
+      let tid := m.(machineThreadId) in
       let threads := m.(machineThreads) in
       let compartments := m.(machineCompartments) in
       exists thread, nth_error threads tid = Some thread /\
-                update_fn thread m.(machineGlobalMemory) compartments m.(machineInterruptible) (fun thread' memory' interrupt' event' =>
+                update_fn thread m.(machineMemory) compartments m.(machineInterruptible) (fun thread' memory' interrupt' event' =>
                    post {| machineCompartments := m.(machineCompartments); (* TODO: update ghost state *)
                            machineThreads := listUpdate threads tid thread';
-                           machineCurThreadIdx := tid;
-                           machineGlobalMemory := memory';
+                           machineThreadId := tid;
+                           machineMemory := memory';
                            machineInterruptible := interrupt'
                         |} (map (Event_ThreadEvent tid) event')).
 
-    Definition SameDomainStep : MachineState -> (MachineState -> list TraceEvent -> Prop) -> Prop.
+    (* Load/store data; load/store cap; restrict cap; seal cap *)
+    Definition KeepDomainStep : Machine -> (Machine -> list TraceEvent -> Prop) -> Prop.
     Admitted.
 
     Definition validErrorHandlerPCC (pcc: CapOrValue) (compartment: Compartment) : Prop :=
       exists offset handlerType,
         In (offset, handlerType) compartment.(compartmentErrorHandlers) /\
         validErrorHandlerOffset compartment.(compartmentPCC) offset pcc.
+    (* Capabilities should not increase *)
+    Definition validErrorHandlerOffset_ok : (CapOrValue -> Value -> CapOrValue -> Prop) -> Prop.
+    Admitted.
 
-    (* Definition MkExceptionHandlerArgs : list CapOrValue. *)
 
     (* Assumes the top stack frame is non-empty *)
     Definition PutCapOrValuesOntoStack (caps: list CapOrValue) (stack: list StackFrame) : option (list StackFrame) :=
@@ -428,53 +514,46 @@ Section Machine.
                                                      (post: Thread -> Memory_t -> InterruptStatus -> list ThreadEvent -> Prop) : Prop.
     Admitted.
 
-    Definition CanSwitchThread (m: MachineState) (newTid: nat) : Prop :=
+    Definition CanSwitchThread (m: Machine) (newTid: nat) : Prop :=
       m.(machineInterruptible) = InterruptsEnabled /\
         newTid < List.length m.(machineThreads).
 
-    Inductive DifferentDomainStep : MachineState -> (MachineState -> list TraceEvent -> Prop) -> Prop :=
-    | Step_SwitchThreads :
-      forall m post tid',
-      CanSwitchThread m tid' ->
-      post (setMachineThread m tid') [Event_SwitchThreads tid'] ->
-      DifferentDomainStep m post
+    Inductive SwitchDomainStep : Machine -> (Machine -> list TraceEvent -> Prop) -> Prop :=
+    | Step_RaiseException
+    | Step_InvokeCapability
+    .
+
+
+
+
     | Step_ThrowException :
       forall m post mid,
         SameThreadStep m StepException mid ->
        (forall m' tr, mid m' tr -> post m' tr) ->
-       DifferentDomainStep m post
+       SwitchDomainStep m post
     | Step_XCompartmentCallViaSwitcher:
       forall m post mid,
         SameThreadStep m StepXCompartmentCallViaSwitcher mid ->
        (forall m' tr, mid m' tr -> post m' tr) ->
-       DifferentDomainStep m post
+       SwitchDomainStep m post
     | Step_XCompartmentReturnViaSwitcher:
       forall m post mid,
         SameThreadStep m StepXCompartmentReturnViaSwitcher mid ->
        (forall m' tr, mid m' tr -> post m' tr) ->
-       DifferentDomainStep m post
+       SwitchDomainStep m post
     | Step_XCompartmentCallWithoutSwitcher:
       forall m post mid,
         SameThreadStep m StepXCompartmentCallWithoutSwitcher mid ->
        (forall m' tr, mid m' tr-> post m' tr) ->
-       DifferentDomainStep m post
+       SwitchDomainStep m post
     | Step_XCompartmentReturnWithoutSwitcher:
       forall m post mid,
         SameThreadStep m StepXCompartmentReturnWithoutSwitcher mid ->
        (forall m' tr, mid m' tr-> post m' tr) ->
-       DifferentDomainStep m post.
+       SwitchDomainStep m post.
 
-    Inductive Step : MachineState -> (MachineState -> list TraceEvent -> Prop) -> Prop :=
-    | Step_SameDomain :
-      forall m1 post,
-      SameDomainStep m1 post ->
-      Step m1 post
-    | Step_DifferentDomain:
-      forall m1 post,
-      DifferentDomainStep m1 post ->
-      Step m1 post.
 
-  End MachineState.
+  End Machine.
 End Machine.
 
 Module CHERIoTValidation.
