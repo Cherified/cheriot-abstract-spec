@@ -229,18 +229,6 @@ Section Machine.
     End UpdMem.
   End Transitivity.
 
-
-
-  Definition CallArgs : Type. Admitted.
-  Definition ReturnArgs : Type. Admitted.
-
-  (* Record SemanticRegisterFile := { *)
-  (*     rfRa : CapWithValue; *)
-  (*     rfCGP : CapWithValue; *)
-  (*     rfCSP: CapWithValue; *)
-  (*     rfArgRegs : list CapOrValue; *)
-  (*     rfMiscCallerSavedRegs : list CapOrValue; *)
-  (*     rfMiscCalleeSavedRegs : list CapOrValue; *)
   Definition RegisterFile := list CapOrValue.
 
   Section Machine.
@@ -253,7 +241,7 @@ Section Machine.
 
     Inductive ImportTableEntry :=
     | ImportEntry_SealedCapToExportEntry (cap: CapOrValue)
-    | ImportEntry_SentryToLibraryFunction (cap: CapOrValue)
+    | ImportEntry_SentryToLibraryFunction (cap: CapOrValue) (* Code + read-only globals *)
     | ImportEntry_MMIOCap (cap: CapOrValue).
 
     Record ExportTableEntry := {
@@ -273,6 +261,41 @@ Section Machine.
         (* compartmentGhostReturnArgs : list ReturnArgs *)
     }.
 
+    (* Each thread has a TrustedStack. The TrustedStack contains:
+       - A register save area (used for preemption, but also staging space as part of exception handling)
+       - A TrustedStackFrame for each active cross-compartment call -- there is always one frame
+         - CSP: Caller's stack pointer at time of cross-compartment entry, pointing at switcher's register spills
+         - Pointer to callee export table, so we can find the error handler
+         - errorHandlerCount
+       - (state for unwinding info?)
+     *)
+    Record TrustedStackFrame := {
+        trustedStackFrame_compartmentIdx : nat; (* Actually a pointer to the compartment's export table *)
+        trustedStackFrame_CSP : CapOrValue
+    }.
+
+    (* Register spill area is currently implicit, in our model. *)
+    Record TrustedStack := {
+        trustedStackFrames : list TrustedStackFrame
+    }.
+
+    (* During a cross compartment return:
+       - If at least one trusted stack frame:
+           - Pop a trusted stack frame
+           - Restore the CSP from trusted stack frame
+           - Restore ra, gp, callee-saved registers from untrusted stack pointed to by above CSP
+               - This could potentially have been overwritten if callee had access to caller's stack through an argument
+           - Zero registers not intended for caller (!{ra,sp,gp,s0,s1,a0,a1})
+           - Zero callee's stack
+       - Else:
+           exit thread
+     *)
+
+    (* Each thread contains:
+       - Register file
+       - PCC
+       - Trusted stack:
+     *)
     Definition Thread: Type.
     Admitted.
 
@@ -311,8 +334,8 @@ Section Machine.
     End MachineHelpers.
 
     (* Steps that stay within the same compartment:
-       - Load/store data; load/store cap; restrict cap; seal/unseal cap
-       - Update PCC
+       - Update PCC + Load/store data; load/store cap; restrict cap; seal/unseal cap
+       - Execute instruction within switcher
      *)
     Definition KeepDomainStep
       (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus)
@@ -324,21 +347,21 @@ Section Machine.
            - Ask switcher to install modified registerfile (rederiving PCC from compartment code capability)
            - Ask switcher to continue unwinding
        - Call/return from exported function via switcher
-       - Call/Return from library function
+       - Call/return from library function
      *)
     Definition StepInvokeCapability
       (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus)
       (post: Thread -> Memory_t -> InterruptStatus -> Prop) : Prop.
     Admitted.
 
-    (* When a thread throws an exception:
+    (* When a (user) thread throws an exception:
          If the compartment's "rich" error handler exists and there is sufficient stack space:
              Call the compartment's "rich" error handler
              - Enable interrupts
              - ra: backwards sentry to exception return path of switcher
              - sp: stack pointer at time of invocation
              - gp: compartment cgp (fresh?)
-             - Arguments: exception cause/info; equal to sp with a register spill frame here and above (but with pcc untagged)
+             - Arguments: exception cause/info; pass sp equal to sp with a register spill frame here and above (but with pcc untagged)
              - Enable interrupts
          Else if the compartment's stackless error handler exists:
              Call the compartment's stackless error handler:
@@ -347,7 +370,7 @@ Section Machine.
              - sp: stack pointer at time of invocation
              - gp: compartment cgp (fresh?)
              - Arguments: exception cause/info
-         Else: unwind the stack
+         Else: unwind the stack:
      *)
     Definition StepRaiseException
       (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus)
@@ -382,7 +405,17 @@ Section Machine.
       Step m post.
 
     (* ========= OLD CODE BELOW ========== *)
+  Definition CallArgs : Type. Admitted.
+  Definition ReturnArgs : Type. Admitted.
 
+
+  (* Record SemanticRegisterFile := { *)
+  (*     rfRa : CapWithValue; *)
+  (*     rfCGP : CapWithValue; *)
+  (*     rfCSP: CapWithValue; *)
+  (*     rfArgRegs : list CapOrValue; *)
+  (*     rfMiscCallerSavedRegs : list CapOrValue; *)
+  (*     rfMiscCalleeSavedRegs : list CapOrValue; *)
 
     Definition capsFromRf (rf: RegisterFile) : list Cap :=
       concat (map (fun '(opt_cap, _) => match opt_cap with
