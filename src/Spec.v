@@ -310,20 +310,49 @@ Section Machine.
 
     End MachineHelpers.
 
-    (* Load/store data; load/store cap; restrict cap; seal cap *)
-    Definition KeepDomainStep : Machine -> (Machine -> Prop) -> Prop.
+    (* Steps that stay within the same compartment:
+       - Load/store data; load/store cap; restrict cap; seal/unseal cap
+       - Update PCC
+     *)
+    Definition KeepDomainStep
+      (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus)
+      (post: Thread -> Memory_t -> InterruptStatus -> Prop) : Prop.
     Admitted.
 
+    (* A thread can invoke capabilities for:
+       - Return from error handler:
+           - Ask switcher to install modified registerfile (rederiving PCC from compartment code capability)
+           - Ask switcher to continue unwinding
+       - Call/return from exported function via switcher
+       - Call/Return from library function
+     *)
     Definition StepInvokeCapability
       (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus)
       (post: Thread -> Memory_t -> InterruptStatus -> Prop) : Prop.
     Admitted.
 
+    (* When a thread throws an exception:
+         If the compartment's "rich" error handler exists and there is sufficient stack space:
+             Call the compartment's "rich" error handler
+             - Enable interrupts
+             - ra: backwards sentry to exception return path of switcher
+             - sp: stack pointer at time of invocation
+             - gp: compartment cgp (fresh?)
+             - Arguments: exception cause/info; equal to sp with a register spill frame here and above (but with pcc untagged)
+             - Enable interrupts
+         Else if the compartment's stackless error handler exists:
+             Call the compartment's stackless error handler:
+             - Enable interrupts
+             - ra: backwards sentry to exception return path of switcher
+             - sp: stack pointer at time of invocation
+             - gp: compartment cgp (fresh?)
+             - Arguments: exception cause/info
+         Else: unwind the stack
+     *)
     Definition StepRaiseException
       (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus)
       (post: Thread -> Memory_t -> InterruptStatus -> Prop) : Prop.
     Admitted.
-
 
     Inductive SwitchDomainStep : Machine -> (Machine -> Prop) -> Prop :=
     | Step_SwitchThreads :
@@ -333,26 +362,24 @@ Section Machine.
       post (setMachineThread m tid') ->
       SwitchDomainStep m post
     | Step_RaiseException:
-      forall m post mid,
-        SameThreadStep m StepRaiseException mid ->
-       (forall m' , mid m' -> post m') ->
-       SwitchDomainStep m post
+      forall m post,
+      SameThreadStep m StepRaiseException post ->
+      SwitchDomainStep m post
     | Step_InvokeCapability:
-      forall m post mid,
-        SameThreadStep m StepInvokeCapability mid ->
-       (forall m' , mid m' -> post m') ->
+      forall m post,
+       SameThreadStep m StepInvokeCapability post ->
        SwitchDomainStep m post.
 
-    (* TODO: Add trace events as needed to state properties *)
+    (* TODO: we will need ghost state/trace to describe information flow in/out of compartments/threads *)
     Inductive Step : Machine -> (Machine -> Prop) -> Prop :=
     | Step_KeepDomain :
-      forall m1 post,
-      KeepDomainStep m1 post ->
-      Step m1 post
+      forall m post,
+      SameThreadStep m KeepDomainStep post ->
+      Step m post
     | Step_SwitchDomain:
-      forall m1 post,
-      SwitchDomainStep m1 post ->
-      Step m1 post.
+      forall m post,
+      SwitchDomainStep m post ->
+      Step m post.
 
     (* ========= OLD CODE BELOW ========== *)
 
