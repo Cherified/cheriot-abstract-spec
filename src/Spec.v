@@ -358,16 +358,21 @@ Section Machine.
           False -> (* TODO *)
           WF_step' userCtx sysCtx post
       | WFStep_CompartmentCall :
-          forall userCtx sysCtx post,
-          False -> (* TODO *)
+          forall userCtx sysCtx mid post,
+          WF_normal_user_step userCtx mid ->
+          (forall userCtx', mid userCtx' ->
+                       post (Step_CompartmentCall) userCtx' sysCtx) ->
           WF_step' userCtx sysCtx post
       | WFStep_CompartmentRet :
-          forall userCtx sysCtx post,
-          False -> (* TODO *)
+          forall userCtx sysCtx mid post,
+          (forall userCtx', mid userCtx' ->
+                       post (Step_CompartmentRet) userCtx' sysCtx) ->
           WF_step' userCtx sysCtx post
       | WFStep_ThrowException :
-          forall userCtx sysCtx post,
-          False -> (* TODO *)
+          forall userCtx sysCtx post mid exnInfo,
+          WF_normal_user_step userCtx mid ->
+          (forall userCtx', mid userCtx' ->
+                       post (Step_Exception exnInfo) userCtx' sysCtx) ->
           WF_step' userCtx sysCtx post.
 
       Definition WF_step (fn: step_t): Prop :=
@@ -414,6 +419,7 @@ Section Machine.
         ({| thread_rf := st.(thread_rf);
             thread_pcc := pcc;
           |}, mem).
+
       Definition updateRFInUserContext (idx: nat) (newValue: PCC) (ctx: UserContext) : UserContext :=
         let '(st, mem) := ctx in
         ({| thread_rf := listUpdate st.(thread_rf) idx newValue;
