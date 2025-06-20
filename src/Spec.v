@@ -230,6 +230,9 @@ Section Machine.
 
   Section Machine.
     Import ListNotations.
+    Variable ExnHandlerType : Type. (* In CHERIoT: rich or stackless *)
+
+    Notation PCC := CapOrValue.
 
     Definition RegisterFile := list CapOrValue.
     Definition CapAndValue : Type := Cap * Value.
@@ -271,7 +274,7 @@ Section Machine.
 
     Record Thread := {
         thread_rf: RegisterFile;
-        thread_pcc: CapOrValue;
+        thread_pcc: PCC;
         thread_trustedStack: TrustedStack;
         thread_status: ThreadStatus
     }.
@@ -280,8 +283,35 @@ Section Machine.
         machine_memory: Memory_t;
         machine_interruptStatus : InterruptStatus;
         machine_threads : list Thread;
-        machine_curThreadId : nat
+        machine_curThreadId : nat;
     }.
+
+    Inductive UserStepResult :=
+    | UserStep_SameDomain
+    | UserStep_JumpViaSentry (sentry: CapOrValue)
+    | UserStep_CrossCompartmentCall (sentry: CapOrValue)
+    | UserStep_CrossCompartmentReturn
+    | UserStep_ThrowException (exnInfo: Value).
+
+    (* Deterministic function defined by ISA + Loader *)
+    Definition user_step_t : Type :=
+      PCC -> RegisterFile -> Memory_t ->
+      (UserStepResult * (PCC * RegisterFile * Memory_t)).
+
+    Variable user_step : user_step_t.
+
+    (* A user step should only update state by:
+       - updating register file to other cap/value reachable from memory
+       - updating memory according to permissions of reachable caps, and as a function of values reachable from caps
+       - be defined by value in memory at PCC?
+       - call sentries that are reachable
+       - only user-mode exception codes
+     *)
+    Definition WF_user_step (step_fn: user_step_t) : Prop.
+    Admitted.
+
+    Definition UserModeStep : MachineState -> (MachineState -> Prop) -> Prop.
+    Admitted.
 
     Definition Step : MachineState -> (MachineState -> Prop) -> Prop.
     Admitted.
@@ -289,14 +319,33 @@ Section Machine.
   End Machine.
 
   (* Section MachineOld. *)
+    (* Inductive ImportTableEntry := *)
+    (* | ImportEntry_SealedCapToExportEntry (cap: CapAndValue) *)
+    (* | ImportEntry_SentryToLibraryFunction (cap: CapAndValue) (* Code + read-only globals *) *)
+    (* | ImportEntry_MMIOCap (cap: CapAndValue). *)
+
+    (* Record ExportTableEntry := { *)
+    (*     exportEntryPCC: Value; (* In CHERIoT, offset from compartment PCC *) *)
+    (*     exportEntryStackSize: Value; *)
+    (*     exportEntryNumArgs : nat; *)
+    (*     exportEntryInterruptStatus: InterruptStatus; *)
+    (* }. *)
+
+    (* Record Compartment := { *)
+    (*     compartmentPCC : CapAndValue; *)
+    (*     compartmentCGP : CapAndValue; *)
+    (*     compartmentErrorHandlers : list (Value * ExnHandlerType); (* offset from PCC *) *)
+    (*     compartmentImportTable : list ImportTableEntry; *)
+    (*     compartmentExportTable : list (ExportTableEntry) (* Address where export table entry is stored *) *)
+    (* }. *)
+
+    (* Record MachineGhostState := { *)
+    (*     compartments: Compartment *)
+    (* }. *)
 
   (*   Variable ExnHandlerType : Type. (* In CHERIoT: rich or stackless *) *)
 
 
-  (*   Inductive ImportTableEntry := *)
-  (*   | ImportEntry_SealedCapToExportEntry (cap: CapOrValue) *)
-  (*   | ImportEntry_SentryToLibraryFunction (cap: CapOrValue) (* Code + read-only globals *) *)
-  (*   | ImportEntry_MMIOCap (cap: CapOrValue). *)
 
   (*   Record ExportTableEntry := { *)
   (*       exportEntryPCC: Value; (* In CHERIoT, offset from compartment PCC *) *)
