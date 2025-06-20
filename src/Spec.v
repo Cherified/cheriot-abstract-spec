@@ -271,12 +271,20 @@ Section Machine.
         trustedStack_frames : list TrustedStackFrame;
     }.
 
-    Record Thread := {
-        thread_rf: RegisterFile;
-        thread_pcc: PCC;
-        thread_mepcc: MEPCC;
+    Record UserThreadState :=
+      { thread_rf : RegisterFile;
+        thread_pcc: PCC
+      }.
+
+    Record SystemThreadState :=
+      { thread_mepcc: MEPCC;
         thread_exceptionInfo: EXNInfo;
-        thread_trustedStack: TrustedStack;
+        thread_trustedStack: TrustedStack
+      }.
+
+    Record Thread := {
+        thread_userState : UserThreadState;
+        thread_systemState : SystemThreadState
     }.
 
     Record Machine := {
@@ -300,8 +308,8 @@ Section Machine.
       | Step_CompartmentRet
       | Step_Exception (exnInfo: Value).
 
-      Definition UserContext : Type := (RegisterFile * PCC * Memory_t).
-      Definition SystemContext : Type := (MEPCC * EXNInfo * TrustedStack * InterruptStatus).
+      Definition UserContext : Type := (UserThreadState * Memory_t).
+      Definition SystemContext : Type := (SystemThreadState * InterruptStatus).
 
       Definition ValidContexts : UserContext -> SystemContext -> Prop.
       Admitted.
@@ -323,10 +331,10 @@ Section Machine.
       Admitted.
 
       Definition UserContextHasSystemPerm (ctx: UserContext) : Prop :=
-        let '( _, (pc_cap, _), _) := ctx in
-        match pc_cap with
-        | Some cap => In Perm.System cap.(capPerms)
-        | None => False
+        let '(userThread, _) := ctx in
+        match userThread.(thread_pcc) with
+        | (Some cap, _) => In Perm.System cap.(capPerms)
+        | (None, _) => False
         end.
 
       Inductive WF_step' : UserContext -> SystemContext -> (FancyStep -> UserContext -> SystemContext -> Prop) -> Prop :=
@@ -395,26 +403,43 @@ Section Machine.
                              machine_interruptStatus := interrupt'
                           |}).
 
+      Variable SWITCHER_exceptionEntryPCC : CapOrValue.
+
+      Definition setPCCInUserContext (pcc: PCC) (ctx: UserContext) : UserContext :=
+        let '(st, mem) := ctx in
+        ({| thread_rf := st.(thread_rf);
+            thread_pcc := pcc;
+          |}, mem).
+
+      (* WIP *)
       Definition do_fancy_step (step: FancyStep) (userCtx: UserContext) (sysCtx: SystemContext)
-                               : UserContext * SystemContext.
-      Admitted.
+                               : option (UserContext * SystemContext) :=
+        match step with
+        | Step_Normal => Some (userCtx, sysCtx)
+        | Step_Jalr sentry opt_regidx => None
+        | Step_CompartmentCall => None
+        | Step_CompartmentRet => None
+        | Step_Exception exnInfo =>
+            Some (setPCCInUserContext SWITCHER_exceptionEntryPCC userCtx,
+                  ({|thread_mepcc := (fst userCtx).(thread_pcc);
+                     thread_exceptionInfo := exnInfo;
+                     thread_trustedStack := (fst sysCtx).(thread_trustedStack);
+                   |}, InterruptsDisabled)
+                 )
+        end.
 
       Definition merge_contexts (userCtx: UserContext) (sysCtx: SystemContext)
                                 : Thread * Memory_t * InterruptStatus :=
-        let '(rf, pcc, mem) := userCtx in
-        let '(mepcc, exnInfo, tstack, istatus) := sysCtx in
-        ({| thread_rf := rf;
-            thread_pcc := pcc;
-            thread_mepcc := mepcc;
-            thread_exceptionInfo := exnInfo;
-            thread_trustedStack := tstack
+        let '(userState, mem) := userCtx in
+        let '(sysState, istatus) := sysCtx in
+        ({| thread_userState := userState;
+            thread_systemState := sysState
          |}, mem, istatus).
 
       Definition split_contexts (thread: Thread) (mem: Memory_t) (istatus: InterruptStatus)
                                 : UserContext * SystemContext :=
-          let userCtx := (thread.(thread_rf), thread.(thread_pcc), mem) in
-          let sysCtx := (thread.(thread_mepcc), thread.(thread_exceptionInfo),
-                         thread.(thread_trustedStack), istatus) in
+          let userCtx := (thread.(thread_userState), mem) in
+          let sysCtx := (thread.(thread_systemState), istatus) in
           (userCtx, sysCtx).
 
       Definition step_update_fn : Thread -> Memory_t -> InterruptStatus ->
