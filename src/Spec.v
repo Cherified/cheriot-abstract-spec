@@ -228,11 +228,15 @@ Section Machine.
     End UpdMem.
   End Transitivity.
 
+
   Section Machine.
     Import ListNotations.
     Variable ExnHandlerType : Type. (* In CHERIoT: rich or stackless *)
 
-    Notation PCC := CapOrValue.
+    Notation PCC := CapOrValue (only parsing).
+    Notation MEPCC := CapOrValue (only parsing).
+    Notation EXNInfo := Value (only parsing).
+    Notation RegIdx := nat (only parsing).
 
     Definition RegisterFile := list CapOrValue.
     Definition CapAndValue : Type := Cap * Value.
@@ -241,10 +245,11 @@ Section Machine.
         rf_returnAddress : CapOrValue;
         rf_csp: CapOrValue;
         rf_cgp: CapOrValue;
-        rf_argsAndRegs: list CapOrValue;
+        rf_argsAndRets: list CapOrValue;
         rf_argsOnly: list CapOrValue;
         rf_calleeSaved: list CapOrValue;
-        rf_tempRegs: list CapOrValue;
+        rf_other: list CapOrValue;
+        rf_targetCalleeEntry : CapOrValue; (* Export table entry for target callee *)
     }.
 
     Variable rfToSemanticRf : RegisterFile -> option SemanticRegisterFile.
@@ -261,60 +266,178 @@ Section Machine.
         (* trustedStackFrame_compartmentIdx : nat; (* Actually a pointer to the compartment's export table *) *)
     }.
 
-    Inductive ThreadStatus :=
-    | UserMode
-    | MachineMode.
-
     Record TrustedStack := {
         (* trustedStack_shadowRegisters : RegisterFile; *)
         trustedStack_frames : list TrustedStackFrame;
-        trustedStack_exceptionInfo: Value;
-        trustedStack_mepcc: CapOrValue; (* CapAndValue? *)
     }.
 
     Record Thread := {
         thread_rf: RegisterFile;
         thread_pcc: PCC;
+        thread_mepcc: MEPCC;
+        thread_exceptionInfo: EXNInfo;
         thread_trustedStack: TrustedStack;
-        thread_status: ThreadStatus
     }.
 
-    Record MachineState := {
+    Record Machine := {
         machine_memory: Memory_t;
         machine_interruptStatus : InterruptStatus;
         machine_threads : list Thread;
         machine_curThreadId : nat;
     }.
 
-    Inductive UserStepResult :=
-    | UserStep_SameDomain
-    | UserStep_JumpViaSentry (sentry: CapOrValue)
-    | UserStep_CrossCompartmentCall (sentry: CapOrValue)
-    | UserStep_CrossCompartmentReturn
-    | UserStep_ThrowException (exnInfo: Value).
+    Section StateTransition.
 
-    (* Deterministic function defined by ISA + Loader *)
-    Definition user_step_t : Type :=
-      PCC -> RegisterFile -> Memory_t ->
-      (UserStepResult * (PCC * RegisterFile * Memory_t)).
+      Definition ReachableCapFromRf (rf: RegisterFile) cap :=
+        forall rf_caps,
+        (forall c, In c rf_caps -> exists v, In (Some c, v) rf) /\
+        ReachableCap rf_caps cap.
 
-    Variable user_step : user_step_t.
+      Inductive FancyStep :=
+      | Step_Normal
+      | Step_Jalr (sentry: CapAndValue) (opt_linkReg: option RegIdx)
+      | Step_CompartmentCall
+      | Step_CompartmentRet
+      | Step_Exception (exnInfo: Value).
 
-    (* A user step should only update state by:
-       - updating register file to other cap/value reachable from memory
-       - updating memory according to permissions of reachable caps, and as a function of values reachable from caps
-       - be defined by value in memory at PCC?
-       - call sentries that are reachable
-       - only user-mode exception codes
-     *)
-    Definition WF_user_step (step_fn: user_step_t) : Prop.
-    Admitted.
+      Definition UserContext : Type := (RegisterFile * PCC * Memory_t).
+      Definition SystemContext : Type := (MEPCC * EXNInfo * TrustedStack * InterruptStatus).
 
-    Definition UserModeStep : MachineState -> (MachineState -> Prop) -> Prop.
-    Admitted.
+      Definition ValidContexts : UserContext -> SystemContext -> Prop.
+      Admitted.
 
-    Definition Step : MachineState -> (MachineState -> Prop) -> Prop.
-    Admitted.
+      Definition step_t : Type := (UserContext -> SystemContext ->
+                                   FancyStep * UserContext * SystemContext).
+
+      (* A user step should only update state by:
+         - updating register file to other cap/value reachable from memory
+         - updating memory according to permissions of reachable caps, and as a function of values reachable from caps
+         - be defined by value in memory at PCC?
+         - call sentries that are reachable
+         - only user-mode exception codes (technically)
+       *)
+      Definition WF_normal_user_step : UserContext -> (UserContext -> Prop) -> Prop .
+      Admitted.
+
+      Definition WF_normal_system_step : UserContext -> SystemContext -> (UserContext -> SystemContext -> Prop) -> Prop.
+      Admitted.
+
+      Definition UserContextHasSystemPerm (ctx: UserContext) : Prop :=
+        let '( _, (pc_cap, _), _) := ctx in
+        match pc_cap with
+        | Some cap => In Perm.System cap.(capPerms)
+        | None => False
+        end.
+
+      Inductive WF_step' : UserContext -> SystemContext -> (FancyStep -> UserContext -> SystemContext -> Prop) -> Prop :=
+      | WFStep_User :
+          forall userCtx sysCtx mid post,
+          WF_normal_user_step userCtx mid ->
+          (forall userCtx', mid userCtx' ->
+                       post Step_Normal userCtx' sysCtx) ->
+          WF_step' userCtx sysCtx post
+      | WFStep_System :
+          forall userCtx sysCtx mid post,
+          UserContextHasSystemPerm userCtx ->
+          WF_normal_system_step userCtx sysCtx mid ->
+          (forall userCtx' sysCtx', mid userCtx' sysCtx' ->
+                               post Step_Normal userCtx' sysCtx') ->
+          WF_step' userCtx sysCtx post
+      | WFStep_Jalr :
+          forall userCtx sysCtx post,
+          False -> (* TODO *)
+          WF_step' userCtx sysCtx post
+      | WFStep_CompartmentCall :
+          forall userCtx sysCtx post,
+          False -> (* TODO *)
+          WF_step' userCtx sysCtx post
+      | WFStep_CompartmentRet :
+          forall userCtx sysCtx post,
+          False -> (* TODO *)
+          WF_step' userCtx sysCtx post
+      | WFStep_ThrowException :
+          forall userCtx sysCtx post,
+          False -> (* TODO *)
+          WF_step' userCtx sysCtx post.
+
+      Definition WF_step (fn: step_t): Prop :=
+        forall userCtx sysCtx post,
+          let '(stepRes, userCtx', sysCtx') := fn userCtx sysCtx in
+          ValidContexts userCtx sysCtx ->
+          post stepRes userCtx' sysCtx' ->
+          WF_step' userCtx sysCtx post.
+
+      Class StepFn := {
+          stepFn : step_t;
+          stepFn_ok: WF_step stepFn
+      }.
+
+      Context (MachineStep: StepFn).
+
+      Definition setMachineThread (m: Machine) (tid: nat): Machine :=
+        {| machine_memory := m.(machine_memory);
+           machine_interruptStatus := m.(machine_interruptStatus);
+           machine_threads := m.(machine_threads);
+           machine_curThreadId := tid
+        |}.
+
+      Definition SameThreadStep (m: Machine)
+                                (update_fn: Thread -> Memory_t -> InterruptStatus ->
+                                            (Thread -> Memory_t -> InterruptStatus -> Prop) -> Prop)
+                                (post: Machine -> Prop) : Prop :=
+        let tid := m.(machine_curThreadId) in
+        let threads := m.(machine_threads) in
+        exists thread, nth_error threads tid = Some thread /\
+                  update_fn thread m.(machine_memory) m.(machine_interruptStatus) (fun thread' memory' interrupt' =>
+                     post {| machine_memory:= memory';
+                             machine_threads := listUpdate threads tid thread';
+                             machine_curThreadId := tid;
+                             machine_interruptStatus := interrupt'
+                          |}).
+
+      Definition do_fancy_step (step: FancyStep) (userCtx: UserContext) (sysCtx: SystemContext)
+                               : UserContext * SystemContext.
+      Admitted.
+
+      Definition merge_contexts (userCtx: UserContext) (sysCtx: SystemContext)
+                                : Thread * Memory_t * InterruptStatus :=
+        let '(rf, pcc, mem) := userCtx in
+        let '(mepcc, exnInfo, tstack, istatus) := sysCtx in
+        ({| thread_rf := rf;
+            thread_pcc := pcc;
+            thread_mepcc := mepcc;
+            thread_exceptionInfo := exnInfo;
+            thread_trustedStack := tstack
+         |}, mem, istatus).
+
+      Definition split_contexts (thread: Thread) (mem: Memory_t) (istatus: InterruptStatus)
+                                : UserContext * SystemContext :=
+          let userCtx := (thread.(thread_rf), thread.(thread_pcc), mem) in
+          let sysCtx := (thread.(thread_mepcc), thread.(thread_exceptionInfo),
+                         thread.(thread_trustedStack), istatus) in
+          (userCtx, sysCtx).
+
+      Definition step_update_fn : Thread -> Memory_t -> InterruptStatus ->
+                                  (Thread -> Memory_t -> InterruptStatus -> Prop) -> Prop :=
+        fun thread mem istatus post =>
+          let '(userCtx, sysCtx) := split_contexts thread mem istatus in
+          let '(res, userCtx', sysCtx') := stepFn userCtx sysCtx in
+          let '(userCtx', sysCtx') := do_fancy_step res userCtx' sysCtx' in
+          let '(thread', mem', istatus') := merge_contexts userCtx' sysCtx' in
+          post thread' mem' istatus'.
+
+      Inductive Step : Machine -> (Machine -> Prop) -> Prop :=
+      | Step_SwitchThreads:
+        forall m tid' post,
+          m.(machine_interruptStatus) = InterruptsEnabled ->
+          tid' < List.length m.(machine_threads) ->
+          post (setMachineThread m tid') ->
+          Step m post
+      | Step_SameThread :
+        forall m post,
+          SameThreadStep m step_update_fn post ->
+          Step m post.
+    End StateTransition.
 
   End Machine.
 
