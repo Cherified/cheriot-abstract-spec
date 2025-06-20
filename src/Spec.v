@@ -252,6 +252,8 @@ Section Machine.
         rf_targetCalleeEntry : CapOrValue; (* Export table entry for target callee *)
     }.
 
+    (* TODO: decide on a register file representation. RF manipulations are currently buggy. *)
+    Variable rfIdx_ra : nat.
     Variable rfToSemanticRf : RegisterFile -> option SemanticRegisterFile.
     Variable semanticRfToConcreteRf : SemanticRegisterFile -> option RegisterFile.
 
@@ -377,7 +379,10 @@ Section Machine.
 
       Class StepFn := {
           stepFn : step_t;
-          stepFn_ok: WF_step stepFn
+          stepFn_ok: WF_step stepFn;
+          SWITCHER_exceptionEntryPCC : CapOrValue;
+          SWITCHER_compartmentCallPCC: CapOrValue;
+          SWITCHER_compartmentRetPCC: CapOrValue
       }.
 
       Context (MachineStep: StepFn).
@@ -403,27 +408,39 @@ Section Machine.
                              machine_interruptStatus := interrupt'
                           |}).
 
-      Variable SWITCHER_exceptionEntryPCC : CapOrValue.
 
       Definition setPCCInUserContext (pcc: PCC) (ctx: UserContext) : UserContext :=
         let '(st, mem) := ctx in
         ({| thread_rf := st.(thread_rf);
             thread_pcc := pcc;
           |}, mem).
+      Definition updateRFInUserContext (idx: nat) (newValue: PCC) (ctx: UserContext) : UserContext :=
+        let '(st, mem) := ctx in
+        ({| thread_rf := listUpdate st.(thread_rf) idx newValue;
+            thread_pcc := st.(thread_pcc);
+          |}, mem).
 
       (* WIP *)
       Definition do_fancy_step (step: FancyStep) (userCtx: UserContext) (sysCtx: SystemContext)
                                : option (UserContext * SystemContext) :=
+        let '(userSt, mem) := userCtx in
+        let '(sysSt, istatus) := sysCtx in
         match step with
         | Step_Normal => Some (userCtx, sysCtx)
         | Step_Jalr sentry opt_regidx => None
-        | Step_CompartmentCall => None
-        | Step_CompartmentRet => None
+        | Step_CompartmentCall =>
+            (* We must have entered via a (IRQ-disabling ?!) forward sentry.
+               cjalr ra --> set ra, PCC, and istatus *)
+            Some ((updateRFInUserContext rfIdx_ra userSt.(thread_pcc)
+                    (setPCCInUserContext SWITCHER_compartmentCallPCC userCtx)),
+                  (sysSt, InterruptsDisabled (* !! *) ))
+        | Step_CompartmentRet =>
+            Some (setPCCInUserContext SWITCHER_compartmentRetPCC userCtx, sysCtx)
         | Step_Exception exnInfo =>
             Some (setPCCInUserContext SWITCHER_exceptionEntryPCC userCtx,
-                  ({|thread_mepcc := (fst userCtx).(thread_pcc);
+                  ({|thread_mepcc := userSt.(thread_pcc);
                      thread_exceptionInfo := exnInfo;
-                     thread_trustedStack := (fst sysCtx).(thread_trustedStack);
+                     thread_trustedStack := sysSt.(thread_trustedStack);
                    |}, InterruptsDisabled)
                  )
         end.
