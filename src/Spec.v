@@ -258,21 +258,33 @@ Section Machine.
         (* trustedStackFrame_compartmentIdx : nat; (* Actually a pointer to the compartment's export table *) *)
     }.
 
+    Inductive ThreadStatus :=
+    | UserMode
+    | MachineMode.
+
     Record TrustedStack := {
-        trustedStack_shadowRegisters : RegisterFile;
+        (* trustedStack_shadowRegisters : RegisterFile; *)
         trustedStack_frames : list TrustedStackFrame;
         trustedStack_exceptionInfo: Value;
-        trustedStack_mepcc: CapOrValue (* CapAndValue? *)
+        trustedStack_mepcc: CapOrValue; (* CapAndValue? *)
+    }.
+
+    Record Thread := {
+        thread_rf: RegisterFile;
+        thread_pcc: CapOrValue;
+        thread_trustedStack: TrustedStack;
+        thread_status: ThreadStatus
     }.
 
     Record MachineState := {
-        machine_pcc : CapOrValue;
-        machine_rf : RegisterFile;
         machine_memory: Memory_t;
         machine_interruptStatus : InterruptStatus;
-        machine_trustedStack : list TrustedStack;
+        machine_threads : list Thread;
         machine_curThreadId : nat
     }.
+
+    Definition Step : MachineState -> (MachineState -> Prop) -> Prop.
+    Admitted.
 
   End Machine.
 
