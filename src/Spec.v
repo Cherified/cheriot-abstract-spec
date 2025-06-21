@@ -1,36 +1,5 @@
-From Stdlib Require Import List NArith.
+From Stdlib Require Import List NArith Lia.
 Set Primitive Projections.
-
-(* Represents basic permissions *)
-Module Perm.
-  Inductive t :=
-  | Exec
-  | System
-  | Load
-  | Store (* Needed as regions only control storage of Caps *)
-  | Cap
-  | Sealing
-  | Unsealing.
-End Perm.
-
-(* A cap X can be stored in a cap Y only if X can be stored in a Label that Y provides *)
-(* An example where restricting the label of what can be stored in a cap is useful:
-   If a callee fills a cap supplied by the caller, then the callee should not store a cap to its stack into it.
-   In CHERIoT, a pointer to its stack is always !GL and can only be stored in SL.
-   So to prevent the pointer to the callee's stack from getting stored, the cap supplied by the caller should be !SL
-   eventhough the underlying pointer is really in the stack.
- *)
-Inductive Label :=
-| Local
-| NonLocal.
-
-(* Represents Call and Return sentries *)
-Inductive Sentry :=
-| CallEnableInterrupt
-| CallDisableInterrupt
-| CallInheritInterrupt
-| RetEnableInterrupt
-| RetDisableInterrupt.
 
 Section EqSet.
   Context [A: Type].
@@ -49,13 +18,65 @@ Section ListUtils.
     firstn i l ++ [e] ++ skipn (S i) l.
 End ListUtils.
 
+Theorem seqInBounds n: forall b v,
+    b <= v < b + n -> In v (seq b n).
+Proof.
+  induction n; simpl; intros.
+  - lia.
+  - destruct (PeanoNat.Nat.eq_dec b v); [auto|right].
+    apply IHn.
+    lia.
+Qed.
+
+Definition option_to_bool [A] (a: option A) : bool :=
+  match a with
+  | Some _ => true
+  | _ => false
+  end.
+
+(* Represents basic permissions *)
+Module Perm.
+  Inductive t :=
+  | Exec
+  | System
+  | Load
+  | Store (* Needed as regions only control storage of Caps *)
+  | Cap
+  | Sealing
+  | Unsealing.
+End Perm.
+
 Section Machine.
   Variable Addr: Type.
   Variable Key: Type.
+  Variable Value: Type.
+  Variable AddrToValue: Addr -> Value.
+  Coercion AddrToValue: Addr >-> Value.
+  Variable ValueToAddr: Value -> Addr.
+  Coercion ValueToAddr: Value >-> Addr.
+
+  (* A cap X can be stored in a cap Y only if X can be stored in a Label that Y provides *)
+  (* An example where restricting the label of what can be stored in a cap is useful:
+   If a callee fills a cap supplied by the caller, then the callee should not store a cap to its stack into it.
+   In CHERIoT, a pointer to its stack is always !GL and can only be stored in SL.
+   So to prevent the pointer to the callee's stack from getting stored, the cap supplied by the caller should be !SL
+   eventhough the underlying pointer is really in the stack.
+   *)
+  Inductive Label :=
+  | Local
+  | NonLocal.
+
+  (* Represents Call and Return sentries *)
+  Inductive Sentry :=
+  | CallEnableInterrupt
+  | CallDisableInterrupt
+  | CallInheritInterrupt
+  | RetEnableInterrupt
+  | RetDisableInterrupt.
 
   Record Cap := {
-      capSentry: Sentry;
-      capSealed: option Key; (* Whether a cap is sealed, and the sealing key *)
+      capSentry: option Sentry;
+      capSealed: option Key; (* Whether a cap is sealed, and the key being sealed *)
       capPerms: list Perm.t;
       capCanStore: list Label; (* The labels of caps that this cap can store (SL in CHERIoT) *)
       capCanBeStored: list Label; (* The labels of caps where this cap can be stored in (GL and not GL in CHERIoT) *)
@@ -65,12 +86,17 @@ Section Machine.
       capKeepPerms: list Perm.t; (* Permissions to be the only ones kept when loading using this cap *)
       capKeepCanStore: list Label; (* Labels-of-caps-that-this-cap-can-store to be the only ones kept
                                       when loading using this cap *)
-      capKeepCanBeStored: list Label (* Labels-of-caps-where-this-cap-can-be-stored to be the only ones kept
-                                        when loading using this cap *)
+      capKeepCanBeStored: list Label; (* Labels-of-caps-where-this-cap-can-be-stored to be the only ones kept
+                                         when loading using this cap *)
+      capCursor: Addr; (* The current address of a cap.
+                          The notion of compressed caps makes every cursor valid,
+                          because the bounds are determined by the cursor.
+                          But semantically, we need to carry a proof around saying the cursor is indeed inbounds.
+                          If not, we need to check for the validity of the cursor everywhere *)
+      capCursorValid: In capCursor capAddrs
     }.
 
-  Variable Value: Type.
-  Definition CapOrValue : Type:= option Cap * Value.
+  Definition CapOrValue : Type := Cap + Value.
   Notation Memory_t := (Addr -> CapOrValue).
 
   Variable Memory: Memory_t.
@@ -114,12 +140,13 @@ Section Machine.
         restrictSealedAddrsEq: EqSet z.(capAddrs) y.(capAddrs);
         restrictSealedKeepPermsSubset: EqSet z.(capKeepPerms) y.(capKeepPerms);
         restrictSealedKeepCanStoreSubset: EqSet z.(capKeepCanStore) y.(capKeepCanStore);
-        restrictSealedKeepCanBeStoredSubset: EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored) }.
+        restrictSealedKeepCanBeStoredSubset: EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored);
+        restrictSealedCursorEq: z.(capCursor) = y.(capCursor) }.
 
     Definition Restrict : Prop :=
       match y.(capSealed) with
       | None => RestrictUnsealed
-      | Some k => RestrictSealed
+      | Some _ => RestrictSealed
       end.
 
     Variable x: Cap.
@@ -154,7 +181,7 @@ Section Machine.
     Record LoadCap : Prop := {
         loadNonRestrictEqs: NonRestrictEqs;
         loadAuthPerm: In Perm.Load x.(capPerms) /\ In Perm.Cap x.(capPerms);
-        loadFromAuth: exists a, In a x.(capAddrs) /\ fst (Memory a) = Some y;
+        loadFromAuth: exists a, In a x.(capAddrs) /\ Memory a = inl y;
         loadSealedEq: z.(capSealed) = y.(capSealed);
         loadAttenuatePerms: match y.(capSealed) with
                             | None => AttenuatePerms
@@ -171,7 +198,7 @@ Section Machine.
         loadKeepCanBeStored: match y.(capSealed) with
                              | None => forall r, In r z.(capKeepCanBeStored) ->
                                                  (In r x.(capKeepCanBeStored) /\ In r y.(capKeepCanBeStored))
-                             | Some k => EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored)
+                             | Some _ => EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored)
                              end}.
 
     Record SealUnsealEqs : Prop := {
@@ -216,15 +243,14 @@ Section Machine.
       Variable stAddrCap: Cap.
       Definition BasicStPerm := ReachableCap stAddrCap /\ In Perm.Store stAddrCap.(capPerms) /\
                                   stAddrCap.(capSealed) = None.
-      Definition modifyMemValue := (exists a, In a stAddrCap.(capAddrs) /\ snd (Memory a) <> snd (NewMemory a)) ->
-                                   BasicStPerm.
-      Definition removeMemCap := (exists a, In a stAddrCap.(capAddrs) /\ fst (Memory a) <> None /\
-                                              fst (NewMemory a) = None) ->
-                                 BasicStPerm.
+      Definition modifyOrCreateMemValue := (exists a v2, In a stAddrCap.(capAddrs) /\
+                                                           Memory a <> inr v2 /\
+                                                           NewMemory a = inr v2) ->
+                                           BasicStPerm.
       Variable stDataCap: Cap.
       Definition modifyMemCap := (exists a, In a stAddrCap.(capAddrs) /\
-                                              fst (NewMemory a) = Some stDataCap /\
-                                              fst (Memory a) <> Some stDataCap) ->
+                                              Memory a <> inl stDataCap /\
+                                              NewMemory a = inl stDataCap) ->
                                  BasicStPerm /\ ReachableCap stDataCap /\
                                    exists l, In l stAddrCap.(capCanStore) /\ In l stDataCap.(capCanBeStored).
     End UpdMem.
@@ -235,37 +261,38 @@ Section Machine.
     Import ListNotations.
     Variable ExnHandlerType : Type. (* In CHERIoT: rich or stackless *)
 
-    Notation PCC := CapOrValue (only parsing).
-    Notation MEPCC := CapOrValue (only parsing).
+    Notation PCC := Cap (only parsing).
+    Notation MEPCC := Cap (only parsing).
     Notation EXNInfo := Value (only parsing).
     Notation RegIdx := nat (only parsing).
 
     Definition RegisterFile := list CapOrValue.
-    Definition CapAndValue : Type := Cap * Value.
 
     Record SemanticRegisterFile := {
-        rf_returnAddress : CapOrValue;
-        rf_csp: CapOrValue;
-        rf_cgp: CapOrValue;
+        rf_returnAddress : Cap;
+        rf_csp: Cap;
+        rf_cgp: Cap;
         rf_argsAndRets: list CapOrValue;
         rf_argsOnly: list CapOrValue;
         rf_calleeSaved: list CapOrValue;
         rf_other: list CapOrValue;
-        rf_targetCalleeEntry : CapOrValue; (* Export table entry for target callee *)
+        rf_targetCalleeEntry : Cap; (* Export table entry for target callee *)
     }.
 
     (* TODO: decide on a register file representation. RF manipulations are currently buggy. *)
     Variable rfIdx_ra : nat.
-    Variable rfToSemanticRf : RegisterFile -> option SemanticRegisterFile.
-    Variable semanticRfToConcreteRf : SemanticRegisterFile -> option RegisterFile.
+    Variable rfToSemanticRf : RegisterFile -> SemanticRegisterFile.
+    Coercion rfToSemanticRf : RegisterFile >-> SemanticRegisterFile.
+    Variable semanticRfToConcreteRf : SemanticRegisterFile -> RegisterFile.
+    Coercion semanticRfToConcreteRf : SemanticRegisterFile >-> RegisterFile.
 
     Inductive InterruptStatus :=
     | InterruptsEnabled
     | InterruptsDisabled.
 
     Record TrustedStackFrame := {
-        trustedStackFrame_CSP : CapAndValue;
-        trustedStackFrame_calleeExportTable : CapAndValue;
+        trustedStackFrame_CSP : Cap;
+        trustedStackFrame_calleeExportTable : Cap;
         trustedStackFrame_errorCounter : N
         (* trustedStackFrame_compartmentIdx : nat; (* Actually a pointer to the compartment's export table *) *)
     }.
@@ -302,12 +329,12 @@ Section Machine.
 
       Definition ReachableCapFromRf (rf: RegisterFile) cap :=
         forall rf_caps,
-        (forall c, In c rf_caps -> exists v, In (Some c, v) rf) /\
+        (forall c, In c rf_caps -> In (inl c) rf) /\
         ReachableCap rf_caps cap.
 
       Inductive FancyStep :=
       | Step_Normal
-      | Step_Jalr (sentry: CapAndValue) (opt_linkReg: option RegIdx)
+      | Step_Jalr (sentry: Cap) (opt_linkReg: option RegIdx)
       | Step_CompartmentCall
       | Step_CompartmentRet
       | Step_Exception (exnInfo: Value).
@@ -336,11 +363,7 @@ Section Machine.
       Admitted.
 
       Definition UserContextHasSystemPerm (ctx: UserContext) : Prop :=
-        let '(userThread, _) := ctx in
-        match userThread.(thread_pcc) with
-        | (Some cap, _) => In Perm.System cap.(capPerms)
-        | (None, _) => False
-        end.
+        In Perm.System ((fst ctx).(thread_pcc)).(capPerms).
 
       Inductive WF_step' : UserContext -> SystemContext -> (FancyStep -> UserContext -> SystemContext -> Prop)
                            -> Prop :=
@@ -389,9 +412,9 @@ Section Machine.
       Class StepFn := {
           stepFn : step_t;
           stepFn_ok: WF_step stepFn;
-          SWITCHER_exceptionEntryPCC : CapOrValue;
-          SWITCHER_compartmentCallPCC: CapOrValue;
-          SWITCHER_compartmentRetPCC: CapOrValue
+          SWITCHER_exceptionEntryPCC : Cap;
+          SWITCHER_compartmentCallPCC: Cap;
+          SWITCHER_compartmentRetPCC: Cap
       }.
 
       Context (MachineStep: StepFn).
@@ -426,7 +449,7 @@ Section Machine.
 
       Definition updateRFInUserContext (idx: nat) (newValue: PCC) (ctx: UserContext) : UserContext :=
         let '(st, mem) := ctx in
-        ({| thread_rf := listUpdate st.(thread_rf) idx newValue;
+        ({| thread_rf := listUpdate st.(thread_rf) idx (inl newValue);
             thread_pcc := st.(thread_pcc);
           |}, mem).
 
@@ -469,6 +492,7 @@ Section Machine.
           let sysCtx := (thread.(thread_systemState), istatus) in
           (userCtx, sysCtx).
 
+      (*
       Definition step_update_fn : Thread -> Memory_t -> InterruptStatus ->
                                   (Thread -> Memory_t -> InterruptStatus -> Prop) -> Prop :=
         fun thread mem istatus post =>
@@ -489,15 +513,16 @@ Section Machine.
         forall m post,
           SameThreadStep m step_update_fn post ->
           Step m post.
+       *)
     End StateTransition.
 
   End Machine.
 
   (* Section MachineOld. *)
     (* Inductive ImportTableEntry := *)
-    (* | ImportEntry_SealedCapToExportEntry (cap: CapAndValue) *)
-    (* | ImportEntry_SentryToLibraryFunction (cap: CapAndValue) (* Code + read-only globals *) *)
-    (* | ImportEntry_MMIOCap (cap: CapAndValue). *)
+    (* | ImportEntry_SealedCapToExportEntry (cap: Cap) *)
+    (* | ImportEntry_SentryToLibraryFunction (cap: Cap) (* Code + read-only globals *) *)
+    (* | ImportEntry_MMIOCap (cap: Cap). *)
 
     (* Record ExportTableEntry := { *)
     (*     exportEntryPCC: Value; (* In CHERIoT, offset from compartment PCC *) *)
@@ -507,8 +532,8 @@ Section Machine.
     (* }. *)
 
     (* Record Compartment := { *)
-    (*     compartmentPCC : CapAndValue; *)
-    (*     compartmentCGP : CapAndValue; *)
+    (*     compartmentPCC : Cap; *)
+    (*     compartmentCGP : Cap; *)
     (*     compartmentErrorHandlers : list (Value * ExnHandlerType); (* offset from PCC *) *)
     (*     compartmentImportTable : list ImportTableEntry; *)
     (*     compartmentExportTable : list (ExportTableEntry) (* Address where export table entry is stored *) *)
@@ -530,8 +555,8 @@ Section Machine.
   (*   }. *)
 
   (*   Record Compartment := { *)
-  (*       compartmentPCC : CapOrValue; *)
-  (*       compartmentCGP : CapOrValue; *)
+  (*       compartmentPCC : Cap; *)
+  (*       compartmentCGP : Cap; *)
   (*       compartmentErrorHandlers : list (Value * ExnHandlerType); (* offset from PCC *) *)
   (*       compartmentImportTable : list ImportTableEntry; *)
   (*       compartmentExportTable : list (Addr * ExportTableEntry) (* Address where export table entry is stored *) *)
@@ -549,7 +574,7 @@ Section Machine.
   (*    *) *)
   (*   Record TrustedStackFrame := { *)
   (*       trustedStackFrame_compartmentIdx : nat; (* Actually a pointer to the compartment's export table *) *)
-  (*       trustedStackFrame_CSP : CapOrValue *)
+  (*       trustedStackFrame_CSP : Cap *)
   (*   }. *)
 
   (*   (* Register spill area is currently implicit, in our model. *) *)
@@ -701,16 +726,16 @@ Section Machine.
   (*   Definition StackFrame := list CapOrValue. *)
 
   (*   Record TrustedStackEntry := *)
-  (*     { TrustedEntryPCC : CapOrValue; *)
-  (*       TrustedEntryCSP : CapOrValue; *)
+  (*     { TrustedEntryPCC : Cap; *)
+  (*       TrustedEntryCSP : Cap; *)
   (*       TrustedEntryRf : RegisterFile; *)
   (*       TrustedEntryIStatus : InterruptStatus *)
   (*     }. *)
 
   (*   (* TODO: Trusted stack frame should contain (among other things), CSP that compartment had on entry. *) *)
   (*   Record Thread := { *)
-  (*       threadPCC: CapOrValue; (* Offset relative to compartment PCC *) *)
-  (*       threadCSP: CapOrValue; (* Semantic CSP? *) *)
+  (*       threadPCC: Cap; (* Offset relative to compartment PCC *) *)
+  (*       threadCSP: Cap; (* Semantic CSP? *) *)
   (*       threadRF: RegisterFile; *)
   (*       threadCompartmentIdx: nat; (* Ghost state *) *)
   (*       threadStack : list StackFrame; (* A thread can reach any caps in its topmost stackframe? *) *)
@@ -725,8 +750,8 @@ Section Machine.
   (*   Variable validErrorHandlerOffset: CapOrValue -> Value -> CapOrValue -> Prop. *)
   (*   Variable validExnHandlerRf *)
   (*     : ExnInfo (* CapWithValue (* Return sentry to switcher *) *) *)
-  (*               -> CapOrValue (* CGP *) *)
-  (*               (* -> CapWithValue (* CSP *) *) *)
+  (*               -> Cap (* CGP *) *)
+  (*               (* -> Cap (* CSP *) *) *)
   (*               -> list CapOrValue (* Caps reachable by CSP? *) *)
   (*               -> RegisterFile *)
   (*               -> Prop. *)
@@ -746,8 +771,8 @@ Section Machine.
   (*   | ThreadEvent_XCompartmentReturnWithoutSwitcher (rf: RegisterFile) *)
   (*   | ThreadEvent_XCompartmentCall (rf: RegisterFile) *)
   (*   | ThreadEvent_XCompartmentReturn (rf: RegisterFile) *)
-  (*   | ThreadEvent_Exception (pc: CapOrValue) (rf: RegisterFile) (exn: ExnInfo) *)
-  (*   | ThreadEvent_ExceptionReturn (pc: CapOrValue) (rf: RegisterFile). *)
+  (*   | ThreadEvent_Exception (pc: Cap) (rf: RegisterFile) (exn: ExnInfo) *)
+  (*   | ThreadEvent_ExceptionReturn (pc: Cap) (rf: RegisterFile). *)
 
 
 
@@ -777,7 +802,7 @@ Section Machine.
   (*   Definition KeepDomainStep : Machine -> (Machine -> list TraceEvent -> Prop) -> Prop. *)
   (*   Admitted. *)
 
-  (*   Definition validErrorHandlerPCC (pcc: CapOrValue) (compartment: Compartment) : Prop := *)
+  (*   Definition validErrorHandlerPCC (pcc: Cap) (compartment: Compartment) : Prop := *)
   (*     exists offset handlerType, *)
   (*       In (offset, handlerType) compartment.(compartmentErrorHandlers) /\ *)
   (*       validErrorHandlerOffset compartment.(compartmentPCC) offset pcc. *)
@@ -794,7 +819,7 @@ Section Machine.
   (*     end. *)
 
   (*   (* Handler asks to return to pcc; ensure it's within bounds of the compartment *) *)
-  (*   Definition fixPCC (pcc: CapOrValue) (basePCC : CapOrValue) : option CapOrValue. *)
+  (*   Definition fixPCC (pcc: Cap) (basePCC : Cap) : option Cap. *)
   (*   Admitted. *)
 
   (*   Definition restoreRegisters (rf: RegisterFile) (rf': RegisterFile) : Prop. Admitted. *)
@@ -908,8 +933,10 @@ Module CHERIoTValidation.
     permissions: CompressedPerm;
     otype: N; (* < 8 *)
     base: N;
-    top: N;
+    length: N;
     addr: N;
+    addrInBounds: base <= addr < base + length
+    (* This is needed because of compressed caps. See comment in definition of Cap above *)
   }.
 
   Record Perm :=
@@ -1016,50 +1043,59 @@ Module CHERIoTValidation.
         |}
     end.
 
-  Definition mk_abstract_cap (c: cheriot_cap) : Cap nat N :=
-    let d := decompress_perm c.(permissions) in
-    {| capCanStore := if d.(SL) then [Local;NonLocal] else [NonLocal];
-       capSentry := match c.(otype) with
-                    | 0 => UnsealedJump
-                    | 1 => CallInheritInterrupt
-                    | 2 => CallDisableInterrupt
-                    | 3 => CallEnableInterrupt
-                    | 4 => RetDisableInterrupt
-                    | 5 => RetEnableInterrupt
-                    | (* 6 & 7 *) _ => UnsealedJump (* TODO! capSentry ⊆ capSealed *)
-                    end;
-       capSealed := match c.(otype) with
-                    | 0 => None
-                    | _ => Some c.(otype)
-                    end;
-       capPerms := filter (fun p => match p with
-                                    | Perm.Exec => d.(EX)
-                                    | Perm.System => d.(SR)
-                                    | Perm.Load => d.(LD)
-                                    | Perm.Store => d.(SD)
-                                    | Perm.Cap => d.(MC)
-                                    | Perm.Sealing => d.(SE)
-                                    | Perm.Unsealing => d.(US)
-                                 end)
-                     [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
-       capCanBeStored := if d.(GL) then [Local;NonLocal] else [Local];
-       capSealingKeys := [c.(addr)];
-       capUnsealingKeys := [c.(addr)];
-       capAddrs := seq (N.to_nat c.(base)) (N.to_nat (c.(top) - c.(base)));
-       capKeepPerms := filter (fun p => match p with
-                                 | Perm.Exec => true
-                                 | Perm.System => true
-                                 | Perm.Load => true
-                                 | Perm.Store => d.(LM)
-                                 | Perm.Cap => true
-                                 | Perm.Sealing => true
-                                 | Perm.Unsealing => true
-                                 end)
-                         [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
-       capKeepCanStore := [Local;NonLocal];
-       capKeepCanBeStored := if d.(LG) then [Local;NonLocal] else [Local]
-     |}.
-
+  Definition mk_abstract_cap (c: cheriot_cap) : Cap N N.
+    refine (
+        let d := decompress_perm c.(permissions) in
+        {| capCanStore := if d.(SL) then [Local;NonLocal] else [NonLocal];
+          capSentry := match c.(otype) with
+                       | 0 => None
+                       | 1 => Some CallInheritInterrupt
+                       | 2 => Some CallDisableInterrupt
+                       | 3 => Some CallEnableInterrupt
+                       | 4 => Some RetDisableInterrupt
+                       | 5 => Some RetEnableInterrupt
+                       | (* 6 & 7 *) _ => None (* TODO! capSentry ⊆ capSealed *)
+                       end;
+          capSealed := match c.(otype) with
+                       | 0 => None
+                       | _ => Some c.(otype)
+                       end;
+          capPerms := filter (fun p => match p with
+                                       | Perm.Exec => d.(EX)
+                                       | Perm.System => d.(SR)
+                                       | Perm.Load => d.(LD)
+                                       | Perm.Store => d.(SD)
+                                       | Perm.Cap => d.(MC)
+                                       | Perm.Sealing => d.(SE)
+                                       | Perm.Unsealing => d.(US)
+                                       end)
+                        [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
+          capCanBeStored := if d.(GL) then [Local;NonLocal] else [Local];
+          capSealingKeys := [c.(addr)];
+          capUnsealingKeys := [c.(addr)];
+          capAddrs := map N.of_nat (seq (N.to_nat c.(base)) (N.to_nat (c.(length))));
+          capKeepPerms := filter (fun p => match p with
+                                           | Perm.Exec => true
+                                           | Perm.System => true
+                                           | Perm.Load => true
+                                           | Perm.Store => d.(LM)
+                                           | Perm.Cap => true
+                                           | Perm.Sealing => true
+                                           | Perm.Unsealing => true
+                                           end)
+                            [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
+          capKeepCanStore := [Local;NonLocal];
+          capKeepCanBeStored := if d.(LG) then [Local;NonLocal] else [Local];
+          capCursor := c.(addr);
+          capCursorValid := _
+        |}).
+    Proof.
+      abstract (rewrite in_map_iff;
+                exists (N.to_nat c.(addr));
+                split; [apply N2Nat.id |apply seqInBounds];
+                pose proof c.(addrInBounds);
+                Lia.lia).
+    Defined.
 End CHERIoTValidation.
 
 (* Require Import coqutil.Map.Interface. *)
