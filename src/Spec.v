@@ -26,7 +26,6 @@ Inductive Label :=
 
 (* Represents Call and Return sentries *)
 Inductive Sentry :=
-| UnsealedJump
 | CallEnableInterrupt
 | CallDisableInterrupt
 | CallInheritInterrupt
@@ -215,14 +214,17 @@ Section Machine.
     Section UpdMem.
       Variable NewMemory: Memory_t.
       Variable stAddrCap: Cap.
-      Definition BasicStPerm := ReachableCap stAddrCap /\ In Perm.Store stAddrCap.(capPerms).
+      Definition BasicStPerm := ReachableCap stAddrCap /\ In Perm.Store stAddrCap.(capPerms) /\
+                                  stAddrCap.(capSealed) = None.
       Definition modifyMemValue := (exists a, In a stAddrCap.(capAddrs) /\ snd (Memory a) <> snd (NewMemory a)) ->
                                    BasicStPerm.
-      Definition removeMemCap := (exists a, In a stAddrCap.(capAddrs) /\ fst (Memory a) <> None /\ fst (NewMemory a) = None) ->
+      Definition removeMemCap := (exists a, In a stAddrCap.(capAddrs) /\ fst (Memory a) <> None /\
+                                              fst (NewMemory a) = None) ->
                                  BasicStPerm.
       Variable stDataCap: Cap.
       Definition modifyMemCap := (exists a, In a stAddrCap.(capAddrs) /\
-                                              fst (NewMemory a) = Some stDataCap /\ fst (Memory a) <> Some stDataCap) ->
+                                              fst (NewMemory a) = Some stDataCap /\
+                                              fst (Memory a) <> Some stDataCap) ->
                                  BasicStPerm /\ ReachableCap stDataCap /\
                                    exists l, In l stAddrCap.(capCanStore) /\ In l stDataCap.(capCanBeStored).
     End UpdMem.
@@ -329,7 +331,8 @@ Section Machine.
       Definition WF_normal_user_step : UserContext -> (UserContext -> Prop) -> Prop .
       Admitted.
 
-      Definition WF_normal_system_step : UserContext -> SystemContext -> (UserContext -> SystemContext -> Prop) -> Prop.
+      Definition WF_normal_system_step : UserContext -> SystemContext -> (UserContext -> SystemContext -> Prop)
+                                         -> Prop.
       Admitted.
 
       Definition UserContextHasSystemPerm (ctx: UserContext) : Prop :=
@@ -339,7 +342,8 @@ Section Machine.
         | (None, _) => False
         end.
 
-      Inductive WF_step' : UserContext -> SystemContext -> (FancyStep -> UserContext -> SystemContext -> Prop) -> Prop :=
+      Inductive WF_step' : UserContext -> SystemContext -> (FancyStep -> UserContext -> SystemContext -> Prop)
+                           -> Prop :=
       | WFStep_User :
           forall userCtx sysCtx mid post,
           WF_normal_user_step userCtx mid ->
