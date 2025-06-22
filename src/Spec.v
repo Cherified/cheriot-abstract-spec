@@ -144,9 +144,9 @@ Section Machine.
         restrictSealedCursorEq: z.(capCursor) = y.(capCursor) }.
 
     Definition Restrict : Prop :=
-      match y.(capSealed) with
-      | None => RestrictUnsealed
-      | Some _ => RestrictSealed
+      match y.(capSentry), y.(capSealed) with
+      | None, None => RestrictUnsealed
+      | _, _ => RestrictSealed
       end.
 
     Variable x: Cap.
