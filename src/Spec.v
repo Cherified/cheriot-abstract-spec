@@ -40,7 +40,7 @@ Module Perm.
   | Exec
   | System
   | Load
-  | Store (* Needed as regions only control storage of Caps *)
+  | Store
   | Cap
   | Sealing
   | Unsealing.
@@ -74,9 +74,10 @@ Section Machine.
   | RetEnableInterrupt
   | RetDisableInterrupt.
 
+  Definition SealT := (Sentry + Key)%type. (* A sealed cap is either a sentry or a data cap sealed with a key *)
+
   Record Cap := {
-      capSentry: option Sentry;
-      capSealed: option Key; (* Whether a cap is sealed, and the key being sealed *)
+      capSealed: option SealT;
       capPerms: list Perm.t;
       capCanStore: list Label; (* The labels of caps that this cap can store (SL in CHERIoT) *)
       capCanBeStored: list Label; (* The labels of caps where this cap can be stored in (GL and not GL in CHERIoT) *)
@@ -96,7 +97,7 @@ Section Machine.
       capCursorValid: In capCursor capAddrs
     }.
 
-  Definition CapOrValue : Type := Cap + Value.
+  Notation CapOrValue := (Cap + Value)%type.
   Notation Memory_t := (Addr -> CapOrValue).
 
   Variable Memory: Memory_t.
@@ -104,12 +105,10 @@ Section Machine.
   Section CapStep.
     Variable y z: Cap.
 
-    Record RestrictEqs : Prop := {
-        restrictSentryEq: z.(capSentry) = y.(capSentry);
-        restrictSealedEq: z.(capSealed) = y.(capSealed) }.
+    Definition SealEq := z.(capSealed) = y.(capSealed).
 
     Record RestrictUnsealed : Prop := {
-        restrictUnsealedEqs: RestrictEqs;
+        restrictUnsealedEqs: SealEq;
         restrictUnsealedPermsSubset: forall p, In p z.(capPerms) -> In p y.(capPerms);
         restrictUnsealedCanStoreSubset: forall r, In r z.(capCanStore) -> In r y.(capCanStore);
         restrictUnsealedCanBeStoredSubset: forall r, In r z.(capCanBeStored) -> In r y.(capCanBeStored);
@@ -121,9 +120,9 @@ Section Machine.
         restrictUnsealedKeepCanBeStoredSubset: forall p, In p z.(capKeepCanBeStored) -> In p y.(capKeepCanBeStored) }.
 
     Record RestrictSealed : Prop := {
-        restrictSealedEqs: RestrictEqs;
+        restrictSealedEqs: SealEq;
         restrictSealedPermsEq: EqSet z.(capPerms) y.(capPerms);
-        restrictSealedCanStore: forall r, In r z.(capCanStore) -> In r y.(capCanStore);
+        restrictSealedCanStore: EqSet z.(capCanStore) y.(capCanStore);
         (* The following seems to be a quirk of CHERIoT,
            maybe make it equal in CHERIoT ISA if there's no use case for this behavior
            and merge with RestrictUnsealed?
@@ -144,17 +143,15 @@ Section Machine.
         restrictSealedCursorEq: z.(capCursor) = y.(capCursor) }.
 
     Definition Restrict : Prop :=
-      match y.(capSentry), y.(capSealed) with
-      | None, None => RestrictUnsealed
-      | _, _ => RestrictSealed
+      match y.(capSealed) with
+      | None => RestrictUnsealed
+      | _ => RestrictSealed
       end.
 
     Variable x: Cap.
     (* When a cap y is loaded using a cap x, then the attentuation of x comes into play to create z *)
 
     Record NonRestrictEqs : Prop := {
-        nonRestrictCanStoreEq: z.(capCanStore) = y.(capCanStore);
-        nonRestrictSentryEq: z.(capSentry) = y.(capSentry);
         nonRestrictAuthUnsealed: x.(capSealed) = None;
         nonRestrictSealingKeysEq: EqSet z.(capSealingKeys) y.(capSealingKeys);
         nonRestrictUnsealingKeysEq: EqSet z.(capUnsealingKeys) y.(capUnsealingKeys);
@@ -182,7 +179,7 @@ Section Machine.
         loadNonRestrictEqs: NonRestrictEqs;
         loadAuthPerm: In Perm.Load x.(capPerms) /\ In Perm.Cap x.(capPerms);
         loadFromAuth: exists a, In a x.(capAddrs) /\ Memory a = inl y;
-        loadSealedEq: z.(capSealed) = y.(capSealed);
+        loadSealEq: z.(capSealed) = y.(capSealed);
         loadAttenuatePerms: match y.(capSealed) with
                             | None => AttenuatePerms
                             | Some k => NonAttenuatePerms
@@ -212,11 +209,11 @@ Section Machine.
     Record Seal : Prop := {
         sealEqs: SealUnsealEqs;
         sealOrigUnsealed: y.(capSealed) = None;
-        sealNewSealed: exists k, In k x.(capSealingKeys) /\ z.(capSealed) = Some k }.
+        sealNewSealed: exists k, In k x.(capSealingKeys) /\ z.(capSealed) = Some (inr k) }.
 
     Record Unseal : Prop := {
         unsealEqs: SealUnsealEqs;
-        unsealOrigSealed: exists k, In k x.(capUnsealingKeys) /\ y.(capSealed) = Some k ;
+        unsealOrigSealed: exists k, In k x.(capUnsealingKeys) /\ y.(capSealed) = Some (inr k) ;
         unsealNewUnsealed: z.(capSealed) = None }.
   End CapStep.
 
@@ -255,7 +252,6 @@ Section Machine.
                                    exists l, In l stAddrCap.(capCanStore) /\ In l stDataCap.(capCanBeStored).
     End UpdMem.
   End Transitivity.
-
 
   Section Machine.
     Import ListNotations.
@@ -1046,20 +1042,20 @@ Module CHERIoTValidation.
   Definition mk_abstract_cap (c: cheriot_cap) : Cap N N.
     refine (
         let d := decompress_perm c.(permissions) in
-        {| capCanStore := if d.(SL) then [Local;NonLocal] else [NonLocal];
-          capSentry := match c.(otype) with
-                       | 0 => None
-                       | 1 => Some CallInheritInterrupt
-                       | 2 => Some CallDisableInterrupt
-                       | 3 => Some CallEnableInterrupt
-                       | 4 => Some RetDisableInterrupt
-                       | 5 => Some RetEnableInterrupt
-                       | (* 6 & 7 *) _ => None (* TODO! capSentry ⊆ capSealed *)
-                       end;
-          capSealed := match c.(otype) with
-                       | 0 => None
-                       | _ => Some c.(otype)
-                       end;
+        {|capSealed := if d.(EX)
+                       then match c.(otype) with
+                            | 0 => None
+                            | 1 => Some (inl CallInheritInterrupt)
+                            | 2 => Some (inl CallDisableInterrupt)
+                            | 3 => Some (inl CallEnableInterrupt)
+                            | 4 => Some (inl RetDisableInterrupt)
+                            | 5 => Some (inl RetEnableInterrupt)
+                            | (* 6 & 7 *) _ => None (* TODO! capSentry ⊆ capSealed *)
+                            end
+                       else match c.(otype) with
+                            | 0 => None
+                            | _ => Some (inr c.(otype))
+                            end;
           capPerms := filter (fun p => match p with
                                        | Perm.Exec => d.(EX)
                                        | Perm.System => d.(SR)
@@ -1070,6 +1066,7 @@ Module CHERIoTValidation.
                                        | Perm.Unsealing => d.(US)
                                        end)
                         [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
+          capCanStore := if d.(SL) then [Local;NonLocal] else [NonLocal];
           capCanBeStored := if d.(GL) then [Local;NonLocal] else [Local];
           capSealingKeys := [c.(addr)];
           capUnsealingKeys := [c.(addr)];
