@@ -51,9 +51,7 @@ Section Machine.
   Variable Key: Type.
   Variable Value: Type.
   Variable AddrToValue: Addr -> Value.
-  Coercion AddrToValue: Addr >-> Value.
   Variable ValueToAddr: Value -> Addr.
-  Coercion ValueToAddr: Value >-> Addr.
 
   (* A cap X can be stored in a cap Y only if X can be stored in a Label that Y provides *)
   (* An example where restricting the label of what can be stored in a cap is useful:
@@ -89,12 +87,14 @@ Section Machine.
                                       when loading using this cap *)
       capKeepCanBeStored: list Label; (* Labels-of-caps-where-this-cap-can-be-stored to be the only ones kept
                                          when loading using this cap *)
-      capCursor: Addr; (* The current address of a cap.
-                          The notion of compressed caps makes every cursor valid,
-                          because the bounds are determined by the cursor.
-                          But semantically, we need to carry a proof around saying the cursor is indeed inbounds.
-                          If not, we need to check for the validity of the cursor everywhere *)
-      capCursorValid: In capCursor capAddrs
+      capCursor: Addr (* The current address of a cap.
+                         These cursors can be out of bounds w.r.t. capAddrs.
+                         In CHERI these out of bounds cursors are allowed as part of representable region.
+                         In the formal model, any address is representable.
+                         Notice that when sealing a capability, the cursor is not checked to be inbounds.
+                         This mean one has to explicitly check if the sentry capabilities are in-bounds.
+                         This creates a problem for return sentries, as they need not be in-bounds;
+                         the error has to be handled by the caller compartment on return. *)
     }.
 
   Notation CapOrValue := (Cap + Value)%type.
@@ -278,9 +278,7 @@ Section Machine.
     (* TODO: decide on a register file representation. RF manipulations are currently buggy. *)
     Variable rfIdx_ra : nat.
     Variable rfToSemanticRf : RegisterFile -> SemanticRegisterFile.
-    Coercion rfToSemanticRf : RegisterFile >-> SemanticRegisterFile.
     Variable semanticRfToConcreteRf : SemanticRegisterFile -> RegisterFile.
-    Coercion semanticRfToConcreteRf : SemanticRegisterFile >-> RegisterFile.
 
     Inductive InterruptStatus :=
     | InterruptsEnabled
@@ -1039,60 +1037,50 @@ Module CHERIoTValidation.
         |}
     end.
 
-  Definition mk_abstract_cap (c: cheriot_cap) : Cap N N.
-    refine (
-        let d := decompress_perm c.(permissions) in
-        {|capSealed := if d.(EX)
-                       then match c.(otype) with
-                            | 0 => None
-                            | 1 => Some (inl CallInheritInterrupt)
-                            | 2 => Some (inl CallDisableInterrupt)
-                            | 3 => Some (inl CallEnableInterrupt)
-                            | 4 => Some (inl RetDisableInterrupt)
-                            | 5 => Some (inl RetEnableInterrupt)
-                            | (* 6 & 7 *) _ => None (* TODO! capSentry ⊆ capSealed *)
-                            end
-                       else match c.(otype) with
-                            | 0 => None
-                            | _ => Some (inr c.(otype))
-                            end;
-          capPerms := filter (fun p => match p with
-                                       | Perm.Exec => d.(EX)
-                                       | Perm.System => d.(SR)
-                                       | Perm.Load => d.(LD)
-                                       | Perm.Store => d.(SD)
-                                       | Perm.Cap => d.(MC)
-                                       | Perm.Sealing => d.(SE)
-                                       | Perm.Unsealing => d.(US)
+  Definition mk_abstract_cap (c: cheriot_cap) : Cap N N :=
+    let d := decompress_perm c.(permissions) in
+    {|capSealed := if d.(EX)
+                   then match c.(otype) with
+                        | 0 => None
+                        | 1 => Some (inl CallInheritInterrupt)
+                        | 2 => Some (inl CallDisableInterrupt)
+                        | 3 => Some (inl CallEnableInterrupt)
+                        | 4 => Some (inl RetDisableInterrupt)
+                        | 5 => Some (inl RetEnableInterrupt)
+                        | (* 6 & 7 *) _ => None (* TODO! capSentry ⊆ capSealed *)
+                        end
+                   else match c.(otype) with
+                        | 0 => None
+                        | _ => Some (inr c.(otype))
+                        end;
+      capPerms := filter (fun p => match p with
+                                   | Perm.Exec => d.(EX)
+                                   | Perm.System => d.(SR)
+                                   | Perm.Load => d.(LD)
+                                   | Perm.Store => d.(SD)
+                                   | Perm.Cap => d.(MC)
+                                   | Perm.Sealing => d.(SE)
+                                   | Perm.Unsealing => d.(US)
+                                   end)
+                    [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
+      capCanStore := if d.(SL) then [Local;NonLocal] else [NonLocal];
+      capCanBeStored := if d.(GL) then [Local;NonLocal] else [Local];
+      capSealingKeys := [c.(addr)];
+      capUnsealingKeys := [c.(addr)];
+      capAddrs := map N.of_nat (seq (N.to_nat c.(base)) (N.to_nat (c.(length))));
+      capKeepPerms := filter (fun p => match p with
+                                       | Perm.Exec => true
+                                       | Perm.System => true
+                                       | Perm.Load => true
+                                       | Perm.Store => d.(LM)
+                                       | Perm.Cap => true
+                                       | Perm.Sealing => true
+                                       | Perm.Unsealing => true
                                        end)
                         [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
-          capCanStore := if d.(SL) then [Local;NonLocal] else [NonLocal];
-          capCanBeStored := if d.(GL) then [Local;NonLocal] else [Local];
-          capSealingKeys := [c.(addr)];
-          capUnsealingKeys := [c.(addr)];
-          capAddrs := map N.of_nat (seq (N.to_nat c.(base)) (N.to_nat (c.(length))));
-          capKeepPerms := filter (fun p => match p with
-                                           | Perm.Exec => true
-                                           | Perm.System => true
-                                           | Perm.Load => true
-                                           | Perm.Store => d.(LM)
-                                           | Perm.Cap => true
-                                           | Perm.Sealing => true
-                                           | Perm.Unsealing => true
-                                           end)
-                            [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
-          capKeepCanStore := [Local;NonLocal];
-          capKeepCanBeStored := if d.(LG) then [Local;NonLocal] else [Local];
-          capCursor := c.(addr);
-          capCursorValid := _
-        |}).
-    Proof.
-      abstract (rewrite in_map_iff;
-                exists (N.to_nat c.(addr));
-                split; [apply N2Nat.id |apply seqInBounds];
-                pose proof c.(addrInBounds);
-                Lia.lia).
-    Defined.
+      capKeepCanStore := [Local;NonLocal];
+      capKeepCanBeStored := if d.(LG) then [Local;NonLocal] else [Local];
+      capCursor := c.(addr) |}.
 End CHERIoTValidation.
 
 (* Require Import coqutil.Map.Interface. *)
