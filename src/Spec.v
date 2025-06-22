@@ -16,6 +16,15 @@ Section ListUtils.
   Import ListNotations.
   Definition listUpdate{E: Type}(l: list E)(i: nat)(e: E): list E :=
     firstn i l ++ [e] ++ skipn (S i) l.
+
+  Fixpoint listSumToInl [A B: Type] (l: list (A+B)) : list A :=
+    match l with
+    | nil => nil
+    | x :: xs => match x with
+                 | inl y => y :: listSumToInl xs
+                 | _ => listSumToInl xs
+                 end
+    end.
 End ListUtils.
 
 Theorem seqInBounds n: forall b v,
@@ -100,30 +109,31 @@ Section Machine.
   Notation CapOrValue := (Cap + Value)%type.
   Notation Memory_t := (Addr -> CapOrValue).
 
-  Variable Memory: Memory_t.
+  Section CurrMemory.
+    Variable Memory: Memory_t.
 
-  Section CapStep.
-    Variable y z: Cap.
+    Section CapStep.
+      Variable y z: Cap.
 
-    Definition SealEq := z.(capSealed) = y.(capSealed).
+      Definition SealEq := z.(capSealed) = y.(capSealed).
 
-    Record RestrictUnsealed : Prop := {
-        restrictUnsealedEqs: SealEq;
-        restrictUnsealedPermsSubset: forall p, In p z.(capPerms) -> In p y.(capPerms);
-        restrictUnsealedCanStoreSubset: forall r, In r z.(capCanStore) -> In r y.(capCanStore);
-        restrictUnsealedCanBeStoredSubset: forall r, In r z.(capCanBeStored) -> In r y.(capCanBeStored);
-        restrictUnsealedSealingKeysSubset: forall k, In k z.(capSealingKeys) -> In k y.(capSealingKeys);
-        restrictUnsealedUnsealingKeysSubset: forall k, In k z.(capUnsealingKeys) -> In k y.(capUnsealingKeys);
-        restrictUnsealedAddrsSubset: forall a, In a z.(capAddrs) -> In a y.(capAddrs);
-        restrictUnsealedKeepPermsSubset: forall p, In p z.(capKeepPerms) -> In p y.(capKeepPerms);
-        restrictUnsealedKeepCanStoreSubset: forall p, In p z.(capKeepCanStore) -> In p y.(capKeepCanStore);
-        restrictUnsealedKeepCanBeStoredSubset: forall p, In p z.(capKeepCanBeStored) -> In p y.(capKeepCanBeStored) }.
+      Record RestrictUnsealed : Prop := {
+          restrictUnsealedEqs: SealEq;
+          restrictUnsealedPermsSubset: forall p, In p z.(capPerms) -> In p y.(capPerms);
+          restrictUnsealedCanStoreSubset: forall r, In r z.(capCanStore) -> In r y.(capCanStore);
+          restrictUnsealedCanBeStoredSubset: forall r, In r z.(capCanBeStored) -> In r y.(capCanBeStored);
+          restrictUnsealedSealingKeysSubset: forall k, In k z.(capSealingKeys) -> In k y.(capSealingKeys);
+          restrictUnsealedUnsealingKeysSubset: forall k, In k z.(capUnsealingKeys) -> In k y.(capUnsealingKeys);
+          restrictUnsealedAddrsSubset: forall a, In a z.(capAddrs) -> In a y.(capAddrs);
+          restrictUnsealedKeepPermsSubset: forall p, In p z.(capKeepPerms) -> In p y.(capKeepPerms);
+          restrictUnsealedKeepCanStoreSubset: forall p, In p z.(capKeepCanStore) -> In p y.(capKeepCanStore);
+          restrictUnsealedKeepCanBeStoredSubset: forall p, In p z.(capKeepCanBeStored) -> In p y.(capKeepCanBeStored) }.
 
-    Record RestrictSealed : Prop := {
-        restrictSealedEqs: SealEq;
-        restrictSealedPermsEq: EqSet z.(capPerms) y.(capPerms);
-        restrictSealedCanStore: EqSet z.(capCanStore) y.(capCanStore);
-        (* The following seems to be a quirk of CHERIoT,
+      Record RestrictSealed : Prop := {
+          restrictSealedEqs: SealEq;
+          restrictSealedPermsEq: EqSet z.(capPerms) y.(capPerms);
+          restrictSealedCanStore: EqSet z.(capCanStore) y.(capCanStore);
+          (* The following seems to be a quirk of CHERIoT,
            maybe make it equal in CHERIoT ISA if there's no use case for this behavior
            and merge with RestrictUnsealed?
            Here's a concrete example why this is bad:
@@ -132,154 +142,168 @@ Section Machine.
              Client gets a Global sealed cap, makes it Stack and sends it back to me after finishing processing.
              I unseal it, but I lost my ability to store it back into that set in Global.
              Instead, I need to rederive the Global for the unsealed cap to be able to store into the Global set.
-         *)
-        restrictSealedCanBeStoredSubset: forall r, In r z.(capCanBeStored) -> In r y.(capCanBeStored);
-        restrictSealedSealingKeysEq: EqSet z.(capSealingKeys) y.(capSealingKeys);
-        restrictSealedUnsealingKeysSubset: EqSet z.(capUnsealingKeys) y.(capUnsealingKeys);
-        restrictSealedAddrsEq: EqSet z.(capAddrs) y.(capAddrs);
-        restrictSealedKeepPermsSubset: EqSet z.(capKeepPerms) y.(capKeepPerms);
-        restrictSealedKeepCanStoreSubset: EqSet z.(capKeepCanStore) y.(capKeepCanStore);
-        restrictSealedKeepCanBeStoredSubset: EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored);
-        restrictSealedCursorEq: z.(capCursor) = y.(capCursor) }.
+           *)
+          restrictSealedCanBeStoredSubset: forall r, In r z.(capCanBeStored) -> In r y.(capCanBeStored);
+          restrictSealedSealingKeysEq: EqSet z.(capSealingKeys) y.(capSealingKeys);
+          restrictSealedUnsealingKeysSubset: EqSet z.(capUnsealingKeys) y.(capUnsealingKeys);
+          restrictSealedAddrsEq: EqSet z.(capAddrs) y.(capAddrs);
+          restrictSealedKeepPermsSubset: EqSet z.(capKeepPerms) y.(capKeepPerms);
+          restrictSealedKeepCanStoreSubset: EqSet z.(capKeepCanStore) y.(capKeepCanStore);
+          restrictSealedKeepCanBeStoredSubset: EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored);
+          restrictSealedCursorEq: z.(capCursor) = y.(capCursor) }.
 
-    Definition Restrict : Prop :=
-      match y.(capSealed) with
-      | None => RestrictUnsealed
-      | _ => RestrictSealed
-      end.
+      Definition Restrict : Prop :=
+        match y.(capSealed) with
+        | None => RestrictUnsealed
+        | _ => RestrictSealed
+        end.
 
-    Variable x: Cap.
-    (* When a cap y is loaded using a cap x, then the attentuation of x comes into play to create z *)
+      Variable x: Cap.
+      (* When a cap y is loaded using a cap x, then the attentuation of x comes into play to create z *)
 
-    Record NonRestrictEqs : Prop := {
-        nonRestrictAuthUnsealed: x.(capSealed) = None;
-        nonRestrictSealingKeysEq: EqSet z.(capSealingKeys) y.(capSealingKeys);
-        nonRestrictUnsealingKeysEq: EqSet z.(capUnsealingKeys) y.(capUnsealingKeys);
-        nonRestrictAddrsEq: EqSet z.(capAddrs) y.(capAddrs) }.
+      Record NonRestrictEqs : Prop := {
+          nonRestrictAuthUnsealed: x.(capSealed) = None;
+          nonRestrictSealingKeysEq: EqSet z.(capSealingKeys) y.(capSealingKeys);
+          nonRestrictUnsealingKeysEq: EqSet z.(capUnsealingKeys) y.(capUnsealingKeys);
+          nonRestrictAddrsEq: EqSet z.(capAddrs) y.(capAddrs) }.
 
-    Record AttenuatePerms : Prop := {
-        attenuatePerms: forall p, In p z.(capPerms) -> (In p x.(capKeepPerms) /\ In p y.(capPerms));
-        attenuateKeepPerms: forall p, In p z.(capKeepPerms) ->
-                                      (In p x.(capKeepPerms) /\ In p y.(capKeepPerms)) }.
+      Record AttenuatePerms : Prop := {
+          attenuatePerms: forall p, In p z.(capPerms) -> (In p x.(capKeepPerms) /\ In p y.(capPerms));
+          attenuateKeepPerms: forall p, In p z.(capKeepPerms) ->
+                                        (In p x.(capKeepPerms) /\ In p y.(capKeepPerms)) }.
 
-    Record NonAttenuatePerms : Prop := {
-        nonAttenuatePerms: EqSet z.(capPerms) y.(capPerms);
-        nonAttenuateKeepPerms: EqSet z.(capKeepPerms) y.(capKeepPerms) }.
+      Record NonAttenuatePerms : Prop := {
+          nonAttenuatePerms: EqSet z.(capPerms) y.(capPerms);
+          nonAttenuateKeepPerms: EqSet z.(capKeepPerms) y.(capKeepPerms) }.
 
-    Record AttenuateCanStore : Prop := {
-        attenuateCanStore: forall p, In p z.(capCanStore) -> (In p x.(capKeepCanStore) /\ In p y.(capCanStore));
-        attenuateKeepCanStore: forall p, In p z.(capKeepCanStore) ->
-                                         (In p x.(capKeepCanStore) /\ In p y.(capKeepCanStore)) }.
+      Record AttenuateCanStore : Prop := {
+          attenuateCanStore: forall p, In p z.(capCanStore) -> (In p x.(capKeepCanStore) /\ In p y.(capCanStore));
+          attenuateKeepCanStore: forall p, In p z.(capKeepCanStore) ->
+                                           (In p x.(capKeepCanStore) /\ In p y.(capKeepCanStore)) }.
 
-    Record NonAttenuateCanStore : Prop := {
-        nonAttenuateCanStore: EqSet z.(capCanStore) y.(capCanStore);
-        nonAttenuateKeepCanStore: EqSet z.(capKeepCanStore) y.(capKeepCanStore) }.
+      Record NonAttenuateCanStore : Prop := {
+          nonAttenuateCanStore: EqSet z.(capCanStore) y.(capCanStore);
+          nonAttenuateKeepCanStore: EqSet z.(capKeepCanStore) y.(capKeepCanStore) }.
 
-    Record LoadCap : Prop := {
-        loadNonRestrictEqs: NonRestrictEqs;
-        loadAuthPerm: In Perm.Load x.(capPerms) /\ In Perm.Cap x.(capPerms);
-        loadFromAuth: exists a, In a x.(capAddrs) /\ Memory a = inl y;
-        loadSealEq: z.(capSealed) = y.(capSealed);
-        loadAttenuatePerms: match y.(capSealed) with
-                            | None => AttenuatePerms
-                            | Some k => NonAttenuatePerms
-                            end;
-        loadAttenuateCanStore: match y.(capSealed) with
-                               | None => AttenuateCanStore
-                               | Some k => NonAttenuateCanStore
-                               end;
-        (* This is also a quirk of CHERIoT as in the case of restricting caps.
+      Record LoadCap : Prop := {
+          loadNonRestrictEqs: NonRestrictEqs;
+          loadAuthPerm: In Perm.Load x.(capPerms) /\ In Perm.Cap x.(capPerms);
+          loadFromAuth: exists a, In a x.(capAddrs) /\ Memory a = inl y;
+          loadSealEq: z.(capSealed) = y.(capSealed);
+          loadAttenuatePerms: match y.(capSealed) with
+                              | None => AttenuatePerms
+                              | Some k => NonAttenuatePerms
+                              end;
+          loadAttenuateCanStore: match y.(capSealed) with
+                                 | None => AttenuateCanStore
+                                 | Some k => NonAttenuateCanStore
+                                 end;
+          (* This is also a quirk of CHERIoT as in the case of restricting caps.
            Ideally, no attenuation (implicit or explicit) must happen under a seal *)
-        loadAttenuateCanBeStored: forall r, In r z.(capCanBeStored) ->
-                                            (In r x.(capKeepCanBeStored) /\ In r y.(capCanBeStored));
-        loadKeepCanBeStored: match y.(capSealed) with
-                             | None => forall r, In r z.(capKeepCanBeStored) ->
-                                                 (In r x.(capKeepCanBeStored) /\ In r y.(capKeepCanBeStored))
-                             | Some _ => EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored)
-                             end}.
+          loadAttenuateCanBeStored: forall r, In r z.(capCanBeStored) ->
+                                              (In r x.(capKeepCanBeStored) /\ In r y.(capCanBeStored));
+          loadKeepCanBeStored: match y.(capSealed) with
+                               | None => forall r, In r z.(capKeepCanBeStored) ->
+                                                   (In r x.(capKeepCanBeStored) /\ In r y.(capKeepCanBeStored))
+                               | Some _ => EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored)
+                               end}.
 
-    Record SealUnsealEqs : Prop := {
-        sealUnsealNonRestrictEqs: NonRestrictEqs;
-        sealUnsealNonAttenuatePerms: NonAttenuatePerms;
-        sealUnsealNonAttenuateCanStore: NonAttenuateCanStore;
-        sealUnsealCanBeStoredEq: EqSet z.(capCanBeStored) y.(capCanBeStored);
-        sealUnsealKeepCanBeStoredEq: EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored) }.
+      Record SealUnsealEqs : Prop := {
+          sealUnsealNonRestrictEqs: NonRestrictEqs;
+          sealUnsealNonAttenuatePerms: NonAttenuatePerms;
+          sealUnsealNonAttenuateCanStore: NonAttenuateCanStore;
+          sealUnsealCanBeStoredEq: EqSet z.(capCanBeStored) y.(capCanBeStored);
+          sealUnsealKeepCanBeStoredEq: EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored) }.
 
-    (* Cap z is the sealed version of cap y using a key in x *)
-    Record Seal : Prop := {
-        sealEqs: SealUnsealEqs;
-        sealOrigUnsealed: y.(capSealed) = None;
-        sealNewSealed: exists k, In k x.(capSealingKeys) /\ z.(capSealed) = Some (inr k) }.
+      (* Cap z is the sealed version of cap y using a key in x *)
+      Record Seal : Prop := {
+          sealEqs: SealUnsealEqs;
+          sealOrigUnsealed: y.(capSealed) = None;
+          sealNewSealed: exists k, In k x.(capSealingKeys) /\ z.(capSealed) = Some (inr k) }.
 
-    Record Unseal : Prop := {
-        unsealEqs: SealUnsealEqs;
-        unsealOrigSealed: exists k, In k x.(capUnsealingKeys) /\ y.(capSealed) = Some (inr k) ;
-        unsealNewUnsealed: z.(capSealed) = None }.
-  End CapStep.
+      Record Unseal : Prop := {
+          unsealEqs: SealUnsealEqs;
+          unsealOrigSealed: exists k, In k x.(capUnsealingKeys) /\ y.(capSealed) = Some (inr k) ;
+          unsealNewUnsealed: z.(capSealed) = None }.
+    End CapStep.
 
-  Section Transitivity.
-    Variable origSet: list Cap.
+    Section Transitivity.
+      Variable origSet: list Cap.
 
-    (* Transitively reachable cap with permissions removed according to transitive properties *)
-    Inductive ReachableCap: Cap -> Prop :=
-    | Refl (c: Cap) (inPf: In c origSet) : ReachableCap c
-    | StepRestrict y (yPf: ReachableCap y) z (yz: Restrict y z) : ReachableCap z
-    | StepLoadCap x (xPf: ReachableCap x) y z (xyz: LoadCap x y z): ReachableCap z
-    | StepSeal x (xPf: ReachableCap x) y (yPf: ReachableCap y) z (xyz: Seal x y z): ReachableCap z
-    | StepUnseal x (xPf: ReachableCap x) y (yPf: ReachableCap y) z (xyz: Unseal x y z): ReachableCap z.
+      (* Transitively reachable cap with permissions removed according to transitive properties *)
+      Inductive ReachableCap: Cap -> Prop :=
+      | Refl (c: Cap) (inPf: In c origSet) : ReachableCap c
+      | StepRestrict y (yPf: ReachableCap y) z (yz: Restrict y z) : ReachableCap z
+      | StepLoadCap x (xPf: ReachableCap x) y z (xyz: LoadCap x y z): ReachableCap z
+      | StepSeal x (xPf: ReachableCap x) y (yPf: ReachableCap y) z (xyz: Seal x y z): ReachableCap z
+      | StepUnseal x (xPf: ReachableCap x) y (yPf: ReachableCap y) z (xyz: Unseal x y z): ReachableCap z.
 
-    (* Transitively reachable addr listed with permissions, canStore and canBeStored *)
-    Inductive ReachableAddr: Addr -> list Perm.t -> list Label -> list Label -> Prop :=
-    | HasAddr c (cPf: ReachableCap c) a (ina: In a c.(capAddrs)) (notSealed: c.(capSealed) = None)
-      : ReachableAddr a c.(capPerms) c.(capCanStore) c.(capCanBeStored).
+      (* Transitively reachable addr listed with permissions, canStore and canBeStored *)
+      Inductive ReachableAddr: Addr -> list Perm.t -> list Label -> list Label -> Prop :=
+      | HasAddr c (cPf: ReachableCap c) a (ina: In a c.(capAddrs)) (notSealed: c.(capSealed) = None)
+        : ReachableAddr a c.(capPerms) c.(capCanStore) c.(capCanBeStored).
 
-    Definition ReachableCaps newCaps := forall c, In c newCaps -> ReachableCap c.
+      Definition ReachableCaps newCaps := forall c, In c newCaps -> ReachableCap c.
 
-    Section UpdMem.
-      Variable NewMemory: Memory_t.
-      Variable stAddrCap: Cap.
-      Definition BasicStPerm := ReachableCap stAddrCap /\ In Perm.Store stAddrCap.(capPerms) /\
-                                  stAddrCap.(capSealed) = None.
-      Definition modifyOrCreateMemValue := (exists a v2, In a stAddrCap.(capAddrs) /\
-                                                           Memory a <> inr v2 /\
-                                                           NewMemory a = inr v2) ->
-                                           BasicStPerm.
-      Variable stDataCap: Cap.
-      Definition modifyMemCap := (exists a, In a stAddrCap.(capAddrs) /\
-                                              Memory a <> inl stDataCap /\
-                                              NewMemory a = inl stDataCap) ->
-                                 BasicStPerm /\ ReachableCap stDataCap /\
-                                   exists l, In l stAddrCap.(capCanStore) /\ In l stDataCap.(capCanBeStored).
-    End UpdMem.
-  End Transitivity.
+      Section UpdMem.
+        Variable NewMemory: Memory_t.
+
+        Section UpdMemPerInstance.
+          Variable stAddrCap: Cap.
+          Definition BasicStPerm := ReachableCap stAddrCap /\ In Perm.Store stAddrCap.(capPerms) /\
+                                      stAddrCap.(capSealed) = None.
+          Definition modifyMemValue := (exists a v2, In a stAddrCap.(capAddrs) /\
+                                                       Memory a <> inr v2 /\
+                                                       NewMemory a = inr v2) ->
+                                       BasicStPerm.
+          Variable stDataCap: Cap.
+          Definition modifyMemCap := (exists a, In a stAddrCap.(capAddrs) /\
+                                                  Memory a <> inl stDataCap /\
+                                                  NewMemory a = inl stDataCap) ->
+                                     BasicStPerm /\ ReachableCap stDataCap /\
+                                       exists l, In l stAddrCap.(capCanStore) /\ In l stDataCap.(capCanBeStored).
+        End UpdMemPerInstance.
+        Definition ValidUpdMemory := forall stAddrCap, modifyMemValue stAddrCap /\
+                                                         forall stDataCap, modifyMemCap stAddrCap stDataCap.
+      End UpdMem.
+    End Transitivity.
+  End CurrMemory.
 
   Section Machine.
     Import ListNotations.
     Variable ExnHandlerType : Type. (* In CHERIoT: rich or stackless *)
 
     Notation PCC := Cap (only parsing).
-    Notation MEPCC := Cap (only parsing).
+    Notation MEPCC := Cap (only parsing). (* While MEPCC can become invalid architecturally,
+                                             it shouldn't if the switcher is correct *)
     Notation EXNInfo := Value (only parsing).
     Notation RegIdx := nat (only parsing).
 
     Definition RegisterFile := list CapOrValue.
+    Definition capsOfRf (rf: RegisterFile) := listSumToInl rf.
 
     Record SemanticRegisterFile := {
-        rf_returnAddress : Cap;
         rf_csp: Cap;
         rf_cgp: Cap;
         rf_argsAndRets: list CapOrValue;
         rf_argsOnly: list CapOrValue;
-        rf_calleeSaved: list CapOrValue;
+        rf_calleeSaved: list CapOrValue; (* To be saved by the switched on cross-compartment call *)
         rf_other: list CapOrValue;
         rf_targetCalleeEntry : Cap; (* Export table entry for target callee *)
-    }.
+      }.
+
+    Definition capsOfSRf (rf: SemanticRegisterFile) :=
+      rf.(rf_csp) :: rf.(rf_cgp) :: rf.(rf_targetCalleeEntry) ::
+      listSumToInl rf.(rf_argsAndRets) ++ listSumToInl rf.(rf_argsOnly) ++ listSumToInl rf.(rf_calleeSaved)
+      ++ listSumToInl rf.(rf_other).
 
     (* TODO: decide on a register file representation. RF manipulations are currently buggy. *)
     Variable rfIdx_ra : nat.
     Variable rfToSemanticRf : RegisterFile -> SemanticRegisterFile.
     Variable semanticRfToConcreteRf : SemanticRegisterFile -> RegisterFile.
 
+    (* Given that the spec can switch threads at any time,
+       interrupts are disabled only to achieve atomicity of a code sequence in single-core machines. *)
     Inductive InterruptStatus :=
     | InterruptsEnabled
     | InterruptsDisabled.
@@ -289,28 +313,41 @@ Section Machine.
         trustedStackFrame_calleeExportTable : Cap;
         trustedStackFrame_errorCounter : N
         (* trustedStackFrame_compartmentIdx : nat; (* Actually a pointer to the compartment's export table *) *)
-    }.
+      }.
 
+    (* TS denotes TrustedStack everywhere below *)
+    Definition capsOfTSFrame tsf := [tsf.(trustedStackFrame_CSP); tsf.(trustedStackFrame_calleeExportTable)].
+
+    (* Note that TrustedStack is a first class entity in our abstraction, and not yet another object in the Memory *)
+    (* That is, it is accessed like how a PCC is accessed using a name *)
+    (* In CHERIoT, Trusted stack is just another object in Memory accessible through a thread's MTDC *)
+    (* This refinement will be done later *)
     Record TrustedStack := {
         (* trustedStack_shadowRegisters : RegisterFile; *)
         trustedStack_frames : list TrustedStackFrame;
     }.
+    Definition capsOfTS ts := concat (map capsOfTSFrame ts.(trustedStack_frames)).
 
     Record UserThreadState :=
       { thread_rf : RegisterFile;
         thread_pcc: PCC
       }.
+    Definition capsOfUserTS uts := uts.(thread_pcc) :: capsOfRf uts.(thread_rf).
 
+    (* SystemThreadState is a first class entity like TrustedStack.
+       In CHERIoT, only MEPCC is a first class entity; the rest are objects in memory *)
     Record SystemThreadState :=
       { thread_mepcc: MEPCC;
         thread_exceptionInfo: EXNInfo;
         thread_trustedStack: TrustedStack
       }.
+    Definition capsOfSystemTS sts := sts.(thread_mepcc) :: capsOfTS sts.(thread_trustedStack).
 
     Record Thread := {
         thread_userState : UserThreadState;
         thread_systemState : SystemThreadState
-    }.
+      }.
+    Definition capsOfThread t := capsOfUserTS t.(thread_userState) ++ capsOfSystemTS t.(thread_systemState).
 
     Record Machine := {
         machine_memory: Memory_t;
@@ -320,11 +357,37 @@ Section Machine.
     }.
 
     Section StateTransition.
+      (* The following definitions are defined per thread (obvious, but re-iterating) *)
+      Definition UserContext : Type := (UserThreadState * Memory_t).
+      Definition SystemContext : Type := (SystemThreadState * InterruptStatus).
 
-      Definition ReachableCapFromRf (rf: RegisterFile) cap :=
-        forall rf_caps,
-        (forall c, In c rf_caps -> In (inl c) rf) /\
-        ReachableCap rf_caps cap.
+      Definition ValidNormalUserStepFromOldCaps (oldCaps: list Cap) (oldMem: Memory_t) (new: UserContext) :=
+        let '(newUTS, newMem) := new in
+        ValidUpdMemory oldMem oldCaps newMem /\
+          ReachableCaps oldMem oldCaps (capsOfUserTS newUTS) /\
+          In Perm.Exec newUTS.(thread_pcc).(capPerms).
+
+      Definition ValidNormalUserStep (old new: UserContext) :=
+        let '(oldUTS, oldMem) := old in
+        ValidNormalUserStepFromOldCaps (capsOfUserTS oldUTS) oldMem.
+
+      Definition ValidNormalSystemStep (oldUser newUser: UserContext) (oldSystem newSystem: SystemContext) :=
+        let '(oldUTS, oldMem) := oldUser in
+        let '(oldSTS, oldIS) := oldSystem in
+        let '(newSTS, newIS) := newSystem in
+        let oldCaps := capsOfUserTS oldUTS ++ capsOfSystemTS oldSTS in
+        ValidNormalUserStepFromOldCaps oldCaps oldMem newUser /\
+          ReachableCaps oldMem oldCaps (capsOfSystemTS newSTS).
+
+      (* Probably just says PCC and MEPCC have Exec permission? *)
+      Definition ValidNormalUserContext (uc: UserContext) := In Perm.Exec (fst uc).(thread_pcc).(capPerms).
+      Definition ValidNormalSystemContext (sc: SystemContext) := In Perm.Exec (fst sc).(thread_mepcc).(capPerms).
+      Definition ValidNormalContexts (uc: UserContext) (sc: SystemContext): Prop :=
+        ValidNormalUserContext uc /\ ValidNormalSystemContext sc.
+
+      (* This may not be necessary, and instead we can split it into context depending on the (fancy) step *)
+      Definition ValidContexts: UserContext -> SystemContext -> Prop.
+      Admitted.
 
       Inductive FancyStep :=
       | Step_Normal
@@ -332,12 +395,6 @@ Section Machine.
       | Step_CompartmentCall
       | Step_CompartmentRet
       | Step_Exception (exnInfo: Value).
-
-      Definition UserContext : Type := (UserThreadState * Memory_t).
-      Definition SystemContext : Type := (SystemThreadState * InterruptStatus).
-
-      Definition ValidContexts : UserContext -> SystemContext -> Prop.
-      Admitted.
 
       Definition step_t : Type := (UserContext -> SystemContext ->
                                    FancyStep * UserContext * SystemContext).
