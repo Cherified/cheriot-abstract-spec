@@ -380,6 +380,7 @@ Section Machine.
           ReachableCaps oldMem oldCaps (capsOfSystemTS newSTS).
 
       (* Probably just says PCC and MEPCC have Exec permission? *)
+      (* TODO This is completely wrong. Normal System Step is taken when we have System and Exec permission *)
       Definition ValidNormalUserContext (uc: UserContext) := In Perm.Exec (fst uc).(thread_pcc).(capPerms).
       Definition ValidNormalSystemContext (sc: SystemContext) := In Perm.Exec (fst sc).(thread_mepcc).(capPerms).
       Definition ValidNormalContexts (uc: UserContext) (sc: SystemContext): Prop :=
