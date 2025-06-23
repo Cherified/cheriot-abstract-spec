@@ -230,7 +230,7 @@ Section Machine.
     Section Transitivity.
       Variable origSet: list Cap.
 
-      (* Transitively reachable cap with permissions removed according to transitive properties *)
+
       Inductive ReachableCap: Cap -> Prop :=
       | Refl (c: Cap) (inPf: In c origSet) : ReachableCap c
       | StepRestrict y (yPf: ReachableCap y) z (yz: Restrict y z) : ReachableCap z
@@ -248,31 +248,48 @@ Section Machine.
       Section UpdMem.
         Variable NewMemory: Memory_t.
 
-        Section UpdMemPerInstance.
-          Variable stAddrCap: Cap.
-          Definition BasicStPerm := ReachableCap stAddrCap /\ In Perm.Store stAddrCap.(capPerms) /\
-                                      stAddrCap.(capSealed) = None.
-          Definition modifyMemValue := (exists a v2, In a stAddrCap.(capAddrs) /\
-                                                       Memory a <> inr v2 /\
-                                                       NewMemory a = inr v2) ->
-                                       BasicStPerm.
-          Variable stDataCap: Cap.
-          Definition modifyMemCap := (exists a, In a stAddrCap.(capAddrs) /\
-                                                  Memory a <> inl stDataCap /\
-                                                  NewMemory a = inl stDataCap) ->
-                                     BasicStPerm /\ ReachableCap stDataCap /\
-                                       exists l, In l stAddrCap.(capCanStore) /\ In l stDataCap.(capCanBeStored).
-        End UpdMemPerInstance.
-        Definition ValidUpdMemory := forall stAddrCap, modifyMemValue stAddrCap /\
-                                                         forall stDataCap, modifyMemCap stAddrCap stDataCap.
+        (* Section UpdMemPerInstance. *)
+        (*   Variable stAddrCap: Cap. *)
+        (*   Definition BasicStPerm := ReachableCap stAddrCap /\ In Perm.Store stAddrCap.(capPerms) /\ *)
+        (*                               stAddrCap.(capSealed) = None. *)
+        (*   Definition modifyMemValue := (exists a v2, In a stAddrCap.(capAddrs) /\ *)
+        (*                                                Memory a <> inr v2 /\ *)
+        (*                                                NewMemory a = inr v2) -> *)
+        (*                                BasicStPerm. *)
+        (*   Variable stDataCap: Cap. *)
+        (*   Definition modifyMemCap := (exists a, In a stAddrCap.(capAddrs) /\ *)
+        (*                                           Memory a <> inl stDataCap /\ *)
+        (*                                           NewMemory a = inl stDataCap) -> *)
+        (*                              BasicStPerm /\ ReachableCap stDataCap /\ *)
+        (*                                exists l, In l stAddrCap.(capCanStore) /\ In l stDataCap.(capCanBeStored). *)
+        (* End UpdMemPerInstance. *)
+        (* Definition ValidUpdMemory := forall stAddrCap, modifyMemValue stAddrCap /\ *)
+        (*                                                  forall stDataCap, modifyMemCap stAddrCap stDataCap. *)
+
+        (* Alternative definition, quantifying over addresses instead of caps. *)
+        Section AltMemoryUpdate.
+          Definition BasicStPermForAddr (auth: Cap) (a: Addr) :=
+            ReachableCap auth
+            /\ In Perm.Store auth.(capPerms)
+            /\ auth.(capSealed) = None
+            /\ In a auth.(capAddrs).
+
+          Definition ValidMemUpdate :=
+            forall a, Memory a <> NewMemory a ->
+                 exists stAddrCap, BasicStPermForAddr stAddrCap a /\
+                 (match NewMemory a with
+                  | inl stDataCap =>
+                      ReachableCap stDataCap
+                      /\ (exists l, In l stAddrCap.(capCanStore) /\ In l stDataCap.(capCanBeStored))
+                  | inr v => True
+                  end).
+        End AltMemoryUpdate.
       End UpdMem.
     End Transitivity.
   End CurrMemory.
 
   Section Machine.
     Import ListNotations.
-    Variable ExnHandlerType : Type. (* In CHERIoT: rich or stackless *)
-
     Notation PCC := Cap (only parsing).
     Notation MEPCC := Cap (only parsing). (* While MEPCC can become invalid architecturally,
                                              it shouldn't if the switcher is correct *)
@@ -356,14 +373,14 @@ Section Machine.
         machine_curThreadId : nat;
     }.
 
-    Section StateTransition.
+    Section Machine.
       (* The following definitions are defined per thread (obvious, but re-iterating) *)
       Definition UserContext : Type := (UserThreadState * Memory_t).
       Definition SystemContext : Type := (SystemThreadState * InterruptStatus).
 
       Definition ValidNormalUserStepFromOldCaps (oldCaps: list Cap) (oldMem: Memory_t) (new: UserContext) :=
         let '(newUTS, newMem) := new in
-        ValidUpdMemory oldMem oldCaps newMem /\
+        ValidMemUpdate oldMem oldCaps newMem /\
           ReachableCaps oldMem oldCaps (capsOfUserTS newUTS) /\
           In Perm.Exec newUTS.(thread_pcc).(capPerms).
 
@@ -512,7 +529,7 @@ Section Machine.
         let '(sysSt, istatus) := sysCtx in
         match step with
         | Step_Normal => Some (userCtx, sysCtx)
-        | Step_Jalr sentry opt_regidx => None
+        | Step_Jalr sentry opt_regidx => None (* TODO *)
         | Step_CompartmentCall =>
             (* We must have entered via a (IRQ-disabling ?!) forward sentry.
                cjalr ra --> set ra, PCC, and istatus *)
@@ -565,10 +582,10 @@ Section Machine.
         forall m post,
           SameThreadStep m step_update_fn post ->
           Step m post.
-       *)
-    End StateTransition.
+      *)
 
-  End Machine.
+    End Machine.
+
 
   (* Section MachineOld. *)
     (* Inductive ImportTableEntry := *)
