@@ -254,23 +254,21 @@ Section Machine.
       Section UpdMem.
         Variable NewMemory: Memory_t.
 
-        Section UpdMemory.
-          Definition BasicStPermForAddr (auth: Cap) (a: Addr) :=
-            ReachableCap auth
-            /\ In Perm.Store auth.(capPerms)
-            /\ auth.(capSealed) = None
-            /\ In a auth.(capAddrs).
+        Definition BasicStPermForAddr (auth: Cap) (a: Addr) :=
+          ReachableCap auth
+          /\ In Perm.Store auth.(capPerms)
+          /\ auth.(capSealed) = None
+          /\ In a auth.(capAddrs).
 
-          Definition ValidMemUpdate :=
-            forall a, Memory a <> NewMemory a ->
-                 exists stAddrCap, BasicStPermForAddr stAddrCap a /\
-                 (match NewMemory a with
-                  | inl stDataCap =>
-                      ReachableCap stDataCap
-                      /\ (exists l, In l stAddrCap.(capCanStore) /\ In l stDataCap.(capCanBeStored))
-                  | inr v => True
-                  end).
-        End UpdMemory.
+        Definition ValidMemUpdate :=
+          forall a, Memory a <> NewMemory a ->
+               exists stAddrCap, BasicStPermForAddr stAddrCap a /\
+               (match NewMemory a with
+                | inl stDataCap =>
+                    ReachableCap stDataCap
+                    /\ (exists l, In l stAddrCap.(capCanStore) /\ In l stDataCap.(capCanBeStored))
+                | inr v => True
+                end).
       End UpdMem.
     End Transitivity.
   End CurrMemory.
