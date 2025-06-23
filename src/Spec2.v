@@ -170,6 +170,65 @@ Section Machine.
   }.
 
   Section StateTransition.
+    Definition setMachineThread (m: Machine) (tid: nat): Machine :=
+      {| machine_memory := m.(machine_memory);
+         machine_interruptStatus := m.(machine_interruptStatus);
+         machine_threads := m.(machine_threads);
+         machine_curThreadId := tid
+      |}.
+    Definition SameThreadStep (m: Machine)
+                              (update_fn: Thread -> Memory -> InterruptStatus ->
+                                          (Thread -> Memory -> InterruptStatus -> Prop) -> Prop)
+                              (post: Machine -> Prop) : Prop :=
+      let tid := m.(machine_curThreadId) in
+      let threads := m.(machine_threads) in
+      exists thread, nth_error threads tid = Some thread /\
+                update_fn thread m.(machine_memory) m.(machine_interruptStatus) (fun thread' memory' interrupt' =>
+                   post {| machine_memory:= memory';
+                           machine_threads := listUpdate threads tid thread';
+                           machine_curThreadId := tid;
+                           machine_interruptStatus := interrupt'
+                        |}).
+
+    Definition InSystemMode (t: Thread) : Prop :=
+      In Perm.System t.(thread_userState).(thread_pcc).(capPerms).
+
+    (* The following definitions are defined per thread (obvious, but re-iterating) *)
+    Definition UserContext : Type := (UserThreadState * Memory).
+    Definition SystemContext : Type := (SystemThreadState * InterruptStatus).
+
+    Definition UserStep : UserContext -> (UserContext -> Prop) -> Prop.
+    Admitted.
+
+    Inductive Step1 : Thread -> Memory -> InterruptStatus ->
+                      (Thread -> Memory -> InterruptStatus -> Prop) -> Prop :=
+    | Step_User :
+      forall t mem istatus mid post,
+      ~ InSystemMode t ->
+      UserStep (t.(thread_userState), mem) mid ->
+      (forall userSt' mem', mid (userSt', mem') ->
+                       post {| thread_userState := userSt';
+                               thread_systemState := t.(thread_systemState)
+                            |} mem' istatus) ->
+      Step1 t mem istatus post
+    | Step_System:
+      forall t mem istatus post,
+      InSystemMode t ->
+      False -> (* TODO *)
+      Step1 t mem istatus post.
+
+    Inductive Step : Machine -> (Machine -> Prop) -> Prop :=
+    | Step_SwitchThreads:
+      forall m tid' post,
+        m.(machine_interruptStatus) = InterruptsEnabled ->
+        tid' < List.length m.(machine_threads) ->
+        post (setMachineThread m tid') ->
+        Step m post
+    | Step_SameThread :
+      forall m post,
+        SameThreadStep m Step1 post ->
+        Step m post.
+
   End StateTransition.
 
 End Machine.
