@@ -10,6 +10,9 @@ Section EqSet.
   Proof.
     unfold EqSet; intros; subst; tauto.
   Qed.
+
+  Definition Subset := forall x, In x l1 -> In x l2.
+
 End EqSet.
 
 Section ListUtils.
@@ -117,17 +120,18 @@ Section Machine.
 
       Definition SealEq := z.(capSealed) = y.(capSealed).
 
+      (* NB: capCursor can change arbitrarily for unsealed caps. *)
       Record RestrictUnsealed : Prop := {
           restrictUnsealedEqs: SealEq;
-          restrictUnsealedPermsSubset: forall p, In p z.(capPerms) -> In p y.(capPerms);
-          restrictUnsealedCanStoreSubset: forall r, In r z.(capCanStore) -> In r y.(capCanStore);
-          restrictUnsealedCanBeStoredSubset: forall r, In r z.(capCanBeStored) -> In r y.(capCanBeStored);
-          restrictUnsealedSealingKeysSubset: forall k, In k z.(capSealingKeys) -> In k y.(capSealingKeys);
-          restrictUnsealedUnsealingKeysSubset: forall k, In k z.(capUnsealingKeys) -> In k y.(capUnsealingKeys);
-          restrictUnsealedAddrsSubset: forall a, In a z.(capAddrs) -> In a y.(capAddrs);
-          restrictUnsealedKeepPermsSubset: forall p, In p z.(capKeepPerms) -> In p y.(capKeepPerms);
-          restrictUnsealedKeepCanStoreSubset: forall p, In p z.(capKeepCanStore) -> In p y.(capKeepCanStore);
-          restrictUnsealedKeepCanBeStoredSubset: forall p, In p z.(capKeepCanBeStored) -> In p y.(capKeepCanBeStored) }.
+          restrictUnsealedPermsSubset: Subset z.(capPerms) y.(capPerms);
+          restrictUnsealedCanStoreSubset: Subset z.(capCanStore) y.(capCanStore);
+          restrictUnsealedCanBeStoredSubset: Subset z.(capCanBeStored) y.(capCanBeStored);
+          restrictUnsealedSealingKeysSubset: Subset z.(capSealingKeys) y.(capSealingKeys);
+          restrictUnsealedUnsealingKeysSubset: Subset z.(capUnsealingKeys) y.(capUnsealingKeys);
+          restrictUnsealedAddrsSubset: Subset z.(capAddrs) y.(capAddrs);
+          restrictUnsealedKeepPermsSubset: Subset z.(capKeepPerms) y.(capKeepPerms);
+          restrictUnsealedKeepCanStoreSubset: Subset z.(capKeepCanStore) y.(capKeepCanStore);
+          restrictUnsealedKeepCanBeStoredSubset: Subset z.(capKeepCanBeStored) y.(capKeepCanBeStored) }.
 
       Record RestrictSealed : Prop := {
           restrictSealedEqs: SealEq;
@@ -143,7 +147,7 @@ Section Machine.
              I unseal it, but I lost my ability to store it back into that set in Global.
              Instead, I need to rederive the Global for the unsealed cap to be able to store into the Global set.
            *)
-          restrictSealedCanBeStoredSubset: forall r, In r z.(capCanBeStored) -> In r y.(capCanBeStored);
+          restrictSealedCanBeStoredSubset: Subset z.(capCanBeStored) y.(capCanBeStored);
           restrictSealedSealingKeysEq: EqSet z.(capSealingKeys) y.(capSealingKeys);
           restrictSealedUnsealingKeysSubset: EqSet z.(capUnsealingKeys) y.(capUnsealingKeys);
           restrictSealedAddrsEq: EqSet z.(capAddrs) y.(capAddrs);
@@ -165,7 +169,8 @@ Section Machine.
           nonRestrictAuthUnsealed: x.(capSealed) = None;
           nonRestrictSealingKeysEq: EqSet z.(capSealingKeys) y.(capSealingKeys);
           nonRestrictUnsealingKeysEq: EqSet z.(capUnsealingKeys) y.(capUnsealingKeys);
-          nonRestrictAddrsEq: EqSet z.(capAddrs) y.(capAddrs) }.
+          nonRestrictAddrsEq: EqSet z.(capAddrs) y.(capAddrs);
+          nonRestrictCursorEq: z.(capCursor) = y.(capCursor) }.
 
       Record AttenuatePerms : Prop := {
           attenuatePerms: forall p, In p z.(capPerms) -> (In p x.(capKeepPerms) /\ In p y.(capPerms));
