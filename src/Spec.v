@@ -232,6 +232,7 @@ Section Machine.
           unsealNewUnsealed: z.(capSealed) = None }.
     End CapStep.
 
+
     Section Transitivity.
       Variable origSet: list Cap.
 
@@ -253,26 +254,7 @@ Section Machine.
       Section UpdMem.
         Variable NewMemory: Memory_t.
 
-        (* Section UpdMemPerInstance. *)
-        (*   Variable stAddrCap: Cap. *)
-        (*   Definition BasicStPerm := ReachableCap stAddrCap /\ In Perm.Store stAddrCap.(capPerms) /\ *)
-        (*                               stAddrCap.(capSealed) = None. *)
-        (*   Definition modifyMemValue := (exists a v2, In a stAddrCap.(capAddrs) /\ *)
-        (*                                                Memory a <> inr v2 /\ *)
-        (*                                                NewMemory a = inr v2) -> *)
-        (*                                BasicStPerm. *)
-        (*   Variable stDataCap: Cap. *)
-        (*   Definition modifyMemCap := (exists a, In a stAddrCap.(capAddrs) /\ *)
-        (*                                           Memory a <> inl stDataCap /\ *)
-        (*                                           NewMemory a = inl stDataCap) -> *)
-        (*                              BasicStPerm /\ ReachableCap stDataCap /\ *)
-        (*                                exists l, In l stAddrCap.(capCanStore) /\ In l stDataCap.(capCanBeStored). *)
-        (* End UpdMemPerInstance. *)
-        (* Definition ValidUpdMemory := forall stAddrCap, modifyMemValue stAddrCap /\ *)
-        (*                                                  forall stDataCap, modifyMemCap stAddrCap stDataCap. *)
-
-        (* Alternative definition, quantifying over addresses instead of caps. *)
-        Section AltMemoryUpdate.
+        Section UpdMemory.
           Definition BasicStPermForAddr (auth: Cap) (a: Addr) :=
             ReachableCap auth
             /\ In Perm.Store auth.(capPerms)
@@ -288,7 +270,7 @@ Section Machine.
                       /\ (exists l, In l stAddrCap.(capCanStore) /\ In l stDataCap.(capCanBeStored))
                   | inr v => True
                   end).
-        End AltMemoryUpdate.
+        End UpdMemory.
       End UpdMem.
     End Transitivity.
   End CurrMemory.
@@ -391,7 +373,7 @@ Section Machine.
 
       Definition ValidNormalUserStep (old new: UserContext) :=
         let '(oldUTS, oldMem) := old in
-        ValidNormalUserStepFromOldCaps (capsOfUserTS oldUTS) oldMem.
+        ValidNormalUserStepFromOldCaps (capsOfUserTS oldUTS) oldMem new.
 
       Definition ValidNormalSystemStep (oldUser newUser: UserContext) (oldSystem newSystem: SystemContext) :=
         let '(oldUTS, oldMem) := oldUser in
@@ -442,9 +424,8 @@ Section Machine.
       Inductive WF_step' : UserContext -> SystemContext -> (FancyStep -> UserContext -> SystemContext -> Prop)
                            -> Prop :=
       | WFStep_User :
-          forall userCtx sysCtx mid post,
-          WF_normal_user_step userCtx mid ->
-          (forall userCtx', mid userCtx' ->
+          forall userCtx sysCtx post,
+          (forall userCtx', ValidNormalUserStep userCtx userCtx' ->
                        post Step_Normal userCtx' sysCtx) ->
           WF_step' userCtx sysCtx post
       | WFStep_System :
