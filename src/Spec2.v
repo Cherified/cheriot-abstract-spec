@@ -1,4 +1,5 @@
-From Stdlib Require Import Vector List NArith Lia Zmod Bits .
+From Stdlib Require Import Vector List NArith Lia Zmod Bits String.
+From RecordUpdate Require Import RecordSet.
 Set Primitive Projections.
 Require Import coqutil.Byte.
 
@@ -43,7 +44,7 @@ Proof.
     lia.
 Qed.
 
-Definition option_to_bool [A] (a: option A) : bool :=
+Definition is_some [A] (a: option A) : bool :=
   match a with
   | Some _ => true
   | _ => false
@@ -81,6 +82,8 @@ Section Machine.
     Definition TAGLEN := (XLEN - 3).
     Definition Tag := bits TAGLEN.
   End TypeDefs.
+  Context {AddrToValue: Addr -> Value}.
+  Context {ValueToAddr : Value -> Addr}.
 
 
   (* A cap X can be stored in a cap Y only if X can be stored in a Label that Y provides *)
@@ -126,6 +129,63 @@ Section Machine.
                          This creates a problem for return sentries, as they need not be in-bounds;
                          the error has to be handled by the caller compartment on return. *)
     }.
+
+  Global Instance eta_Cap : Settable _ :=
+    settable! Build_Cap<capSealed; capPerms; capCanStore; capCanBeStored;
+                        capSealingKeys; capUnsealingKeys; capAddrs;
+                        capKeepPerms; capKeepCanStore;
+                        capKeepCanBeStored; capCursor>.
+
+    Section CapStep.
+      Variable y z: Cap.
+
+      Definition SealEq := z.(capSealed) = y.(capSealed).
+
+      (* NB: capCursor can change arbitrarily for unsealed caps. *)
+      Record RestrictUnsealed : Prop := {
+          restrictUnsealedEqs: SealEq;
+          restrictUnsealedPermsSubset: Subset z.(capPerms) y.(capPerms);
+          restrictUnsealedCanStoreSubset: Subset z.(capCanStore) y.(capCanStore);
+          restrictUnsealedCanBeStoredSubset: Subset z.(capCanBeStored) y.(capCanBeStored);
+          restrictUnsealedSealingKeysSubset: Subset z.(capSealingKeys) y.(capSealingKeys);
+          restrictUnsealedUnsealingKeysSubset: Subset z.(capUnsealingKeys) y.(capUnsealingKeys);
+          restrictUnsealedAddrsSubset: Subset z.(capAddrs) y.(capAddrs);
+          restrictUnsealedKeepPermsSubset: Subset z.(capKeepPerms) y.(capKeepPerms);
+          restrictUnsealedKeepCanStoreSubset: Subset z.(capKeepCanStore) y.(capKeepCanStore);
+          restrictUnsealedKeepCanBeStoredSubset: Subset z.(capKeepCanBeStored) y.(capKeepCanBeStored) }.
+
+      Record RestrictSealed : Prop := {
+          restrictSealedEqs: SealEq;
+          restrictSealedPermsEq: EqSet z.(capPerms) y.(capPerms);
+          restrictSealedCanStore: EqSet z.(capCanStore) y.(capCanStore);
+          (* The following seems to be a quirk of CHERIoT,
+           maybe make it equal in CHERIoT ISA if there's no use case for this behavior
+           and merge with RestrictUnsealed?
+           Here's a concrete example why this is bad:
+             I have objects in Global and a set of pointers to these objects also in Global.
+             I seal an element of that set (which points to an object) and send to a client.
+             Client gets a Global sealed cap, makes it Stack and sends it back to me after finishing processing.
+             I unseal it, but I lost my ability to store it back into that set in Global.
+             Instead, I need to rederive the Global for the unsealed cap to be able to store into the Global set.
+           *)
+          restrictSealedCanBeStoredSubset: Subset z.(capCanBeStored) y.(capCanBeStored);
+          restrictSealedSealingKeysEq: EqSet z.(capSealingKeys) y.(capSealingKeys);
+          restrictSealedUnsealingKeysSubset: EqSet z.(capUnsealingKeys) y.(capUnsealingKeys);
+          restrictSealedAddrsEq: EqSet z.(capAddrs) y.(capAddrs);
+          restrictSealedKeepPermsSubset: EqSet z.(capKeepPerms) y.(capKeepPerms);
+          restrictSealedKeepCanStoreSubset: EqSet z.(capKeepCanStore) y.(capKeepCanStore);
+          restrictSealedKeepCanBeStoredSubset: EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored);
+          restrictSealedCursorEq: z.(capCursor) = y.(capCursor) }.
+
+      Definition Restrict : Prop :=
+        match y.(capSealed) with
+        | None => RestrictUnsealed
+        | _ => RestrictSealed
+        end.
+    End CapStep.
+
+
+
   Notation Memory_data_t := (Addr -> byte).
   Notation Memory_tags_t := (Tag -> byte).
 
@@ -141,7 +201,7 @@ Section Machine.
   Notation PCC := Cap (only parsing).
   Notation MEPCC := Cap (only parsing). (* While MEPCC can become invalid architecturally,
                                            it shouldn't if the switcher is correct *)
-  Notation CapOrValue := (Cap + Value)%type.
+  Definition CapOrValue := (Cap + Value)%type.
   Notation EXNInfo := Value (only parsing).
 
   Definition RegisterFile := Vector.t CapOrValue ISA_NREGS.
@@ -256,20 +316,22 @@ Section Machine.
 
     Inductive type :=
     | Ty_CapOrValue
-    | Ty_Value.
+    | Ty_Value
+    | Ty_Bool.
 
     Definition type_denote (t: type) :=
       match t with
       | Ty_CapOrValue => CapOrValue
       | Ty_Value => Value
+      | Ty_Bool => bool
       end.
-    Require Import Stdlib.Strings.String.
 
     (* TODO: PERMS *)
-    Inductive RestrictOps :=
-    | ChangeCursor (fn: Value -> Value)
+    Inductive RestrictOp :=
+    | ChangeCursor (fn: Addr -> Addr)
     | FilterPerms (fn: Perm.t -> bool)
     | FilterCapCanStore (fn: Label -> bool)
+    | FilterCapCanBeStored (fn: Label -> bool)
     | FilterSealingKeys (fn: Key -> bool)
     | FilterUnsealingKeys (fn: Key -> bool)
     | FilterAddrs (fn: Addr -> bool)
@@ -277,36 +339,119 @@ Section Machine.
     | FilterCapKeepCanStore (fn: Label -> bool)
     | FilterCapKeepCanBeStored (fn: Label -> bool).
 
+    Inductive GenericRestrict :=
+    | RestrictOps (ops: list RestrictOp)
+    | AbstractRestrict (fn: Cap -> Cap) (PfWfRestrict: forall x, Restrict x (fn x)).
+
     Inductive expr : type -> Type :=
-    | ValueUnop (fn: Value -> Value) (e1: expr Ty_CapOrValue) : expr Ty_CapOrValue
-    | ValueBinop (fn: Value -> Value -> Value) (e1 e2: expr Ty_CapOrValue) : expr Ty_CapOrValue
+    | ValueUnop (fn: Value -> Value) (e1: expr Ty_CapOrValue) : expr Ty_Value
+    | ValueBinop (fn: Value -> Value -> Value) (e1 e2: expr Ty_CapOrValue) : expr Ty_Value
+    (* | DecideUnop (fn: CapOrValue -> bool) (e1: expr Ty_CapOrValue) : expr Ty_Bool *)
+    (* | DecideBinop (fn: CapOrValue -> CapOrValue -> bool) (e1 e2: expr Ty_CapOrValue) : expr Ty_Bool *)
     | ReadReg (idx: Fin.t ISA_NREGS) : expr Ty_CapOrValue
-    | RestrictCap (restrict: list RestrictOps) (c: expr Ty_CapOrValue) : expr Ty_CapOrValue.
+    | RestrictCap (restrict: GenericRestrict) (c: expr Ty_CapOrValue) : expr Ty_CapOrValue
+    | ClearTag (c: expr Ty_CapOrValue) : expr Ty_Value
+    | LiftValue (c: expr Ty_Value) : expr Ty_CapOrValue.
+
 
     Inductive cmd : Type :=
     | Done
+    | Seq (c1 c2: cmd)
+    | ITE (cond: expr Ty_Bool) (c1 c2: cmd)
     | WriteReg (idx: Fin.t ISA_NREGS) (value: expr Ty_CapOrValue).
 
-    Inductive error_t : Prop :=
-    | Err (s: string).
-
     Class semantics_parameters (T: Type) :=
-      { err: error_t -> T;
-        option_bind: forall {A}, option A -> error_t -> (A -> T) -> T
+      { err: string -> T;
+        option_bind: forall {A}, option A -> string -> (A -> T) -> T
       }.
     Context {T: Type} {semantics_params : semantics_parameters T}.
+
+    (* Clear Tag *)
+    Definition CapToValue (c: Cap) : Value.
+    Admitted.
+
+    Definition CastToValue (c: CapOrValue) : Value :=
+      match c with
+      | inl cap => CapToValue cap
+      | inr v => v
+      end.
+
+    Definition restrict_no_check (op: RestrictOp) (c: Cap) : Cap :=
+      match op with
+      | ChangeCursor fn =>
+          set capCursor fn c
+      | FilterPerms fn =>
+          set capPerms (filter fn) c
+      | FilterCapCanStore fn =>
+          set capCanStore (filter fn) c
+      | FilterCapCanBeStored fn =>
+          set capCanBeStored (filter fn) c
+      | FilterSealingKeys fn =>
+          set capSealingKeys (filter fn) c
+      | FilterUnsealingKeys fn =>
+          set capUnsealingKeys (filter fn) c
+      | FilterAddrs fn =>
+          set capAddrs (filter fn) c
+      | FilterCapKeepPerms fn =>
+          set capKeepPerms (filter fn) c
+      | FilterCapKeepCanStore fn =>
+          set capKeepCanStore (filter fn) c
+      | FilterCapKeepCanBeStored fn =>
+          set capKeepCanBeStored (filter fn) c
+      end.
+
+    Definition mapCap (op: Cap -> Cap) (c: CapOrValue) : CapOrValue :=
+      match c with
+      | inl cap => inl (op cap)
+      | inr v => inr v
+      end.
+
+    Definition restrict_op (op: RestrictOp) (cap: Cap) : Cap :=
+      match cap.(capSealed) with
+      | Some _ =>
+          (* Cap is sealed. Only capCanBeStored can be modified. *)
+          match op with
+          | FilterCapCanBeStored fn => (restrict_no_check op cap)
+          | _ => cap
+          end
+      | None => (restrict_no_check op cap)
+      end.
+
+    Definition restrict (c: CapOrValue) (op: RestrictOp) : CapOrValue :=
+      mapCap (restrict_op op) c.
 
     Fixpoint interp_expr (pcc: PCC) (regs: RegisterFile) (mem: Memory)
                          {tau: type}
                          (e: expr tau)
-                         (post: type_denote tau -> T)
-                         : T :=
+                         : (type_denote tau -> T) -> T :=
       match e with
       | ValueUnop fn e1 =>
+          fun post =>
           ve1 <- interp_expr pcc regs mem e1;
-          err (Err "TODO")
-      | _ => err (Err "TODO")
-      end.
+          post (fn (CastToValue ve1))
+      | ValueBinop fn e1 e2 =>
+          fun post =>
+          ve1 <- interp_expr pcc regs mem e1;
+          ve2 <- interp_expr pcc regs mem e2;
+          post (fn (CastToValue ve1) (CastToValue ve2))
+     | ReadReg idx => fun post =>
+          post (Vector.nth regs idx)
+     | RestrictCap op c => fun post =>
+          vc <- interp_expr pcc regs mem c;
+          match op with
+          | RestrictOps ops =>
+              post (fold_left restrict ops vc)
+          | AbstractRestrict fn _ =>
+              post (mapCap fn vc)
+          end
+     | ClearTag e => fun post =>
+          ve <- interp_expr pcc regs mem e;
+          post (CastToValue ve)
+     | LiftValue e => fun post =>
+          ve <- interp_expr pcc regs mem e;
+          post (inr ve)
+     (* | _ => fun post => err "TODO" *)
+     end.
 
     Definition interp_cmd (pcc: PCC) (regs: RegisterFile) (mem: Memory)
                           (c: cmd)
@@ -314,9 +459,8 @@ Section Machine.
                           : T :=
       match c with
       | Done => post (Ok (pcc,regs,mem))
-      | WriteReg idx value =>
-
-      | _ =>  post Fail
+      | WriteReg idx value => err ("TODO")
+      | _ => err ("TODO")
       end.
 (*     | ReadReg (auth: Fin.t ISA_NREGS) (cont: CapOrValue -> InstructionStep). *)
 
@@ -343,6 +487,7 @@ Section Machine.
       match res with
       | Ok instr => user_step_fn instr ctx post
       | Exception exn => post (Exception exn)
+      | Fail => post (Fail)
       end.
 
     Inductive Step1 : Thread -> Memory -> InterruptStatus ->
@@ -586,8 +731,28 @@ Module CHERIoTValidation.
     Notation reg_t := (Fin.t ISA_NREGS).
 
     Definition ADDI (dst src1: reg_t) (imm: Z) : @cmd N Z CHERIOT_params :=
-      WriteReg dst (ValueUnop (Z.add imm) (ReadReg src1)).
+      WriteReg dst (LiftValue (ValueUnop (Z.add imm) (ReadReg src1))).
 
+    Definition GetRestrictOps (v: Z) : list (@RestrictOp N CHERIOT_params).
+    Admitted.
+
+    Notation CapOrValue := (@CapOrValue Z N).
+
+    Definition is_sealed (c: CapOrValue) : bool :=
+      match c with
+      | inl c => is_some c.(capSealed)
+      | inr v => false
+      end.
+
+    Definition CAndPerm (dst src1: reg_t) (rs2: reg_t) :=
+      RestrictCap (GetRestrictOps ?) (ReadReg rs2)
+
+      DecideUnop is_sealed (ReadReg
+(fun c => match c with
+                        | inl c =>
+                        | inr c =>
+
+      WriteReg dst (ReadReg src1)
     (* Definition LW (dst src1: reg_t) (imm: Z) : @cmd N Z CHERIOT_params := *)
     (*   WriteReg dst (ValueBinop Z.add (ReadReg src1)). *)
 
