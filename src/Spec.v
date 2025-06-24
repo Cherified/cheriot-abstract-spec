@@ -1,4 +1,4 @@
-From Stdlib Require Import List NArith Lia.
+From Stdlib Require Import List Lia Bool Nat.
 Set Primitive Projections.
 
 Section EqSet.
@@ -15,20 +15,14 @@ Section EqSet.
 
 End EqSet.
 
-Section ListUtils.
-  Import ListNotations.
-  Definition listUpdate{E: Type}(l: list E)(i: nat)(e: E): list E :=
-    firstn i l ++ [e] ++ skipn (S i) l.
-
-  Fixpoint listSumToInl [A B: Type] (l: list (A+B)) : list A :=
-    match l with
-    | nil => nil
-    | x :: xs => match x with
-                 | inl y => y :: listSumToInl xs
-                 | _ => listSumToInl xs
-                 end
-    end.
-End ListUtils.
+Fixpoint listSumToInl [A B: Type] (l: list (A+B)) : list A :=
+  match l with
+  | nil => nil
+  | x :: xs => match x with
+               | inl y => y :: listSumToInl xs
+               | _ => listSumToInl xs
+               end
+  end.
 
 Theorem seqInBounds n: forall b v,
     b <= v < b + n -> In v (seq b n).
@@ -40,11 +34,17 @@ Proof.
     lia.
 Qed.
 
-Definition option_to_bool [A] (a: option A) : bool :=
+Definition is_some [A] (a: option A) : bool :=
   match a with
   | Some _ => true
   | _ => false
   end.
+
+Class ISA_params := {
+    ISA_LG_CAPSIZE_BYTES : nat;
+    ISA_CAPSIZE_BYTES := Nat.pow 2 ISA_LG_CAPSIZE_BYTES;
+    ISA_NREGS: nat
+  }.
 
 (* Represents basic permissions *)
 Module Perm.
@@ -59,11 +59,13 @@ Module Perm.
 End Perm.
 
 Section Machine.
-  Variable Addr: Type.
+  Context [ISA: ISA_params].
+  Variable Byte: Type.
   Variable Key: Type.
-  Variable Value: Type.
-  Variable AddrToValue: Addr -> Value.
-  Variable ValueToAddr: Value -> Addr.
+  Definition Addr := nat.
+  Definition CapAddr := nat.
+  Definition toCapAddr (a: Addr): CapAddr := Nat.shiftr a ISA_LG_CAPSIZE_BYTES.
+  Definition fromCapAddr (a: CapAddr): Addr := Nat.shiftl a ISA_LG_CAPSIZE_BYTES.
 
   (* A cap X can be stored in a cap Y only if X can be stored in a Label that Y provides *)
   (* An example where restricting the label of what can be stored in a cap is useful:
@@ -109,11 +111,55 @@ Section Machine.
                          the error has to be handled by the caller compartment on return. *)
     }.
 
-  Notation CapOrValue := (Cap + Value)%type.
-  Notation Memory_t := (Addr -> CapOrValue).
+  Definition Memory_t := Addr -> Byte.
+  Definition Tag_t := CapAddr -> bool.
+  Definition FullMemory := (Memory_t * Tag_t)%type.
+  Definition Bytes := list Byte.
+  Definition CapOrBytes := (Cap + Bytes)%type.
 
+  Variable bytesToCapUnsafe: Bytes -> Cap.
+  Variable capToBytes: Cap -> Bytes.
+
+  Definition bytesToCap (tag: bool) (bytes: Bytes): CapOrBytes :=
+    if tag && (length bytes =? ISA_CAPSIZE_BYTES)
+    then inl (bytesToCapUnsafe bytes)
+    else inr bytes.
+
+  Definition readMemBytes (mem: Memory_t) (a: Addr) (sz: nat) : Bytes :=
+    map mem (seq (fromCapAddr a) sz).
+
+  Definition readMemTagCap (mem: Memory_t) (tags: Tag_t) (a: CapAddr) : CapOrBytes :=
+    bytesToCap (tags a) (readMemBytes mem (fromCapAddr a) ISA_CAPSIZE_BYTES).
+
+  Definition writeMemByte (mem: Memory_t) (a: Addr) (byte: Byte) : Memory_t :=
+    fun i => if i =? a
+             then byte
+             else mem i.
+
+  Definition writeMemBytes (mem: Memory_t) (a: Addr) (bytes: Bytes): Memory_t :=
+    fst (fold_left (fun '(mem', i) byte => (writeMemByte mem' (a + i) byte, S i)) bytes (mem, 0)).
+
+  Definition writeTagTag (tags: Tag_t) (a: CapAddr) (t: bool) : Tag_t := (fun i => if i =? a
+                                                                                   then t
+                                                                                   else tags i).
+
+  Definition writeMemTagCap (mem: Memory_t) (tags: Tag_t) (a: CapAddr) (c: Cap) : FullMemory :=
+    let capa := fromCapAddr a in
+    (writeMemBytes mem capa (capToBytes c), writeTagTag tags capa true).
+
+  Definition readByte (mem: FullMemory) (a: Addr) : Byte := (fst mem) a.
+  Definition readBytes (mem: FullMemory) := readMemBytes (fst mem).
+  Definition readTag (mem: FullMemory) (a: CapAddr) : bool := (snd mem) a.
+  Definition readCap (mem: FullMemory) := readMemTagCap (fst mem) (snd mem).
+  Definition writeByte (mem: FullMemory) := writeMemByte (fst mem).
+  Definition writeBytes (mem: FullMemory) := writeMemBytes (fst mem).
+  Definition writeTag (mem: FullMemory) := writeTagTag (snd mem).
+  Definition writeCap (mem: FullMemory) := writeMemTagCap (fst mem) (snd mem).
+
+  Definition ExnInfo := Bytes.
+  
   Section CurrMemory.
-    Variable Memory: Memory_t.
+    Variable mem: FullMemory.
 
     Section CapStep.
       Variable y z: Cap.
@@ -193,7 +239,7 @@ Section Machine.
       Record LoadCap : Prop := {
           loadNonRestrictEqs: NonRestrictEqs;
           loadAuthPerm: In Perm.Load x.(capPerms) /\ In Perm.Cap x.(capPerms);
-          loadFromAuth: exists a, In a x.(capAddrs) /\ Memory a = inl y;
+          loadFromAuth: exists capa, Subset (seq (fromCapAddr capa) ISA_CAPSIZE_BYTES) x.(capAddrs) /\ readCap mem capa = inl y;
           loadSealEq: z.(capSealed) = y.(capSealed);
           loadAttenuatePerms: match y.(capSealed) with
                               | None => AttenuatePerms
@@ -226,6 +272,7 @@ Section Machine.
           sealOrigUnsealed: y.(capSealed) = None;
           sealNewSealed: exists k, In k x.(capSealingKeys) /\ z.(capSealed) = Some (inr k) }.
 
+      (* TODO: Apparently CHERIoT permits more changes *)
       Record Unseal : Prop := {
           unsealEqs: SealUnsealEqs;
           unsealOrigSealed: exists k, In k x.(capUnsealingKeys) /\ y.(capSealed) = Some (inr k) ;
@@ -243,30 +290,39 @@ Section Machine.
       | StepUnseal x (xPf: ReachableCap x) y (yPf: ReachableCap y) z (xyz: Unseal x y z): ReachableCap z.
 
       (* Transitively reachable addr listed with permissions, canStore and canBeStored *)
-      Inductive ReachableAddr: Addr -> list Perm.t -> list Label -> list Label -> Prop :=
-      | HasAddr c (cPf: ReachableCap c) a (ina: In a c.(capAddrs)) (notSealed: c.(capSealed) = None)
-        : ReachableAddr a c.(capPerms) c.(capCanStore) c.(capCanBeStored).
+      Inductive ReachableAddr: Addr -> nat -> list Perm.t -> list Label -> list Label -> Prop :=
+      | HasAddr c (cPf: ReachableCap c) a sz (ina: Subset (seq a sz) c.(capAddrs)) (notSealed: c.(capSealed) = None)
+        : ReachableAddr a sz c.(capPerms) c.(capCanStore) c.(capCanBeStored).
 
       Definition ReachableCaps newCaps := forall c, In c newCaps -> ReachableCap c.
 
+      (* TODO: need to deal with size now *)
       Section UpdMem.
-        Variable NewMemory: Memory_t.
+        Variable mem': FullMemory.
 
-        Definition BasicStPermForAddr (auth: Cap) (a: Addr) :=
+        Definition BasicStPermForAddr (auth: Cap) (a: Addr) (sz: nat) :=
           ReachableCap auth
           /\ In Perm.Store auth.(capPerms)
           /\ auth.(capSealed) = None
-          /\ In a auth.(capAddrs).
+          /\ Subset (seq a sz) auth.(capAddrs).
 
-        Definition ValidMemUpdate :=
-          forall a, Memory a <> NewMemory a ->
-               exists stAddrCap, BasicStPermForAddr stAddrCap a /\
-               (match NewMemory a with
-                | inl stDataCap =>
-                    ReachableCap stDataCap
-                    /\ (exists l, In l stAddrCap.(capCanStore) /\ In l stDataCap.(capCanBeStored))
-                | inr v => True
-                end).
+        Definition ValidMemCapUpdate :=
+          forall capa, readCap mem capa <> readCap mem' capa ->
+                          readTag mem' capa = true ->
+                          exists stAddrCap, BasicStPermForAddr stAddrCap (fromCapAddr capa) ISA_CAPSIZE_BYTES
+                                            /\ exists stDataCap, ReachableCap stDataCap
+                                                                 /\ (exists l, In l stAddrCap.(capCanStore) /\ In l stDataCap.(capCanBeStored)).
+
+        Definition ValidMemTagRemoval :=
+          forall capa, readTag mem capa = true ->
+                          readTag mem' capa = false ->
+                          exists stAddrCap, BasicStPermForAddr stAddrCap (fromCapAddr capa) 1.
+
+        Definition ValidMemDataUpdate :=
+          forall a, readByte mem a <> readByte mem' a ->
+                          exists stAddrCap, BasicStPermForAddr stAddrCap a 1.
+
+        Definition ValidMemUpdate := ValidMemCapUpdate /\ ValidMemTagRemoval /\ ValidMemDataUpdate.
       End UpdMem.
     End Transitivity.
   End CurrMemory.
@@ -279,28 +335,11 @@ Section Machine.
     Variable EXNInfo: Type.
     Notation RegIdx := nat (only parsing).
 
-    Definition RegisterFile := list CapOrValue.
+    Definition RegisterFile := list CapOrBytes.
     Definition capsOfRf (rf: RegisterFile) := listSumToInl rf.
-
-    Record SemanticRegisterFile := {
-        rf_csp: Cap;
-        rf_cgp: Cap;
-        rf_argsAndRets: list CapOrValue;
-        rf_argsOnly: list CapOrValue;
-        rf_calleeSaved: list CapOrValue; (* To be saved by the switched on cross-compartment call *)
-        rf_other: list CapOrValue;
-        rf_targetCalleeEntry : Cap; (* Export table entry for target callee *)
-      }.
-
-    Definition capsOfSRf (rf: SemanticRegisterFile) :=
-      rf.(rf_csp) :: rf.(rf_cgp) :: rf.(rf_targetCalleeEntry) ::
-      listSumToInl rf.(rf_argsAndRets) ++ listSumToInl rf.(rf_argsOnly) ++ listSumToInl rf.(rf_calleeSaved)
-      ++ listSumToInl rf.(rf_other).
 
     (* TODO: decide on a register file representation. RF manipulations are currently buggy. *)
     Variable rfIdx_ra : nat.
-    Variable rfToSemanticRf : RegisterFile -> SemanticRegisterFile.
-    Variable semanticRfToConcreteRf : SemanticRegisterFile -> RegisterFile.
 
     (* Given that the spec can switch threads at any time,
        interrupts are disabled only to achieve atomicity of a code sequence in single-core machines. *)
@@ -311,7 +350,7 @@ Section Machine.
     Record TrustedStackFrame := {
         trustedStackFrame_CSP : Cap;
         trustedStackFrame_calleeExportTable : Cap;
-        trustedStackFrame_errorCounter : N
+        trustedStackFrame_errorCounter : nat
         (* trustedStackFrame_compartmentIdx : nat; (* Actually a pointer to the compartment's export table *) *)
       }.
 
@@ -357,15 +396,28 @@ Section Machine.
     }.
 
     (* The following definitions are defined per thread (obvious, but re-iterating) *)
-    Definition UserContext : Type := (UserThreadState * Memory_t).
+    Definition UserContext : Type := (UserThreadState * FullMemory).
     Definition SystemContext : Type := (SystemThreadState * InterruptStatus).
 
-    Definition ReachableMemSame m1 m2 caps :=
-      forall a p cs cbs, ReachableAddr m1 caps a p cs cbs ->
-                         (ReachableAddr m2 caps a p cs cbs /\ m1 a = m2 a).
+    (* TODO: Check if we can remove checking Load permission *)
+    Definition ReachableDataSame m1 m2 caps :=
+      forall a sz p cs cbs, ReachableAddr m1 caps a sz p cs cbs -> In Perm.Load p ->
+                            (ReachableAddr m2 caps a sz p cs cbs /\ readByte m1 a = readByte m2 a).
 
-    Definition UpdatedMemSame (m1 m2 m1' m2': Memory_t) :=
-      forall a, (m1' a <> m1 a \/ m2' a <> m2 a) -> m1' a = m2' a.
+    (* TODO: Check if we can remove checking Load/Cap permission *)
+    Definition ReachableTagSame m1 m2 caps :=
+      forall capa p cs cbs, ReachableAddr m1 caps capa ISA_CAPSIZE_BYTES p cs cbs -> In Perm.Load p -> In Perm.Cap p ->
+                               (ReachableAddr m2 caps capa ISA_CAPSIZE_BYTES p cs cbs /\ readTag m1 capa = readTag m2 capa).
+
+    Definition ReachableMemSame m1 m2 caps := ReachableDataSame m1 m2 caps /\ ReachableTagSame m1 m2 caps.
+
+    Definition UpdatedDataSame (m1 m2 m1' m2': FullMemory) :=
+      forall a, (readByte m1' a <> readByte m1 a \/ readByte m2' a <> readByte m2 a) -> readByte m1' a = readByte m2' a.
+
+    Definition UpdatedTagSame (m1 m2 m1' m2': FullMemory) :=
+      forall capa, (readTag m1' capa <> readTag m1 capa \/ readTag m2' capa <> readTag m2 capa) -> readTag m1' capa = readTag m2' capa.
+
+    Definition UpdatedMemSame (m1 m2 m1' m2': FullMemory) := UpdatedDataSame m1 m2 m1' m2' /\ UpdatedTagSame m1 m2 m1' m2'.
 
     Section NormalInst.
       Variable normalInst: UserContext -> UserContext.
@@ -496,8 +548,8 @@ Section Machine.
     | Inst_Exn exnInst (wf: WfExnInst exnInst).
 
     Section FetchDecodeExecute.
-      Variable fetchAddrs: Memory_t -> Addr -> list Addr.
-      Variable decode: Memory_t -> list Addr -> Inst.
+      Variable fetchAddrs: FullMemory -> Addr -> list Addr.
+      Variable decode: FullMemory -> list Addr -> Inst.
       Variable pccNotInBounds: EXNInfo.
 
       Variable compartmentCallPCC: Cap. (* This has Exec and System permission; must pass the proof *)
@@ -505,7 +557,7 @@ Section Machine.
       Variable exceptionEntryPCC: Cap.  (* This has Exec and System permission; must pass the proof *)
 
       Variable uc: UserContext.
-      Definition mem : Memory_t := snd uc.
+      Definition mem : FullMemory := snd uc.
       Definition pcc := (fst uc).(thread_pcc).
       Definition rf := (fst uc).(thread_rf).
       Variable sc: SystemContext.
@@ -671,7 +723,7 @@ Module CHERIoTValidation.
         |}
     end.
 
-  Definition mk_abstract_cap (c: cheriot_cap) : Cap N N :=
+  Definition mk_abstract_cap (c: cheriot_cap) : Cap N :=
     let d := decompress_perm c.(permissions) in
     {|capSealed := if d.(EX)
                    then match c.(otype) with
@@ -701,7 +753,7 @@ Module CHERIoTValidation.
       capCanBeStored := if d.(GL) then [Local;NonLocal] else [Local];
       capSealingKeys := [c.(addr)];
       capUnsealingKeys := [c.(addr)];
-      capAddrs := map N.of_nat (seq (N.to_nat c.(base)) (N.to_nat (c.(length))));
+      capAddrs := seq (N.to_nat c.(base)) (N.to_nat c.(length));
       capKeepPerms := filter (fun p => match p with
                                        | Perm.Exec => true
                                        | Perm.System => true
@@ -714,5 +766,5 @@ Module CHERIoTValidation.
                         [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
       capKeepCanStore := [Local;NonLocal];
       capKeepCanBeStored := if d.(LG) then [Local;NonLocal] else [Local];
-      capCursor := c.(addr) |}.
+      capCursor := N.to_nat c.(addr) |}.
 End CHERIoTValidation.
