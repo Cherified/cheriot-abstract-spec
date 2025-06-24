@@ -467,14 +467,24 @@ Section Machine.
           post (fn ve1 ve2)
      (* | _ => fun post => err "TODO" *)
      end.
-
-    Definition interp_cmd (pcc: PCC) (regs: RegisterFile) (mem: Memory)
+    Fixpoint interp_cmd (pcc: PCC) (regs: RegisterFile) (mem: Memory)
                           (c: cmd)
                           (post: Result (PCC * RegisterFile * Memory) -> T)
                           : T :=
       match c with
       | Done => post (Ok (pcc,regs,mem))
-      | WriteReg idx value => err ("TODO")
+      | WriteReg idx value =>
+          v <- interp_expr pcc regs mem value;
+          post (Ok (pcc, Vector.replace regs idx (inr v), mem))
+      | WriteCReg idx value =>
+          v <- interp_expr pcc regs mem value;
+          post (Ok (pcc, Vector.replace regs idx v, mem))
+      | ITE cond c1 c2 =>
+          vcond <- interp_expr pcc regs mem cond;
+          if vcond then
+            interp_cmd pcc regs mem c1 post
+          else
+            interp_cmd pcc regs mem c2 post
       | _ => err ("TODO")
       end.
 (*     | ReadReg (auth: Fin.t ISA_NREGS) (cont: CapOrValue -> InstructionStep). *)
