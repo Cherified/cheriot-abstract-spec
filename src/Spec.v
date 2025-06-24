@@ -483,8 +483,7 @@ Section Machine.
       Definition WfExnInst := forall rf pcc mem,
           let exn := exnInst (Build_UserThreadState rf pcc, mem) in
           let caps := pcc :: capsOfRf rf in
-          In Perm.Exec pcc.(capPerms)
-          /\ FuncExn.
+          FuncExn.
     End ExnInst.
 
     Inductive Inst :=
