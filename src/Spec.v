@@ -272,7 +272,6 @@ Section Machine.
           sealOrigUnsealed: y.(capSealed) = None;
           sealNewSealed: exists k, In k x.(capSealingKeys) /\ z.(capSealed) = Some (inr k) }.
 
-      (* TODO: Apparently CHERIoT permits more changes *)
       Record Unseal : Prop := {
           unsealEqs: SealUnsealEqs;
           unsealOrigSealed: exists k, In k x.(capUnsealingKeys) /\ y.(capSealed) = Some (inr k) ;
@@ -296,7 +295,6 @@ Section Machine.
 
       Definition ReachableCaps newCaps := forall c, In c newCaps -> ReachableCap c.
 
-      (* TODO: need to deal with size now *)
       Section UpdMem.
         Variable mem': FullMemory.
 
@@ -733,7 +731,7 @@ Module CHERIoTValidation.
                         | 3 => Some (inl CallEnableInterrupt)
                         | 4 => Some (inl RetDisableInterrupt)
                         | 5 => Some (inl RetEnableInterrupt)
-                        | (* 6 & 7 *) _ => None (* TODO! capSentry ⊆ capSealed *)
+                        | (* 6 & 7 *) _ => None (* TODO: capSentry ⊆ capSealed *)
                         end
                    else match c.(otype) with
                         | 0 => None
