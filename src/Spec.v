@@ -285,29 +285,6 @@ Section Machine.
 
     Definition RegisterFile := list CapOrValue.
     Definition capsOfRf (rf: RegisterFile) := listSumToInl rf.
-
-    Record SemanticRegisterFile := {
-        rf_csp: Cap;
-        rf_cgp: Cap;
-        rf_argsAndRets: list CapOrValue;
-        rf_argsOnly: list CapOrValue;
-        rf_calleeSaved: list CapOrValue; (* To be saved by the switched on cross-compartment call *)
-        rf_other: list CapOrValue;
-        rf_targetCalleeEntry : Cap; (* Export table entry for target callee *)
-      }.
-
-    Definition capsOfSRf (rf: SemanticRegisterFile) :=
-      rf.(rf_csp) :: rf.(rf_cgp) :: rf.(rf_targetCalleeEntry) ::
-      listSumToInl rf.(rf_argsAndRets) ++ listSumToInl rf.(rf_argsOnly) ++ listSumToInl rf.(rf_calleeSaved)
-      ++ listSumToInl rf.(rf_other).
-
-    (* TODO: decide on a register file representation. RF manipulations are currently buggy. *)
-    Variable rfIdx_ra : nat.
-    Variable rfToSemanticRf : RegisterFile -> SemanticRegisterFile.
-    Variable semanticRfToConcreteRf : SemanticRegisterFile -> RegisterFile.
-
-    (* Given that the spec can switch threads at any time,
-       interrupts are disabled only to achieve atomicity of a code sequence in single-core machines. *)
     Inductive InterruptStatus :=
     | InterruptsEnabled
     | InterruptsDisabled.
@@ -360,10 +337,95 @@ Section Machine.
         machine_curThreadId : nat;
     }.
 
+    Definition setMachineThread (m: Machine) (tid: nat): Machine :=
+      {| machine_memory := m.(machine_memory);
+         machine_interruptStatus := m.(machine_interruptStatus);
+         machine_threads := m.(machine_threads);
+         machine_curThreadId := tid
+      |}.
+
+    Definition SameThreadStep (m: Machine)
+                              (update_fn: Thread -> Memory_t -> InterruptStatus ->
+                                          (Thread -> Memory_t -> InterruptStatus -> Prop) -> Prop)
+                              (post: Machine -> Prop) : Prop :=
+      let tid := m.(machine_curThreadId) in
+      let threads := m.(machine_threads) in
+      exists thread, nth_error threads tid = Some thread /\
+                update_fn thread m.(machine_memory) m.(machine_interruptStatus) (fun thread' memory' interrupt' =>
+                   post {| machine_memory:= memory';
+                           machine_threads := listUpdate threads tid thread';
+                           machine_curThreadId := tid;
+                           machine_interruptStatus := interrupt'
+                        |}).
+
     Section Machine.
       (* The following definitions are defined per thread (obvious, but re-iterating) *)
       Definition UserContext : Type := (UserThreadState * Memory_t).
       Definition SystemContext : Type := (SystemThreadState * InterruptStatus).
+
+      (* - Read m bytes from memory
+         - Ask ISA writer how many bytes it needs: --> n
+         - Check if in bounds
+         - Return n bytes
+       *)
+      Definition fetch (pcc: PCC) (mem: Memory_t): Prop.
+      Admitted.
+
+      Inductive Result :=
+      | Ok (pcc: PCC) (rf: RegisterFile) (mem: Memory_t)
+      | Exception (exn: EXNInfo).
+
+      (* Inductive InstrAction : PCC -> RegisterFile -> Memory_t -> *)
+      (*                         (Result -> Prop) -> Prop := *)
+      (* | IAction_Nop : forall pcc rf mem post, *)
+      (*     post (Ok pcc rf mem) -> *)
+      (*     InstrAction pcc rf mem post *)
+      (* | IAction_Exception : *)
+      (*   forall pcc rf mem exn post, *)
+      (*     post (Exception exn) -> *)
+      (*     InstrAction pcc rf mem post *)
+      (* | IAction_ *)
+
+      Definition step_update_fn (t: Thread) (mem: Memory_t) (istatus: InterruptStatus)
+                                : (Thread -> Memory_t -> InterruptStatus -> Prop) -> Prop.
+      Admitted.
+
+      Inductive Step : Machine -> (Machine -> Prop) -> Prop :=
+      | Step_SwitchThreads:
+          forall m tid' post,
+            m.(machine_interruptStatus) = InterruptsEnabled ->
+            tid' < List.length m.(machine_threads) ->
+            post (setMachineThread m tid') ->
+            Step m post
+      | Step_SameThread:
+          forall m post,
+            SameThreadStep m step_update_fn post ->
+            Step m post.
+
+    End Machine.
+    Record SemanticRegisterFile := {
+        rf_csp: Cap;
+        rf_cgp: Cap;
+        rf_argsAndRets: list CapOrValue;
+        rf_argsOnly: list CapOrValue;
+        rf_calleeSaved: list CapOrValue; (* To be saved by the switched on cross-compartment call *)
+        rf_other: list CapOrValue;
+        rf_targetCalleeEntry : Cap; (* Export table entry for target callee *)
+      }.
+
+    Definition capsOfSRf (rf: SemanticRegisterFile) :=
+      rf.(rf_csp) :: rf.(rf_cgp) :: rf.(rf_targetCalleeEntry) ::
+      listSumToInl rf.(rf_argsAndRets) ++ listSumToInl rf.(rf_argsOnly) ++ listSumToInl rf.(rf_calleeSaved)
+      ++ listSumToInl rf.(rf_other).
+
+    (* TODO: decide on a register file representation. RF manipulations are currently buggy. *)
+    Variable rfIdx_ra : nat.
+    Variable rfToSemanticRf : RegisterFile -> SemanticRegisterFile.
+    Variable semanticRfToConcreteRf : SemanticRegisterFile -> RegisterFile.
+
+    (* Given that the spec can switch threads at any time,
+       interrupts are disabled only to achieve atomicity of a code sequence in single-core machines. *)
+
 
       Definition ValidNormalUserStepFromOldCaps (oldCaps: list Cap) (oldMem: Memory_t) (new: UserContext) :=
         let '(newUTS, newMem) := new in
@@ -474,26 +536,7 @@ Section Machine.
 
       Context (MachineStep: StepFn).
 
-      Definition setMachineThread (m: Machine) (tid: nat): Machine :=
-        {| machine_memory := m.(machine_memory);
-           machine_interruptStatus := m.(machine_interruptStatus);
-           machine_threads := m.(machine_threads);
-           machine_curThreadId := tid
-        |}.
 
-      Definition SameThreadStep (m: Machine)
-                                (update_fn: Thread -> Memory_t -> InterruptStatus ->
-                                            (Thread -> Memory_t -> InterruptStatus -> Prop) -> Prop)
-                                (post: Machine -> Prop) : Prop :=
-        let tid := m.(machine_curThreadId) in
-        let threads := m.(machine_threads) in
-        exists thread, nth_error threads tid = Some thread /\
-                  update_fn thread m.(machine_memory) m.(machine_interruptStatus) (fun thread' memory' interrupt' =>
-                     post {| machine_memory:= memory';
-                             machine_threads := listUpdate threads tid thread';
-                             machine_curThreadId := tid;
-                             machine_interruptStatus := interrupt'
-                          |}).
 
 
       Definition setPCCInUserContext (pcc: PCC) (ctx: UserContext) : UserContext :=
@@ -572,7 +615,181 @@ Section Machine.
 
     End Machine.
 
+  End Machine.
+End Machine.
 
+Module CHERIoTValidation.
+  From Stdlib Require Import ZArith.
+  Import ListNotations.
+  Local Open Scope N_scope.
+  Inductive CompressedPerm :=
+  | MemCapRW (GL: bool) (SL: bool) (LM: bool) (LG: bool) (* Implicit: LD, MC, SD *)
+  | MemCapRO (GL: bool) (LM: bool) (LG: bool) (* Implicit: LD, MC *)
+  | MemCapWO (GL: bool) (* Implicit: SD, MC *)
+  | MemDataOnly (GL: bool) (LD: bool) (SD: bool) (* Implicit: None *)
+  | Executable (GL: bool) (SR: bool) (LM: bool) (LG: bool) (* Implicit: EX, LD, MC *)
+  | Sealing (GL: bool) (U0: bool) (SE: bool) (US: bool) (* Implicit: None *).
+
+  Record cheriot_cap :=
+  { reserved: bool;
+    permissions: CompressedPerm;
+    otype: N; (* < 8 *)
+    base: N;
+    length: N;
+    addr: N;
+    addrInBounds: base <= addr < base + length
+    (* This is needed because of compressed caps. See comment in definition of Cap above *)
+  }.
+
+  Record Perm :=
+    {
+      EX : bool; (* PERMIT_EXECuTE *)
+      GL : bool; (* GLOBAL *)
+      LD : bool; (* PERMIT_LOAD *)
+      SD : bool; (* PERMIT_STORE *)
+      SL : bool; (* PERMIT_STORE_LOCAL_CAPABILITY *)
+      SR : bool; (* PERMIT_ACCESS_SYSTEM_REGISTERS *)
+      SE : bool; (* PERMIT_SEAL *)
+      US : bool; (* PERMIT_UNSEAL *)
+      U0 : bool; (* USER_PERM0 *)
+      LM : bool; (* PERMIT_LOAD_MUTABLE *)
+      LG : bool; (* PERMIT_LOAD_GLOBAL *)
+      MC : bool; (* PERMIT_LOAD_STORE_CAPABILITY *)
+    }.
+
+  Definition decompress_perm (p: CompressedPerm) : Perm :=
+    match p with
+    | MemCapRW gl sl lm lg =>
+        {| EX := false;
+           GL := gl;
+           LD := true;
+           SD := true;
+           SL := sl;
+           SR := false;
+           SE := false;
+           US := false;
+           U0 := false;
+           LM := lm;
+           LG := lg;
+           MC := true
+        |}
+    | MemCapRO gl lm lg =>
+        {| EX := false;
+           GL := gl;
+           LD := true;
+           SD := false;
+           SL := false;
+           SR := false;
+           SE := false;
+           US := false;
+           U0 := false;
+           LM := lm;
+           LG := lg;
+           MC := true
+        |}
+    | MemCapWO gl =>
+        {| EX := false;
+           GL := gl;
+           LD := false;
+           SD := true;
+           SL := false;
+           SR := false;
+           SE := false;
+           US := false;
+           U0 := false;
+           LM := false;
+           LG := false;
+           MC := true
+        |}
+    | MemDataOnly gl ld sd =>
+        {| EX := false;
+           GL := gl;
+           LD := ld;
+           SD := sd;
+           SL := false;
+           SR := false;
+           SE := false;
+           US := false;
+           U0 := false;
+           LM := false;
+           LG := false;
+           MC := false
+        |}
+    | Executable gl sr lm lg =>
+        {| EX := true;
+           GL := gl;
+           LD := true;
+           SD := false;
+           SL := false;
+           SR := sr;
+           SE := false;
+           US := false;
+           U0 := false;
+           LM := lm;
+           LG := lg;
+           MC := true
+        |}
+    | Sealing gl u0 se us =>
+        {| EX := false;
+           GL := gl;
+           LD := false;
+           SD := false;
+           SL := false;
+           SR := false;
+           SE := se;
+           US := us;
+           U0 := u0;
+           LM := false;
+           LG := false;
+           MC := false
+        |}
+    end.
+
+  Definition mk_abstract_cap (c: cheriot_cap) : Cap N N :=
+    let d := decompress_perm c.(permissions) in
+    {|capSealed := if d.(EX)
+                   then match c.(otype) with
+                        | 0 => None
+                        | 1 => Some (inl CallInheritInterrupt)
+                        | 2 => Some (inl CallDisableInterrupt)
+                        | 3 => Some (inl CallEnableInterrupt)
+                        | 4 => Some (inl RetDisableInterrupt)
+                        | 5 => Some (inl RetEnableInterrupt)
+                        | (* 6 & 7 *) _ => None (* TODO! capSentry ⊆ capSealed *)
+                        end
+                   else match c.(otype) with
+                        | 0 => None
+                        | _ => Some (inr c.(otype))
+                        end;
+      capPerms := filter (fun p => match p with
+                                   | Perm.Exec => d.(EX)
+                                   | Perm.System => d.(SR)
+                                   | Perm.Load => d.(LD)
+                                   | Perm.Store => d.(SD)
+                                   | Perm.Cap => d.(MC)
+                                   | Perm.Sealing => d.(SE)
+                                   | Perm.Unsealing => d.(US)
+                                   end)
+                    [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
+      capCanStore := if d.(SL) then [Local;NonLocal] else [NonLocal];
+      capCanBeStored := if d.(GL) then [Local;NonLocal] else [Local];
+      capSealingKeys := [c.(addr)];
+      capUnsealingKeys := [c.(addr)];
+      capAddrs := map N.of_nat (seq (N.to_nat c.(base)) (N.to_nat (c.(length))));
+      capKeepPerms := filter (fun p => match p with
+                                       | Perm.Exec => true
+                                       | Perm.System => true
+                                       | Perm.Load => true
+                                       | Perm.Store => d.(LM)
+                                       | Perm.Cap => true
+                                       | Perm.Sealing => true
+                                       | Perm.Unsealing => true
+                                       end)
+                        [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
+      capKeepCanStore := [Local;NonLocal];
+      capKeepCanBeStored := if d.(LG) then [Local;NonLocal] else [Local];
+      capCursor := c.(addr) |}.
+End CHERIoTValidation.
   (* Section MachineOld. *)
     (* Inductive ImportTableEntry := *)
     (* | ImportEntry_SealedCapToExportEntry (cap: Cap) *)
@@ -969,180 +1186,6 @@ Section Machine.
 
 
   (* End Machine. *)
-End Machine.
-
-Module CHERIoTValidation.
-  From Stdlib Require Import ZArith.
-  Import ListNotations.
-  Local Open Scope N_scope.
-  Inductive CompressedPerm :=
-  | MemCapRW (GL: bool) (SL: bool) (LM: bool) (LG: bool) (* Implicit: LD, MC, SD *)
-  | MemCapRO (GL: bool) (LM: bool) (LG: bool) (* Implicit: LD, MC *)
-  | MemCapWO (GL: bool) (* Implicit: SD, MC *)
-  | MemDataOnly (GL: bool) (LD: bool) (SD: bool) (* Implicit: None *)
-  | Executable (GL: bool) (SR: bool) (LM: bool) (LG: bool) (* Implicit: EX, LD, MC *)
-  | Sealing (GL: bool) (U0: bool) (SE: bool) (US: bool) (* Implicit: None *).
-
-  Record cheriot_cap :=
-  { reserved: bool;
-    permissions: CompressedPerm;
-    otype: N; (* < 8 *)
-    base: N;
-    length: N;
-    addr: N;
-    addrInBounds: base <= addr < base + length
-    (* This is needed because of compressed caps. See comment in definition of Cap above *)
-  }.
-
-  Record Perm :=
-    {
-      EX : bool; (* PERMIT_EXECuTE *)
-      GL : bool; (* GLOBAL *)
-      LD : bool; (* PERMIT_LOAD *)
-      SD : bool; (* PERMIT_STORE *)
-      SL : bool; (* PERMIT_STORE_LOCAL_CAPABILITY *)
-      SR : bool; (* PERMIT_ACCESS_SYSTEM_REGISTERS *)
-      SE : bool; (* PERMIT_SEAL *)
-      US : bool; (* PERMIT_UNSEAL *)
-      U0 : bool; (* USER_PERM0 *)
-      LM : bool; (* PERMIT_LOAD_MUTABLE *)
-      LG : bool; (* PERMIT_LOAD_GLOBAL *)
-      MC : bool; (* PERMIT_LOAD_STORE_CAPABILITY *)
-    }.
-
-  Definition decompress_perm (p: CompressedPerm) : Perm :=
-    match p with
-    | MemCapRW gl sl lm lg =>
-        {| EX := false;
-           GL := gl;
-           LD := true;
-           SD := true;
-           SL := sl;
-           SR := false;
-           SE := false;
-           US := false;
-           U0 := false;
-           LM := lm;
-           LG := lg;
-           MC := true
-        |}
-    | MemCapRO gl lm lg =>
-        {| EX := false;
-           GL := gl;
-           LD := true;
-           SD := false;
-           SL := false;
-           SR := false;
-           SE := false;
-           US := false;
-           U0 := false;
-           LM := lm;
-           LG := lg;
-           MC := true
-        |}
-    | MemCapWO gl =>
-        {| EX := false;
-           GL := gl;
-           LD := false;
-           SD := true;
-           SL := false;
-           SR := false;
-           SE := false;
-           US := false;
-           U0 := false;
-           LM := false;
-           LG := false;
-           MC := true
-        |}
-    | MemDataOnly gl ld sd =>
-        {| EX := false;
-           GL := gl;
-           LD := ld;
-           SD := sd;
-           SL := false;
-           SR := false;
-           SE := false;
-           US := false;
-           U0 := false;
-           LM := false;
-           LG := false;
-           MC := false
-        |}
-    | Executable gl sr lm lg =>
-        {| EX := true;
-           GL := gl;
-           LD := true;
-           SD := false;
-           SL := false;
-           SR := sr;
-           SE := false;
-           US := false;
-           U0 := false;
-           LM := lm;
-           LG := lg;
-           MC := true
-        |}
-    | Sealing gl u0 se us =>
-        {| EX := false;
-           GL := gl;
-           LD := false;
-           SD := false;
-           SL := false;
-           SR := false;
-           SE := se;
-           US := us;
-           U0 := u0;
-           LM := false;
-           LG := false;
-           MC := false
-        |}
-    end.
-
-  Definition mk_abstract_cap (c: cheriot_cap) : Cap N N :=
-    let d := decompress_perm c.(permissions) in
-    {|capSealed := if d.(EX)
-                   then match c.(otype) with
-                        | 0 => None
-                        | 1 => Some (inl CallInheritInterrupt)
-                        | 2 => Some (inl CallDisableInterrupt)
-                        | 3 => Some (inl CallEnableInterrupt)
-                        | 4 => Some (inl RetDisableInterrupt)
-                        | 5 => Some (inl RetEnableInterrupt)
-                        | (* 6 & 7 *) _ => None (* TODO! capSentry ⊆ capSealed *)
-                        end
-                   else match c.(otype) with
-                        | 0 => None
-                        | _ => Some (inr c.(otype))
-                        end;
-      capPerms := filter (fun p => match p with
-                                   | Perm.Exec => d.(EX)
-                                   | Perm.System => d.(SR)
-                                   | Perm.Load => d.(LD)
-                                   | Perm.Store => d.(SD)
-                                   | Perm.Cap => d.(MC)
-                                   | Perm.Sealing => d.(SE)
-                                   | Perm.Unsealing => d.(US)
-                                   end)
-                    [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
-      capCanStore := if d.(SL) then [Local;NonLocal] else [NonLocal];
-      capCanBeStored := if d.(GL) then [Local;NonLocal] else [Local];
-      capSealingKeys := [c.(addr)];
-      capUnsealingKeys := [c.(addr)];
-      capAddrs := map N.of_nat (seq (N.to_nat c.(base)) (N.to_nat (c.(length))));
-      capKeepPerms := filter (fun p => match p with
-                                       | Perm.Exec => true
-                                       | Perm.System => true
-                                       | Perm.Load => true
-                                       | Perm.Store => d.(LM)
-                                       | Perm.Cap => true
-                                       | Perm.Sealing => true
-                                       | Perm.Unsealing => true
-                                       end)
-                        [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
-      capKeepCanStore := [Local;NonLocal];
-      capKeepCanBeStored := if d.(LG) then [Local;NonLocal] else [Local];
-      capCursor := c.(addr) |}.
-End CHERIoTValidation.
 
 (* Require Import coqutil.Map.Interface. *)
 (* Require Import coqutil.Byte. *)

@@ -84,7 +84,8 @@ Section Machine.
   End TypeDefs.
   Context {AddrToValue: Addr -> Value}.
   Context {ValueToAddr : Value -> Addr}.
-
+  Context {ValueToKey : Value -> Key}.
+  Context {Key_eqb: Key -> Key -> bool}.
 
   (* A cap X can be stored in a cap Y only if X can be stored in a Label that Y provides *)
   (* An example where restricting the label of what can be stored in a cap is useful:
@@ -350,6 +351,8 @@ Section Machine.
     | DecideUnop (fn: CapOrValue -> bool) (e1: expr Ty_CapOrValue) : expr Ty_Bool
     | DecideBinop (fn: CapOrValue -> CapOrValue -> bool) (e1 e2: expr Ty_CapOrValue) : expr Ty_Bool
     | ReadReg (idx: Fin.t ISA_NREGS) : expr Ty_CapOrValue
+    | SealCap (auth: expr Ty_CapOrValue) (key: expr Ty_Value) : expr Ty_CapOrValue
+    | UnsealCap (auth: expr Ty_CapOrValue) (c: CapOrValue) : expr Ty_CapOrValue
     | RestrictCap (restrict: CapOrValue -> GenericRestrict) (c: expr Ty_CapOrValue) (ve: expr Ty_CapOrValue) : expr Ty_CapOrValue
     | LiftValue (c: expr Ty_Value) : expr Ty_CapOrValue.
 
@@ -357,7 +360,8 @@ Section Machine.
     | Done
     | Seq (c1 c2: cmd)
     | ITE (cond: expr Ty_Bool) (c1 c2: cmd)
-    | WriteReg (idx: Fin.t ISA_NREGS) (value: expr Ty_CapOrValue).
+    | WriteReg (idx: Fin.t ISA_NREGS) (value: expr Ty_CapOrValue)
+    | RaiseException (exn: EXNInfo).
 
     Class semantics_parameters (T: Type) :=
       { err: string -> T;
@@ -418,7 +422,6 @@ Section Machine.
 
     Definition restrict (c: CapOrValue) (op: RestrictOp) : CapOrValue :=
       mapCap (restrict_op op) c.
-
     Fixpoint interp_expr (pcc: PCC) (regs: RegisterFile) (mem: Memory)
                          {tau: type}
                          (e: expr tau)
@@ -457,7 +460,24 @@ Section Machine.
           ve1 <- interp_expr pcc regs mem e1;
           ve2 <- interp_expr pcc regs mem e2;
           post (fn ve1 ve2)
-     (* | _ => fun post => err "TODO" *)
+     | UnsealCap auth c => fun post =>
+          vauth <- interp_expr pcc regs mem auth;
+          vc <- interp_expr pcc regs mem c;
+          (* NB: In CHERIoT, if auth does not grant global, then unsealing strips global perms too.
+             We may need to add this.
+           *)
+          match vauth, vc with
+          | inl auth_cap, inl sealed_cap =>
+              match sealed_cap.(capSealed) with
+              | Some key =>
+                  if existsb (Key_eqb key) auth_cap.(capUnsealingKeys) then
+                    post (inl (set capSealed (fun _ => None) sealed_cap))
+                  else post c
+              | None => post c
+              end
+          | _, _ => (* TODO: Return c as is? *) post c
+          end
+     | _ => fun post => err "TODO"
      end.
     Fixpoint interp_cmd (pcc: PCC) (regs: RegisterFile) (mem: Memory)
                           (c: cmd)
