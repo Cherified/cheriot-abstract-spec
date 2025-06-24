@@ -345,22 +345,19 @@ Section Machine.
 
     Inductive expr : type -> Type :=
     | ConstValue (v: Value) : expr Ty_Value
-    | ValueUnop (fn: Value -> Value) (e1: expr Ty_Value) : expr Ty_Value
-    | ValueBinop (fn: Value -> Value -> Value) (e1 e2: expr Ty_Value) : expr Ty_Value
+    | ValueUnop (fn: CapOrValue -> Value) (e1: expr Ty_CapOrValue) : expr Ty_Value
+    | ValueBinop (fn: CapOrValue -> CapOrValue -> Value) (e1 e2: expr Ty_CapOrValue) : expr Ty_Value
     | DecideUnop (fn: CapOrValue -> bool) (e1: expr Ty_CapOrValue) : expr Ty_Bool
     | DecideBinop (fn: CapOrValue -> CapOrValue -> bool) (e1 e2: expr Ty_CapOrValue) : expr Ty_Bool
-    | ReadReg (idx: Fin.t ISA_NREGS) : expr Ty_Value
-    | ReadCReg (idx: Fin.t ISA_NREGS) : expr Ty_CapOrValue
-    | RestrictCap (restrict: Value -> GenericRestrict) (c: expr Ty_CapOrValue) (ve: expr Ty_Value) : expr Ty_CapOrValue
-    | ClearTag (c: expr Ty_CapOrValue) : expr Ty_Value
+    | ReadReg (idx: Fin.t ISA_NREGS) : expr Ty_CapOrValue
+    | RestrictCap (restrict: CapOrValue -> GenericRestrict) (c: expr Ty_CapOrValue) (ve: expr Ty_CapOrValue) : expr Ty_CapOrValue
     | LiftValue (c: expr Ty_Value) : expr Ty_CapOrValue.
 
     Inductive cmd : Type :=
     | Done
     | Seq (c1 c2: cmd)
     | ITE (cond: expr Ty_Bool) (c1 c2: cmd)
-    | WriteReg (idx: Fin.t ISA_NREGS) (value: expr Ty_Value)
-    | WriteCReg (idx: Fin.t ISA_NREGS) (value: expr Ty_CapOrValue).
+    | WriteReg (idx: Fin.t ISA_NREGS) (value: expr Ty_CapOrValue).
 
     Class semantics_parameters (T: Type) :=
       { err: string -> T;
@@ -369,7 +366,7 @@ Section Machine.
     (* Clear Tag *)
     Context {CapToValue : Cap -> Value}.
 
-    Definition CastToValue (c: CapOrValue) : Value :=
+    Definition ToValue (c: CapOrValue) : Value :=
       match c with
       | inl cap => CapToValue cap
       | inr v => v
@@ -439,10 +436,8 @@ Section Machine.
           ve1 <- interp_expr pcc regs mem e1;
           ve2 <- interp_expr pcc regs mem e2;
           post (fn ve1 ve2)
-     | ReadCReg idx => fun post =>
-          post (Vector.nth regs idx)
      | ReadReg idx => fun post =>
-          post (CastToValue (Vector.nth regs idx))
+          post (Vector.nth regs idx)
      | RestrictCap op c val => fun post =>
           vc <- interp_expr pcc regs mem c;
           vval <- interp_expr pcc regs mem val;
@@ -452,9 +447,6 @@ Section Machine.
           | AbstractRestrict fn _ =>
               post (mapCap fn vc)
           end
-     | ClearTag e => fun post =>
-          ve <- interp_expr pcc regs mem e;
-          post (CastToValue ve)
      | LiftValue e => fun post =>
           ve <- interp_expr pcc regs mem e;
           post (inr ve)
@@ -473,10 +465,10 @@ Section Machine.
                           : T :=
       match c with
       | Done => post (Ok (pcc,regs,mem))
+      (* | WriteReg idx value => *)
+      (*     v <- interp_expr pcc regs mem value; *)
+      (*     post (Ok (pcc, Vector.replace regs idx (inr v), mem)) *)
       | WriteReg idx value =>
-          v <- interp_expr pcc regs mem value;
-          post (Ok (pcc, Vector.replace regs idx (inr v), mem))
-      | WriteCReg idx value =>
           v <- interp_expr pcc regs mem value;
           post (Ok (pcc, Vector.replace regs idx v, mem))
       | ITE cond c1 c2 =>
@@ -754,19 +746,19 @@ Module CHERIoTValidation.
     Definition x4 : Fin.t 16. apply (@Fin.of_nat_lt 4 16). repeat constructor. Defined.
 
     Notation reg_t := (Fin.t ISA_NREGS).
-
-    Definition ADDI (dst src1: reg_t) (imm: Z) : @cmd N Z CHERIOT_params :=
-      WriteReg dst (ValueUnop (Z.add imm) (ReadReg src1)).
-
-    Definition GetRestrictOps (v: Z) : list (@RestrictOp N CHERIOT_params).
-    Admitted.
-    Definition SealMaskOk (ops: list (@RestrictOp N CHERIOT_params)) : bool.
-    Admitted.
     Notation Cap := (@Cap N CHERIOT_params).
     Notation CapOrValue := (@CapOrValue N Z).
     Definition CapToValue : Cap -> Z. Admitted.
+    Notation ToValue := (@ToValue N Z CHERIOT_params CapToValue).
 
-    Notation CastToValue := (@CastToValue N Z CHERIOT_params CapToValue).
+    Definition ADDI (dst src1: reg_t) (imm: Z) : @cmd N Z CHERIOT_params :=
+      WriteReg dst (LiftValue (ValueUnop (fun v => (Z.add imm) (ToValue v)) (ReadReg src1))).
+
+    Definition GetRestrictOps (v: CapOrValue) : list (@RestrictOp N CHERIOT_params).
+    Admitted.
+    Definition SealMaskOk (ops: list (@RestrictOp N CHERIOT_params)) : bool.
+    Admitted.
+
     Definition is_sealed (c: CapOrValue) : bool :=
       match c with
       | inl c => is_some c.(capSealed)
@@ -777,16 +769,17 @@ Module CHERIoTValidation.
        CAndPerm on a sealed cap clears tag unless the mask is all ones or has only the global permission clear.
        (Technically in the ISA, and perm also changes some bits even if the cap will be cleared)
      *)
+
     Definition CAndPerm (dst src1: reg_t) (rs2: reg_t) : cmd :=
       let clearTag (cap: CapOrValue) (mask: CapOrValue) :=
-        is_sealed cap && (negb (SealMaskOk (GetRestrictOps (CastToValue mask)))) in
-      ITE (DecideBinop clearTag (ReadCReg src1) (LiftValue (ReadReg rs2)))
-          (WriteReg dst (ClearTag (ReadCReg src1)))
-          (WriteCReg dst (RestrictCap (fun z => RestrictOps (GetRestrictOps z)) (ReadCReg src1) (ReadReg rs2))).
+        is_sealed cap && (negb (SealMaskOk (GetRestrictOps mask))) in
+      ITE (DecideBinop clearTag (ReadReg src1) (ReadReg rs2))
+          (WriteReg dst (LiftValue (ValueUnop ToValue (ReadReg src1))))
+          (WriteReg dst (RestrictCap (fun z => RestrictOps (GetRestrictOps z)) (ReadReg src1) (ReadReg rs2))).
 
     Definition CIncAddr (dst src1: reg_t) (rs2: reg_t) : cmd :=
-      ITE (DecideUnop is_sealed (ReadCReg src1))
-          (WriteReg dst (ClearTag (ReadCReg rs2)))
-          (WriteCReg dst (RestrictCap (fun z => RestrictOps [ChangeCursor (Zmod.add (bits.of_Z _ z))]) (ReadCReg src1) (ReadReg rs2))).
+      ITE (DecideUnop is_sealed (ReadReg src1))
+          (WriteReg dst (LiftValue (ValueUnop ToValue (ReadReg rs2))))
+          (WriteReg dst (RestrictCap (fun z => RestrictOps [ChangeCursor (Zmod.add (bits.of_Z _ (ToValue z)))]) (ReadReg src1) (ReadReg rs2))).
 
 End CHERIoTValidation.
