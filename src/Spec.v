@@ -232,10 +232,8 @@ Section Machine.
           unsealNewUnsealed: z.(capSealed) = None }.
     End CapStep.
 
-
     Section Transitivity.
       Variable origSet: list Cap.
-
 
       Inductive ReachableCap: Cap -> Prop :=
       | Refl (c: Cap) (inPf: In c origSet) : ReachableCap c
@@ -278,7 +276,7 @@ Section Machine.
     Notation PCC := Cap (only parsing).
     Notation MEPCC := Cap (only parsing). (* While MEPCC can become invalid architecturally,
                                              it shouldn't if the switcher is correct *)
-    Notation EXNInfo := Value (only parsing).
+    Variable EXNInfo: Type.
     Notation RegIdx := nat (only parsing).
 
     Definition RegisterFile := list CapOrValue.
@@ -358,615 +356,193 @@ Section Machine.
         machine_curThreadId : nat;
     }.
 
-    Section Machine.
-      (* The following definitions are defined per thread (obvious, but re-iterating) *)
-      Definition UserContext : Type := (UserThreadState * Memory_t).
-      Definition SystemContext : Type := (SystemThreadState * InterruptStatus).
+    (* The following definitions are defined per thread (obvious, but re-iterating) *)
+    Definition UserContext : Type := (UserThreadState * Memory_t).
+    Definition SystemContext : Type := (SystemThreadState * InterruptStatus).
 
-      Definition ValidNormalUserStepFromOldCaps (oldCaps: list Cap) (oldMem: Memory_t) (new: UserContext) :=
-        let '(newUTS, newMem) := new in
-        ValidMemUpdate oldMem oldCaps newMem /\
-          ReachableCaps oldMem oldCaps (capsOfUserTS newUTS) /\
-          In Perm.Exec newUTS.(thread_pcc).(capPerms).
+    Definition ReachableMemSame m1 m2 caps :=
+      forall a p cs cbs, ReachableAddr m1 caps a p cs cbs ->
+                         (ReachableAddr m2 caps a p cs cbs /\ m1 a = m2 a).
 
-      Definition ValidNormalUserStep (old new: UserContext) :=
-        let '(oldUTS, oldMem) := old in
-        ValidNormalUserStepFromOldCaps (capsOfUserTS oldUTS) oldMem new.
+    Definition UpdatedMemSame (m1 m2 m1' m2': Memory_t) :=
+      forall a, (m1' a <> m1 a \/ m2' a <> m2 a) -> m1' a = m2' a.
 
-      Definition ValidNormalSystemStep (oldUser newUser: UserContext) (oldSystem newSystem: SystemContext) :=
-        let '(oldUTS, oldMem) := oldUser in
-        let '(oldSTS, oldIS) := oldSystem in
-        let '(newSTS, newIS) := newSystem in
-        let oldCaps := capsOfUserTS oldUTS ++ capsOfSystemTS oldSTS in
-        ValidNormalUserStepFromOldCaps oldCaps oldMem newUser /\
-          ReachableCaps oldMem oldCaps (capsOfSystemTS newSTS).
+    Section NormalInst.
+      Variable normalInst: UserContext -> UserContext.
 
-      (* Probably just says PCC and MEPCC have Exec permission? *)
-      (* TODO This is completely wrong. Normal System Step is taken when we have System and Exec permission *)
-      Definition ValidNormalUserContext (uc: UserContext) := In Perm.Exec (fst uc).(thread_pcc).(capPerms).
-      Definition ValidNormalSystemContext (sc: SystemContext) := In Perm.Exec (fst sc).(thread_mepcc).(capPerms).
-      Definition ValidNormalContexts (uc: UserContext) (sc: SystemContext): Prop :=
-        ValidNormalUserContext uc /\ ValidNormalSystemContext sc.
+      Definition FuncNormal :=
+        forall rf pcc m1 m2,
+          ReachableMemSame m1 m2 (pcc :: capsOfRf rf) ->
+          let '(uts1, m1') := normalInst (Build_UserThreadState rf pcc, m1) in
+          let '(uts2, m2') := normalInst (Build_UserThreadState rf pcc, m2) in
+          uts1 = uts2 /\ UpdatedMemSame m1 m2 m1' m2'.
 
-      (* This may not be necessary, and instead we can split it into context depending on the (fancy) step *)
-      Definition ValidContexts: UserContext -> SystemContext -> Prop.
-      Admitted.
+      Definition WfNormalInst := forall rf pcc mem,
+          let '(Build_UserThreadState rf' pcc', mem') := normalInst (Build_UserThreadState rf pcc, mem) in
+          let caps := pcc :: capsOfRf rf in
+          let caps' := pcc' :: capsOfRf rf' in
+          In Perm.Exec pcc.(capPerms)
+          /\ ValidMemUpdate mem caps mem'
+          /\ ReachableCaps mem caps caps'
+          /\ In Perm.Exec pcc'.(capPerms)
+          /\ FuncNormal.
+    End NormalInst.
 
-      Inductive FancyStep :=
-      | Step_Normal
-      | Step_Jalr (sentry: Cap) (opt_linkReg: option RegIdx)
-      | Step_CompartmentCall
-      | Step_CompartmentRet
-      | Step_Exception (exnInfo: Value).
+    Section SystemInst.
+      Variable systemInst: UserContext -> SystemContext -> (UserContext * SystemContext).
 
-      Definition step_t : Type := (UserContext -> SystemContext ->
-                                   FancyStep * UserContext * SystemContext).
+      Definition FuncSystem := forall rf pcc mepcc exnInfo ts ints m1 m2,
+          ReachableMemSame m1 m2 ((pcc :: capsOfRf rf) ++ (mepcc :: capsOfTS ts)) ->
+          let '((uts1, m1'), sc1) := systemInst (Build_UserThreadState rf pcc, m1)
+                                       (Build_SystemThreadState mepcc exnInfo ts, ints) in
+          let '((uts2, m2'), sc2) := systemInst (Build_UserThreadState rf pcc, m2)
+                                       (Build_SystemThreadState mepcc exnInfo ts, ints) in
+          uts1 = uts2 /\ sc1 = sc2 /\ UpdatedMemSame m1 m2 m1' m2'.
 
-      (* A user step should only update state by:
-         - updating register file to other cap/value reachable from memory
-         - updating memory according to permissions of reachable caps, and as a function of values reachable from caps
-         - be defined by value in memory at PCC?
-         - call sentries that are reachable
-         - only user-mode exception codes (technically)
-       *)
-      Definition WF_normal_user_step : UserContext -> (UserContext -> Prop) -> Prop .
-      Admitted.
+      Definition WfSystemInst := forall rf pcc mem mepcc exnInfo ts ints,
+          let '((Build_UserThreadState rf' pcc', mem'),
+                  (Build_SystemThreadState mepcc' exnInfo' ts', ints')) :=
+            systemInst (Build_UserThreadState rf pcc, mem) (Build_SystemThreadState mepcc exnInfo ts, ints) in
+          let caps := (pcc :: capsOfRf rf) ++ (mepcc :: capsOfTS ts) in
+          let caps' := (pcc' :: capsOfRf rf') ++ (mepcc' :: capsOfTS ts') in
+          In Perm.Exec pcc.(capPerms)
+          /\ In Perm.System pcc.(capPerms)
+          /\ ValidMemUpdate mem caps mem'
+          /\ ReachableCaps mem caps caps'
+          /\ In Perm.Exec pcc'.(capPerms)
+          /\ FuncSystem.
+    End SystemInst.
 
-      Definition WF_normal_system_step : UserContext -> SystemContext -> (UserContext -> SystemContext -> Prop)
-                                         -> Prop.
-      Admitted.
+    Section CallSentryInst.
+      Variable callSentryInst: UserContext -> InterruptStatus -> (PCC * option Cap * InterruptStatus).
 
-      Definition UserContextHasSystemPerm (ctx: UserContext) : Prop :=
-        In Perm.System ((fst ctx).(thread_pcc)).(capPerms).
+      Definition FuncCallSentry :=
+        forall rf pcc ints m1 m2,
+          ReachableMemSame m1 m2 (pcc :: capsOfRf rf) ->
+          let '(pcc1', l1, ints1') := callSentryInst (Build_UserThreadState rf pcc, m1) ints in
+          let '(pcc2', l2, ints2') := callSentryInst (Build_UserThreadState rf pcc, m2) ints in
+          pcc1' = pcc2' /\ l1 = l2 /\ ints1' = ints2'.
 
-      Inductive WF_step' : UserContext -> SystemContext -> (FancyStep -> UserContext -> SystemContext -> Prop)
-                           -> Prop :=
-      | WFStep_User :
-          forall userCtx sysCtx post,
-          (forall userCtx', ValidNormalUserStep userCtx userCtx' ->
-                       post Step_Normal userCtx' sysCtx) ->
-          WF_step' userCtx sysCtx post
-      | WFStep_System :
-          forall userCtx sysCtx mid post,
-          UserContextHasSystemPerm userCtx ->
-          WF_normal_system_step userCtx sysCtx mid ->
-          (forall userCtx' sysCtx', mid userCtx' sysCtx' ->
-                               post Step_Normal userCtx' sysCtx') ->
-          WF_step' userCtx sysCtx post
-      | WFStep_Jalr :
-          forall userCtx sysCtx post,
-          False -> (* TODO *)
-          WF_step' userCtx sysCtx post
-      | WFStep_CompartmentCall :
-          forall userCtx sysCtx mid post,
-          WF_normal_user_step userCtx mid ->
-          (forall userCtx', mid userCtx' ->
-                       post (Step_CompartmentCall) userCtx' sysCtx) ->
-          WF_step' userCtx sysCtx post
-      | WFStep_CompartmentRet :
-          forall userCtx sysCtx mid post,
-          (forall userCtx', mid userCtx' ->
-                       post (Step_CompartmentRet) userCtx' sysCtx) ->
-          WF_step' userCtx sysCtx post
-      | WFStep_ThrowException :
-          forall userCtx sysCtx post mid exnInfo,
-          WF_normal_user_step userCtx mid ->
-          (forall userCtx', mid userCtx' ->
-                       post (Step_Exception exnInfo) userCtx' sysCtx) ->
-          WF_step' userCtx sysCtx post.
+      Definition WfCallSentryInst := forall rf pcc ints mem,
+          let '(pcc', optLink, ints') := callSentryInst (Build_UserThreadState rf pcc, mem) ints in
+          let caps := pcc :: capsOfRf rf in
+          In Perm.Exec pcc.(capPerms)
+          /\ ReachableCap mem caps pcc'
+          /\ match optLink with
+             | Some link => ReachableCap mem caps link
+                            /\ link.(capSealed) = Some (inl (if ints
+                                                             then RetEnableInterrupt
+                                                             else RetDisableInterrupt))
+                            /\ In Perm.Exec link.(capPerms)
+             | None => True
+             end
+          /\ match pcc'.(capSealed) with
+             | Some (inl CallEnableInterrupt) => ints' = InterruptsEnabled
+             | Some (inl CallDisableInterrupt) => ints' = InterruptsDisabled
+             | Some (inl CallInteritInterrupt) => ints' = ints
+             | _ => False
+             end
+          /\ In Perm.Exec pcc'.(capPerms)
+          /\ FuncCallSentry.
+    End CallSentryInst.
 
-      Definition WF_step (fn: step_t): Prop :=
-        forall userCtx sysCtx post,
-          let '(stepRes, userCtx', sysCtx') := fn userCtx sysCtx in
-          ValidContexts userCtx sysCtx ->
-          post stepRes userCtx' sysCtx' ->
-          WF_step' userCtx sysCtx post.
+    Section RetSentryInst.
+      Variable retSentryInst: UserContext -> (PCC * InterruptStatus).
 
-      Class StepFn := {
-          stepFn : step_t;
-          stepFn_ok: WF_step stepFn;
-          SWITCHER_exceptionEntryPCC : Cap;
-          SWITCHER_compartmentCallPCC: Cap;
-          SWITCHER_compartmentRetPCC: Cap
-      }.
+      Definition FuncRetSentry :=
+        forall rf pcc m1 m2,
+          ReachableMemSame m1 m2 (pcc :: capsOfRf rf) ->
+          let (pcc1', ints1') := retSentryInst (Build_UserThreadState rf pcc, m1) in
+          let (pcc2', ints2') := retSentryInst (Build_UserThreadState rf pcc, m2) in
+          pcc1' = pcc2'.
 
-      Context (MachineStep: StepFn).
+      Definition WfRetSentryInst := forall rf pcc mem,
+          let (pcc', ints') := retSentryInst (Build_UserThreadState rf pcc, mem) in
+          let caps := pcc :: capsOfRf rf in
+          In Perm.Exec pcc.(capPerms)
+          /\ ReachableCap mem caps pcc'
+          /\ match pcc'.(capSealed) with
+             | Some (inl RetEnableInterrupt) => ints' = InterruptsEnabled
+             | Some (inl RetDisableInterrupt) => ints' = InterruptsDisabled
+             | _ => False
+             end
+          /\ In Perm.Exec pcc'.(capPerms)
+          /\ FuncRetSentry.
+    End RetSentryInst.
 
-      Definition setMachineThread (m: Machine) (tid: nat): Machine :=
-        {| machine_memory := m.(machine_memory);
-           machine_interruptStatus := m.(machine_interruptStatus);
-           machine_threads := m.(machine_threads);
-           machine_curThreadId := tid
-        |}.
+    Section ExnInst.
+      Variable exnInst: UserContext -> EXNInfo.
 
-      Definition SameThreadStep (m: Machine)
-                                (update_fn: Thread -> Memory_t -> InterruptStatus ->
-                                            (Thread -> Memory_t -> InterruptStatus -> Prop) -> Prop)
-                                (post: Machine -> Prop) : Prop :=
-        let tid := m.(machine_curThreadId) in
-        let threads := m.(machine_threads) in
-        exists thread, nth_error threads tid = Some thread /\
-                  update_fn thread m.(machine_memory) m.(machine_interruptStatus) (fun thread' memory' interrupt' =>
-                     post {| machine_memory:= memory';
-                             machine_threads := listUpdate threads tid thread';
-                             machine_curThreadId := tid;
-                             machine_interruptStatus := interrupt'
-                          |}).
+      Definition FuncExn :=
+        forall rf pcc m1 m2,
+          ReachableMemSame m1 m2 (pcc :: capsOfRf rf) ->
+          let exn1 := exnInst (Build_UserThreadState rf pcc, m1) in
+          let exn2 := exnInst (Build_UserThreadState rf pcc, m2) in
+          exn1 = exn2.
 
+      Definition WfExnInst := forall rf pcc mem,
+          let exn := exnInst (Build_UserThreadState rf pcc, mem) in
+          let caps := pcc :: capsOfRf rf in
+          In Perm.Exec pcc.(capPerms)
+          /\ FuncExn.
+    End ExnInst.
 
-      Definition setPCCInUserContext (pcc: PCC) (ctx: UserContext) : UserContext :=
-        let '(st, mem) := ctx in
-        ({| thread_rf := st.(thread_rf);
-            thread_pcc := pcc;
-          |}, mem).
+    Inductive Inst :=
+    | Inst_Normal normalInst (wf: WfNormalInst normalInst)
+    | Inst_System systemInst (wf: WfSystemInst systemInst)
+    | Inst_Call callSentryInst (wf: WfCallSentryInst callSentryInst)
+    | Inst_Ret retSentryInst (wf: WfRetSentryInst retSentryInst)
+    | Inst_CompartmentCall
+    | Inst_CompartmentRet
+    | Inst_Exn exnInst (wf: WfExnInst exnInst).
 
-      Definition updateRFInUserContext (idx: nat) (newValue: PCC) (ctx: UserContext) : UserContext :=
-        let '(st, mem) := ctx in
-        ({| thread_rf := listUpdate st.(thread_rf) idx (inl newValue);
-            thread_pcc := st.(thread_pcc);
-          |}, mem).
+    Section FetchDecodeExecute.
+      Variable fetchAddrs: Memory_t -> Addr -> list Addr.
+      Variable decode: Memory_t -> list Addr -> Inst.
+      Variable pccNotInBounds: EXNInfo.
 
-      (* WIP *)
-      Definition do_fancy_step (step: FancyStep) (userCtx: UserContext) (sysCtx: SystemContext)
-                               : option (UserContext * SystemContext) :=
-        let '(userSt, mem) := userCtx in
-        let '(sysSt, istatus) := sysCtx in
-        match step with
-        | Step_Normal => Some (userCtx, sysCtx)
-        | Step_Jalr sentry opt_regidx => None (* TODO *)
-        | Step_CompartmentCall =>
-            (* We must have entered via a (IRQ-disabling ?!) forward sentry.
-               cjalr ra --> set ra, PCC, and istatus *)
-            Some ((updateRFInUserContext rfIdx_ra userSt.(thread_pcc)
-                    (setPCCInUserContext SWITCHER_compartmentCallPCC userCtx)),
-                  (sysSt, InterruptsDisabled (* !! *) ))
-        | Step_CompartmentRet =>
-            Some (setPCCInUserContext SWITCHER_compartmentRetPCC userCtx, sysCtx)
-        | Step_Exception exnInfo =>
-            Some (setPCCInUserContext SWITCHER_exceptionEntryPCC userCtx,
-                  ({|thread_mepcc := userSt.(thread_pcc);
-                     thread_exceptionInfo := exnInfo;
-                     thread_trustedStack := sysSt.(thread_trustedStack);
-                   |}, InterruptsDisabled)
-                 )
+      Variable compartmentCallPCC: Cap. (* This has Exec and System permission; must pass the proof *)
+      Variable compartmentRetPCC: Cap.  (* This has Exec and System permission; must pass the proof *)
+      Variable exceptionEntryPCC: Cap.  (* This has Exec and System permission; must pass the proof *)
+
+      Variable uc: UserContext.
+      Definition mem : Memory_t := snd uc.
+      Definition pcc := (fst uc).(thread_pcc).
+      Definition rf := (fst uc).(thread_rf).
+      Variable sc: SystemContext.
+      Definition ints := snd sc.
+
+      Definition exceptionState (exnInfo: EXNInfo): UserContext * SystemContext :=
+        ((Build_UserThreadState rf exceptionEntryPCC, mem),
+          (Build_SystemThreadState pcc exnInfo (fst sc).(thread_trustedStack), ints)).
+
+      Definition threadStepFunction: UserContext * SystemContext :=
+        match decode mem (fetchAddrs mem pcc.(capCursor)) with
+        | Inst_Normal normalInst wf => let uc' := normalInst uc in (uc', sc)
+        | Inst_System systemInst wf => systemInst uc sc
+        | Inst_Call callSentryInst wf =>
+            let '(pcc', optLink, ints') := callSentryInst uc ints in (* TODO: fix optLink *)
+            ((Build_UserThreadState rf pcc', mem), (fst sc, ints'))
+        | Inst_Ret retSentryInst wf =>
+            let '(pcc', ints') := retSentryInst uc in
+            ((Build_UserThreadState rf pcc', mem), (fst sc, ints'))
+        | Inst_CompartmentCall =>
+            ((Build_UserThreadState rf compartmentCallPCC, mem), sc)
+        | Inst_CompartmentRet =>
+            ((Build_UserThreadState rf compartmentRetPCC, mem), sc)
+        | Inst_Exn exnInst wf =>
+            ((Build_UserThreadState rf exceptionEntryPCC, mem),
+              (Build_SystemThreadState pcc (exnInst uc) (fst sc).(thread_trustedStack), ints))
         end.
 
-      Definition merge_contexts (userCtx: UserContext) (sysCtx: SystemContext)
-                                : Thread * Memory_t * InterruptStatus :=
-        let '(userState, mem) := userCtx in
-        let '(sysState, istatus) := sysCtx in
-        ({| thread_userState := userState;
-            thread_systemState := sysState
-         |}, mem, istatus).
-
-      Definition split_contexts (thread: Thread) (mem: Memory_t) (istatus: InterruptStatus)
-                                : UserContext * SystemContext :=
-          let userCtx := (thread.(thread_userState), mem) in
-          let sysCtx := (thread.(thread_systemState), istatus) in
-          (userCtx, sysCtx).
-
-      (*
-      Definition step_update_fn : Thread -> Memory_t -> InterruptStatus ->
-                                  (Thread -> Memory_t -> InterruptStatus -> Prop) -> Prop :=
-        fun thread mem istatus post =>
-          let '(userCtx, sysCtx) := split_contexts thread mem istatus in
-          let '(res, userCtx', sysCtx') := stepFn userCtx sysCtx in
-          let '(userCtx', sysCtx') := do_fancy_step res userCtx' sysCtx' in
-          let '(thread', mem', istatus') := merge_contexts userCtx' sysCtx' in
-          post thread' mem' istatus'.
-
-      Inductive Step : Machine -> (Machine -> Prop) -> Prop :=
-      | Step_SwitchThreads:
-        forall m tid' post,
-          m.(machine_interruptStatus) = InterruptsEnabled ->
-          tid' < List.length m.(machine_threads) ->
-          post (setMachineThread m tid') ->
-          Step m post
-      | Step_SameThread :
-        forall m post,
-          SameThreadStep m step_update_fn post ->
-          Step m post.
-      *)
-
-    End Machine.
-
-
-  (* Section MachineOld. *)
-    (* Inductive ImportTableEntry := *)
-    (* | ImportEntry_SealedCapToExportEntry (cap: Cap) *)
-    (* | ImportEntry_SentryToLibraryFunction (cap: Cap) (* Code + read-only globals *) *)
-    (* | ImportEntry_MMIOCap (cap: Cap). *)
-
-    (* Record ExportTableEntry := { *)
-    (*     exportEntryPCC: Value; (* In CHERIoT, offset from compartment PCC *) *)
-    (*     exportEntryStackSize: Value; *)
-    (*     exportEntryNumArgs : nat; *)
-    (*     exportEntryInterruptStatus: InterruptStatus; *)
-    (* }. *)
-
-    (* Record Compartment := { *)
-    (*     compartmentPCC : Cap; *)
-    (*     compartmentCGP : Cap; *)
-    (*     compartmentErrorHandlers : list (Value * ExnHandlerType); (* offset from PCC *) *)
-    (*     compartmentImportTable : list ImportTableEntry; *)
-    (*     compartmentExportTable : list (ExportTableEntry) (* Address where export table entry is stored *) *)
-    (* }. *)
-
-    (* Record MachineGhostState := { *)
-    (*     compartments: Compartment *)
-    (* }. *)
-
-  (*   Variable ExnHandlerType : Type. (* In CHERIoT: rich or stackless *) *)
-
-
-
-  (*   Record ExportTableEntry := { *)
-  (*       exportEntryPCC: Value; (* In CHERIoT, offset from compartment PCC *) *)
-  (*       exportEntryStackSize: Value; *)
-  (*       exportEntryNumArgs : nat; *)
-  (*       exportEntryInterruptStatus: InterruptStatus; *)
-  (*   }. *)
-
-  (*   Record Compartment := { *)
-  (*       compartmentPCC : Cap; *)
-  (*       compartmentCGP : Cap; *)
-  (*       compartmentErrorHandlers : list (Value * ExnHandlerType); (* offset from PCC *) *)
-  (*       compartmentImportTable : list ImportTableEntry; *)
-  (*       compartmentExportTable : list (Addr * ExportTableEntry) (* Address where export table entry is stored *) *)
-  (*       (* compartmentGhostCallArgs : list CallArgs; (* TODO *) *) *)
-  (*       (* compartmentGhostReturnArgs : list ReturnArgs *) *)
-  (*   }. *)
-
-  (*   (* Each thread has a TrustedStack. The TrustedStack contains: *)
-  (*      - A register save area (used for preemption, but also staging space as part of exception handling) *)
-  (*      - A TrustedStackFrame for each active cross-compartment call -- there is always one frame *)
-  (*        - CSP: Caller's stack pointer at time of cross-compartment entry, pointing at switcher's register spills *)
-  (*        - Pointer to callee export table, so we can find the error handler *)
-  (*        - errorHandlerCount *)
-  (*      - (state for unwinding info?) *)
-  (*    *) *)
-  (*   Record TrustedStackFrame := { *)
-  (*       trustedStackFrame_compartmentIdx : nat; (* Actually a pointer to the compartment's export table *) *)
-  (*       trustedStackFrame_CSP : Cap *)
-  (*   }. *)
-
-  (*   (* Register spill area is currently implicit, in our model. *) *)
-  (*   Definition TrustedStack := list TrustedStackFrame. *)
-
-  (*   (* During a cross compartment return: *)
-  (*      - If at least one trusted stack frame: *)
-  (*          - Pop a trusted stack frame *)
-  (*          - Restore the CSP from trusted stack frame *)
-  (*          - Restore ra, gp, callee-saved registers from untrusted stack pointed to by above CSP *)
-  (*              - This could potentially have been overwritten if callee had access to caller's stack through an argument *)
-  (*          - Zero registers not intended for caller (!{ra,sp,gp,s0,s1,a0,a1}) *)
-  (*          - Zero callee's stack *)
-  (*      - Else: *)
-  (*          exit thread *)
-  (*    *) *)
-
-  (*   (* Each thread contains: *)
-  (*      - Register file *)
-  (*      - PCC *)
-  (*      - Trusted stack *)
-  (*    *) *)
-  (*   Definition Thread: Type. *)
-  (*   Admitted. *)
-
-  (*   Record Machine := { *)
-  (*       machineCompartments : list Compartment; *)
-  (*       machineThreads: list Thread; *)
-  (*       machineThreadId : nat; *)
-  (*       machineMemory : Memory_t; *)
-  (*       machineInterruptible : InterruptStatus *)
-  (*   }. *)
-
-  (*   Section MachineHelpers. *)
-  (*     Definition setMachineThread (m: Machine) (tid: nat): Machine := *)
-  (*       {| machineCompartments := m.(machineCompartments); *)
-  (*          machineThreads := m.(machineThreads); *)
-  (*          machineThreadId := tid; *)
-  (*          machineMemory := m.(machineMemory); *)
-  (*          machineInterruptible := m.(machineInterruptible) *)
-  (*       |}. *)
-
-  (*     Definition SameThreadStep (m: Machine) *)
-  (*                               (update_fn: Thread -> Memory_t -> list Compartment -> InterruptStatus -> (Thread -> Memory_t -> InterruptStatus  -> Prop) -> Prop) *)
-  (*                               (post: Machine -> Prop) : Prop := *)
-  (*       let tid := m.(machineThreadId) in *)
-  (*       let threads := m.(machineThreads) in *)
-  (*       let compartments := m.(machineCompartments) in *)
-  (*       exists thread, nth_error threads tid = Some thread /\ *)
-  (*                 update_fn thread m.(machineMemory) compartments m.(machineInterruptible) (fun thread' memory' interrupt' => *)
-  (*                    post {| machineCompartments := compartments; (* TODO: update ghost state *) *)
-  (*                            machineThreads := listUpdate threads tid thread'; *)
-  (*                            machineThreadId := tid; *)
-  (*                            machineMemory := memory'; *)
-  (*                            machineInterruptible := interrupt' *)
-  (*                         |}). *)
-
-  (*   End MachineHelpers. *)
-
-  (*   (* Steps that stay within the same compartment: *)
-  (*      - Update PCC + Load/store data; load/store cap; restrict cap; seal/unseal cap *)
-  (*      - Execute instruction within switcher *)
-  (*    *) *)
-  (*   Definition KeepDomainStep *)
-  (*     (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus) *)
-  (*     (post: Thread -> Memory_t -> InterruptStatus -> Prop) : Prop. *)
-  (*   Admitted. *)
-
-  (*   (* A thread can invoke capabilities for: *)
-  (*      - Return from error handler: *)
-  (*          - Ask switcher to install modified registerfile (rederiving PCC from compartment code capability) *)
-  (*          - Ask switcher to continue unwinding *)
-  (*      - Call/return from exported function via switcher *)
-  (*      - Call/return from library function *)
-  (*    *) *)
-  (*   Definition StepInvokeCapability *)
-  (*     (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus) *)
-  (*     (post: Thread -> Memory_t -> InterruptStatus -> Prop) : Prop. *)
-  (*   Admitted. *)
-
-  (*   (* When a (user) thread throws an exception: *)
-  (*        If the compartment's "rich" error handler exists and there is sufficient stack space: *)
-  (*            Call the compartment's "rich" error handler *)
-  (*            - Enable interrupts *)
-  (*            - ra: backwards sentry to exception return path of switcher *)
-  (*            - sp: stack pointer at time of invocation *)
-  (*            - gp: compartment cgp (fresh?) *)
-  (*            - Arguments: exception cause/info; pass sp equal to sp with a register spill frame here and above (but with pcc untagged) *)
-  (*            - Enable interrupts *)
-  (*        Else if the compartment's stackless error handler exists: *)
-  (*            Call the compartment's stackless error handler: *)
-  (*            - Enable interrupts *)
-  (*            - ra: backwards sentry to exception return path of switcher *)
-  (*            - sp: stack pointer at time of invocation *)
-  (*            - gp: compartment cgp (fresh?) *)
-  (*            - Arguments: exception cause/info *)
-  (*        Else: unwind the stack: *)
-  (*    *) *)
-  (*   Definition StepRaiseException *)
-  (*     (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus) *)
-  (*     (post: Thread -> Memory_t -> InterruptStatus -> Prop) : Prop. *)
-  (*   Admitted. *)
-
-  (*   Inductive SwitchDomainStep : Machine -> (Machine -> Prop) -> Prop := *)
-  (*   | Step_SwitchThreads : *)
-  (*     forall m post tid', *)
-  (*     m.(machineInterruptible) = InterruptsEnabled -> *)
-  (*     tid' < List.length m.(machineThreads) -> *)
-  (*     post (setMachineThread m tid') -> *)
-  (*     SwitchDomainStep m post *)
-  (*   | Step_RaiseException: *)
-  (*     forall m post, *)
-  (*     SameThreadStep m StepRaiseException post -> *)
-  (*     SwitchDomainStep m post *)
-  (*   | Step_InvokeCapability: *)
-  (*     forall m post, *)
-  (*      SameThreadStep m StepInvokeCapability post -> *)
-  (*      SwitchDomainStep m post. *)
-
-  (*   (* TODO: we will need ghost state/trace to describe information flow in/out of compartments/threads *) *)
-  (*   Inductive Step : Machine -> (Machine -> Prop) -> Prop := *)
-  (*   | Step_KeepDomain : *)
-  (*     forall m post, *)
-  (*     SameThreadStep m KeepDomainStep post -> *)
-  (*     Step m post *)
-  (*   | Step_SwitchDomain: *)
-  (*     forall m post, *)
-  (*     SwitchDomainStep m post -> *)
-  (*     Step m post. *)
-
-  (* Definition CallArgs : Type. Admitted. *)
-  (* Definition ReturnArgs : Type. Admitted. *)
-
-
-  (* (* Record SemanticRegisterFile := { *) *)
-  (* (*     rfRa : CapWithValue; *) *)
-  (* (*     rfCGP : CapWithValue; *) *)
-  (* (*     rfCSP: CapWithValue; *) *)
-  (* (*     rfArgRegs : list CapOrValue; *) *)
-  (* (*     rfMiscCallerSavedRegs : list CapOrValue; *) *)
-  (* (*     rfMiscCalleeSavedRegs : list CapOrValue; *) *)
-
-  (*   Definition capsFromRf (rf: RegisterFile) : list Cap := *)
-  (*     concat (map (fun '(opt_cap, _) => match opt_cap with *)
-  (*                                    | Some cap => [cap] *)
-  (*                                    | None => [] *)
-  (*                                    end) rf). *)
-
-  (*   Definition StackFrame := list CapOrValue. *)
-
-  (*   Record TrustedStackEntry := *)
-  (*     { TrustedEntryPCC : Cap; *)
-  (*       TrustedEntryCSP : Cap; *)
-  (*       TrustedEntryRf : RegisterFile; *)
-  (*       TrustedEntryIStatus : InterruptStatus *)
-  (*     }. *)
-
-  (*   (* TODO: Trusted stack frame should contain (among other things), CSP that compartment had on entry. *) *)
-  (*   Record Thread := { *)
-  (*       threadPCC: Cap; (* Offset relative to compartment PCC *) *)
-  (*       threadCSP: Cap; (* Semantic CSP? *) *)
-  (*       threadRF: RegisterFile; *)
-  (*       threadCompartmentIdx: nat; (* Ghost state *) *)
-  (*       threadStack : list StackFrame; (* A thread can reach any caps in its topmost stackframe? *) *)
-  (*       threadTrustedStack : list TrustedStackEntry *)
-  (*   }. *)
-
-
-
-
-
-  (*   Variable ExnInfo : Type. (* CHERIoT: mtval and mcause *) *)
-  (*   Variable validErrorHandlerOffset: CapOrValue -> Value -> CapOrValue -> Prop. *)
-  (*   Variable validExnHandlerRf *)
-  (*     : ExnInfo (* CapWithValue (* Return sentry to switcher *) *) *)
-  (*               -> Cap (* CGP *) *)
-  (*               (* -> Cap (* CSP *) *) *)
-  (*               -> list CapOrValue (* Caps reachable by CSP? *) *)
-  (*               -> RegisterFile *)
-  (*               -> Prop. *)
-  (*   Variable getHandlerReturnValue : RegisterFile -> CapOrValue. *)
-
-
-  (*   (* Inductive ThreadEvent := *) *)
-  (*   (* | ThreadEvent_KeepDomain (* This could contain information about caps read/stored from memory *) *) *)
-  (*   (* | ThreadEvent_InvokeCap (codeCap: CapOrValue) (dataCap: CapOrValue). *) *)
-  (*   (* Inductive TraceEvent := *) *)
-  (*   (* | Event_SwitchThreads (newidx: nat) *) *)
-  (*   (* | Event_ThreadEvent (tid: nat) (ev: ThreadEvent). *) *)
-
-
-  (*   Inductive ThreadEvent := *)
-  (*   | ThreadEvent_XCompartmentCallWithoutSwitcher (rf: RegisterFile) *)
-  (*   | ThreadEvent_XCompartmentReturnWithoutSwitcher (rf: RegisterFile) *)
-  (*   | ThreadEvent_XCompartmentCall (rf: RegisterFile) *)
-  (*   | ThreadEvent_XCompartmentReturn (rf: RegisterFile) *)
-  (*   | ThreadEvent_Exception (pc: Cap) (rf: RegisterFile) (exn: ExnInfo) *)
-  (*   | ThreadEvent_ExceptionReturn (pc: Cap) (rf: RegisterFile). *)
-
-
-
-
-
-
-  (*   Inductive TraceEvent := *)
-  (*   | Event_SwitchThreads (newIdx: nat) *)
-  (*   | Event_ThreadEvent (tid: nat) (ev: ThreadEvent). *)
-
-  (*   Definition SameThreadStep (m: Machine) *)
-  (*                             (update_fn: Thread -> Memory_t -> list Compartment -> InterruptStatus -> (Thread -> Memory_t -> InterruptStatus -> list ThreadEvent -> Prop) -> Prop) *)
-  (*                             (post: Machine -> list TraceEvent -> Prop) : Prop := *)
-  (*     let tid := m.(machineThreadId) in *)
-  (*     let threads := m.(machineThreads) in *)
-  (*     let compartments := m.(machineCompartments) in *)
-  (*     exists thread, nth_error threads tid = Some thread /\ *)
-  (*               update_fn thread m.(machineMemory) compartments m.(machineInterruptible) (fun thread' memory' interrupt' event' => *)
-  (*                  post {| machineCompartments := m.(machineCompartments); (* TODO: update ghost state *) *)
-  (*                          machineThreads := listUpdate threads tid thread'; *)
-  (*                          machineThreadId := tid; *)
-  (*                          machineMemory := memory'; *)
-  (*                          machineInterruptible := interrupt' *)
-  (*                       |} (map (Event_ThreadEvent tid) event')). *)
-
-  (*   (* Load/store data; load/store cap; restrict cap; seal cap *) *)
-  (*   Definition KeepDomainStep : Machine -> (Machine -> list TraceEvent -> Prop) -> Prop. *)
-  (*   Admitted. *)
-
-  (*   Definition validErrorHandlerPCC (pcc: Cap) (compartment: Compartment) : Prop := *)
-  (*     exists offset handlerType, *)
-  (*       In (offset, handlerType) compartment.(compartmentErrorHandlers) /\ *)
-  (*       validErrorHandlerOffset compartment.(compartmentPCC) offset pcc. *)
-  (*   (* Capabilities should not increase *) *)
-  (*   Definition validErrorHandlerOffset_ok : (CapOrValue -> Value -> CapOrValue -> Prop) -> Prop. *)
-  (*   Admitted. *)
-
-
-  (*   (* Assumes the top stack frame is non-empty *) *)
-  (*   Definition PutCapOrValuesOntoStack (caps: list CapOrValue) (stack: list StackFrame) : option (list StackFrame) := *)
-  (*     match stack with *)
-  (*     | [] => None *)
-  (*     | x::xs =>  Some ((x ++ caps)::xs) *)
-  (*     end. *)
-
-  (*   (* Handler asks to return to pcc; ensure it's within bounds of the compartment *) *)
-  (*   Definition fixPCC (pcc: Cap) (basePCC : Cap) : option Cap. *)
-  (*   Admitted. *)
-
-  (*   Definition restoreRegisters (rf: RegisterFile) (rf': RegisterFile) : Prop. Admitted. *)
-
-  (*   Inductive StepException : Thread -> Memory_t -> list Compartment -> InterruptStatus -> (Thread -> Memory_t -> InterruptStatus -> list ThreadEvent -> Prop) -> Prop := *)
-  (*   | StepException_EnterHandler : *)
-  (*     forall thread mem compartments istatus compartment pcc' stack' rf' exn stackFrame post, *)
-  (*     nth_error compartments thread.(threadCompartmentIdx) = Some compartment -> *)
-  (*     validErrorHandlerPCC pcc' compartment -> *)
-  (*     List.hd_error thread.(threadStack) = Some stackFrame -> *)
-  (*     (* NB: not entirely correct. Technically this alters memory. *) *)
-  (*     PutCapOrValuesOntoStack ((None, snd thread.(threadPCC))::thread.(threadRF)) thread.(threadStack) = Some stack' -> *)
-  (*     validExnHandlerRf exn compartment.(compartmentCGP) stackFrame rf' -> *)
-  (*     post {| threadPCC := pcc'; *)
-  (*             threadRF := rf'; *)
-  (*             threadCompartmentIdx := thread.(threadCompartmentIdx); *)
-  (*             threadStack := stack'; (* TODO: This is incorrect --> maybe add new frame with everything from the previous frame? *) *)
-  (*             threadTrustedStack:= (Build_TrustedStackEntry thread.(threadPCC) thread.(threadRF) istatus)::thread.(threadTrustedStack) *)
-  (*          |} *)
-  (*          mem InterruptsEnabled [ThreadEvent_Exception thread.(threadPCC) thread.(threadRF) exn] -> *)
-  (*     (* Enable interrupts when entering exception handler *) *)
-  (*     (* Global memory should not change *) (* TODO: technically stack memory does change ... *) *)
-  (*     StepException thread mem compartments istatus post *)
-  (*   | StepException_HandlerReturn : *)
-  (*     forall thread mem compartments istatus post compartment trustedStackEntry pcc' rf', *)
-  (*       nth_error compartments thread.(threadCompartmentIdx) = Some compartment -> *)
-  (*       List.hd_error thread.(threadTrustedStack) = Some trustedStackEntry -> *)
-  (*       fixPCC (getHandlerReturnValue thread.(threadRF)) compartment.(compartmentPCC) = Some pcc' -> *)
-  (*       restoreRegisters trustedStackEntry.(TrustedEntryRf) rf' -> *)
-  (*       post {| threadPCC := pcc'; *)
-  (*               threadRF := rf'; *)
-  (*               threadCompartmentIdx := thread.(threadCompartmentIdx); *)
-  (*               threadStack := List.tl thread.(threadStack); (* ??? *) *)
-  (*               threadTrustedStack:= List.tl thread.(threadTrustedStack) (* ??? *) *)
-  (*            |} *)
-  (*          mem *)
-  (*          trustedStackEntry.(TrustedEntryIStatus) (* ??? *) *)
-  (*          [ThreadEvent_ExceptionReturn thread.(threadPCC) thread.(threadRF) ] -> *)
-  (*     StepException thread mem compartments istatus post. *)
-  (*   (* TODO: Unwind stack *) *)
-
-  (*   Definition StepXCompartmentCallViaSwitcher (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus) *)
-  (*                                              (post: Thread -> Memory_t -> InterruptStatus -> list ThreadEvent -> Prop) : Prop. *)
-  (*   Admitted. *)
-  (*   Definition StepXCompartmentReturnViaSwitcher (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus) *)
-  (*                                                (post: Thread -> Memory_t -> InterruptStatus -> list ThreadEvent -> Prop) : Prop. *)
-  (*   Admitted. *)
-  (*   Definition StepXCompartmentCallWithoutSwitcher (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus) *)
-  (*                                                  (post: Thread -> Memory_t -> InterruptStatus -> list ThreadEvent -> Prop) : Prop. *)
-  (*   Admitted. *)
-  (*   Definition StepXCompartmentReturnWithoutSwitcher (t: Thread) (m: Memory_t) (compartments: list Compartment) (istatus: InterruptStatus) *)
-  (*                                                    (post: Thread -> Memory_t -> InterruptStatus -> list ThreadEvent -> Prop) : Prop. *)
-  (*   Admitted. *)
-
-  (*   Definition CanSwitchThread (m: Machine) (newTid: nat) : Prop := *)
-  (*     m.(machineInterruptible) = InterruptsEnabled /\ *)
-  (*       newTid < List.length m.(machineThreads). *)
-
-  (*   Inductive SwitchDomainStep : Machine -> (Machine -> list TraceEvent -> Prop) -> Prop := *)
-  (*   | Step_RaiseException *)
-  (*   | Step_InvokeCapability *)
-  (*   . *)
-
-
-
-
-  (*   | Step_ThrowException : *)
-  (*     forall m post mid, *)
-  (*       SameThreadStep m StepException mid -> *)
-  (*      (forall m' tr, mid m' tr -> post m' tr) -> *)
-  (*      SwitchDomainStep m post *)
-  (*   | Step_XCompartmentCallViaSwitcher: *)
-  (*     forall m post mid, *)
-  (*       SameThreadStep m StepXCompartmentCallViaSwitcher mid -> *)
-  (*      (forall m' tr, mid m' tr -> post m' tr) -> *)
-  (*      SwitchDomainStep m post *)
-  (*   | Step_XCompartmentReturnViaSwitcher: *)
-  (*     forall m post mid, *)
-  (*       SameThreadStep m StepXCompartmentReturnViaSwitcher mid -> *)
-  (*      (forall m' tr, mid m' tr -> post m' tr) -> *)
-  (*      SwitchDomainStep m post *)
-  (*   | Step_XCompartmentCallWithoutSwitcher: *)
-  (*     forall m post mid, *)
-  (*       SameThreadStep m StepXCompartmentCallWithoutSwitcher mid -> *)
-  (*      (forall m' tr, mid m' tr-> post m' tr) -> *)
-  (*      SwitchDomainStep m post *)
-  (*   | Step_XCompartmentReturnWithoutSwitcher: *)
-  (*     forall m post mid, *)
-  (*       SameThreadStep m StepXCompartmentReturnWithoutSwitcher mid -> *)
-  (*      (forall m' tr, mid m' tr-> post m' tr) -> *)
-  (*      SwitchDomainStep m post. *)
-
-
-  (* End Machine. *)
+      Definition fetchAddrsInBounds := Subset (fetchAddrs mem pcc.(capCursor)) pcc.(capAddrs)
+                                       /\ In pcc.(capCursor) pcc.(capAddrs).
+
+      Inductive ThreadStep : (UserContext * SystemContext) -> Prop :=
+      | GoodThreadStep (inBounds: fetchAddrsInBounds): ThreadStep threadStepFunction
+      | BadFetch (notInBounds: ~ fetchAddrsInBounds): ThreadStep (exceptionState pccNotInBounds).
+    End FetchDecodeExecute.
+  End Machine.
 End Machine.
 
 Module CHERIoTValidation.
@@ -1141,160 +717,3 @@ Module CHERIoTValidation.
       capKeepCanBeStored := if d.(LG) then [Local;NonLocal] else [Local];
       capCursor := c.(addr) |}.
 End CHERIoTValidation.
-
-(* Require Import coqutil.Map.Interface. *)
-(* Require Import coqutil.Byte. *)
-(* Require Import coqutil.Word.Interface. *)
-(* Require coqutil.Word.Properties. *)
-(* From Stdlib Require Import Zmod Bits. *)
-(* From cheriot Require Import ZmodWord. *)
-
-(* Set Primitive Projections. *)
-(* Local Open Scope Z_scope. *)
-
-(* Definition XLEN := 32. *)
-(* Definition mword := bits XLEN. *)
-(* Notation addr_t := (bits XLEN). *)
-
-(* Module Permissions. *)
-(*   Record permissions := *)
-(*     { *)
-(*       EX : bool; (* PERMIT_EXECTE *) *)
-(*       GL : bool; (* GLOBAL *) *)
-(*       LD : bool; (* PERMIT_LOAD *) *)
-(*       SD : bool; (* PERMIT_STORE *) *)
-(*       SL : bool; (* PERMIT_STORE_LOCAL_CAPABILITY *) *)
-(*       SR : bool; (* PERMIT_ACCESS_SYSTEM_REGISTERS *) *)
-(*       SE : bool; (* PERMIT_SEAL *) *)
-(*       US : bool; (* PERMIT_UNSEAL *) *)
-(*       U0 : bool; (* USER_PERM0 *) *)
-(*       LM : bool; (* PERMIT_LOAD_MUTABLE *) *)
-(*       LG : bool; (* PERMIT_LOAD_GLOBAL *) *)
-(*       MC : bool; (* PERMIT_LOAD_STORE_CAPABILITY *) *)
-(*     }. *)
-(* End Permissions. *)
-
-(* Module Otype. *)
-(*   Class otype := { *)
-(*       t : Type; *)
-(*       eqb: t -> t -> bool; *)
-(*   }. *)
-(* End Otype. *)
-
-(* Module SealType. *)
-(*   Section WithOType. *)
-(*     Context {ot: Otype.otype}. *)
-
-(*     Inductive t := *)
-(*     | Cap_Unsealed *)
-(*     | Cap_Sentry (seal: Otype.t) *)
-(*     | Cap_Sealed (seal: Otype.t). *)
-
-(*   End WithOType. *)
-(* End SealType. *)
-
-(* Module Ecap. *)
-(*   (* Reserved bit? *) *)
-(*   Record ecap {otype: Otype.otype} := *)
-(*     { perms: Permissions.permissions; *)
-(*       seal_type: SealType.t; *)
-(*       base_addr: addr_t; *)
-(*       top_addr: addr_t *)
-(*     }. *)
-(* End Ecap. *)
-
-(* Module capability. *)
-(*   Section WithContext. *)
-(*     Context {otype: Otype.otype} . *)
-(*     Record capability := *)
-(*       { valid: bool; *)
-(*         ecap: Ecap.ecap; *)
-(*         value: addr_t; *)
-(*       }. *)
-(*   End WithContext. *)
-(* End capability. *)
-
-(* Section Semantics. *)
-(*   Context {gpr scr csr: Type}. *)
-(*   Context {otype: Otype.otype}. *)
-(*   Notation cap := (@capability.capability otype). *)
-(*   (* Context {cap_methods: @capability.cap_methods ecap}. *) *)
-(*   Context {regfile : map.map gpr cap}. *)
-(*   Context {scrfile : map.map scr cap}. *)
-(*   Context {csrfile: map.map csr mword}. (* Simplified for now; actually variable length *) *)
-(*   Context {mem: map.map mword cap}. *)
-
-(*   (* Context {memTags: map.map tag_t bool}. *) *)
-(*   (* Context {mem: map.map mword byte}. *) *)
-(*   (* Context {memTags: map.map tag_t bool}. *) *)
-
-(*   (* Record Compartment := { *) *)
-(*   (*     compartment_caps: list cap; *) *)
-(*   (* }. *) *)
-
-(*   (* Record Thread := { *) *)
-(*   (*     thread_caps: list cap; *) *)
-(*   (* }. *) *)
-
-(*   (* Record Thread := { *) *)
-(*   (*     stack: Interval.t; *) *)
-(*   (*     trusted_stack: Interval.t *) *)
-(*   (*   }. *) *)
-
-(*   Record Machine := *)
-(*     { pcc : cap; *)
-(*       regs: regfile; *)
-(*       scrs: scrfile; *)
-(*       csrs: csrfile; *)
-(*       dmem: mem; *)
-(*       (* tags: memTags; *) *)
-(*     }. *)
-
-(*   Inductive Status := *)
-(*   | ExecThread *)
-(*   | CrossCompartmentCall *)
-(*   | CrossCompartmentReturn *)
-(*   | SwitchThreads *)
-(*   | HandleException *)
-(*   | Spin. *)
-
-(*   Record CheriotMachine := *)
-(*   { m: Machine; *)
-(*     status: Status; *)
-(*     (* compartments: list Compartment; *) *)
-(*     (* curThread : (nat * nat) (* compartment_id * thread_id *) *) *)
-(*   }. *)
-
-(*   Definition InitialInvariant : CheriotMachine -> Prop. *)
-(*   Admitted. *)
-
-(*   Definition Step_ExecThread (m: CheriotMachine) (post: CheriotMachine -> Prop): Prop. *)
-(*   Admitted. *)
-
-(*   Definition Step_CompartmentCall (m: CheriotMachine) (post: CheriotMachine -> Prop): Prop. *)
-(*   Admitted. *)
-
-(*   Definition Step_CompartmentReturn (m: CheriotMachine) (post: CheriotMachine -> Prop): Prop. *)
-(*   Admitted. *)
-
-(*   Definition Step_SwitchThreads (m: CheriotMachine) (post: CheriotMachine -> Prop): Prop. *)
-(*   Admitted. *)
-
-(*   Definition Step_HandleException (m: CheriotMachine) (post: CheriotMachine -> Prop): Prop. *)
-(*   Admitted. *)
-
-(*   Definition Step_Spin (m: CheriotMachine) (post: CheriotMachine -> Prop): Prop. *)
-(*   Admitted. *)
-
-(*   (* TODO: interrupt *) *)
-(*   Definition Step (m: CheriotMachine) (post: CheriotMachine -> Prop) : Prop := *)
-(*     match m.(status) with *)
-(*     | ExecThread => Step_ExecThread m post *)
-(*     | CrossCompartmentCall => Step_CompartmentCall m post *)
-(*     | CrossCompartmentReturn => Step_CompartmentReturn m post *)
-(*     | SwitchThreads => Step_SwitchThreads m post *)
-(*     | HandleException => Step_HandleException m post *)
-(*     | Spin => Step_Spin m post *)
-(*     end. *)
-
-(* End Semantics. *)
