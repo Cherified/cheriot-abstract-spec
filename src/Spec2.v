@@ -2,6 +2,10 @@ From Stdlib Require Import Vector List NArith Lia Zmod Bits .
 Set Primitive Projections.
 Require Import coqutil.Byte.
 
+Notation "x <- f ; e" := (f (fun x => e)) (at level 20, right associativity).
+Notation "' x <- f ; e" := (f (fun x => e)) (at level 20, x pattern, right associativity).
+
+
 Section EqSet.
   Context [A: Type].
   Variable l1 l2: list A.
@@ -56,18 +60,28 @@ Module Perm.
   | Unsealing.
 End Perm.
 
-Section Machine.
-  Context {NBYTES: N}. (* TODO: > 0 ? *)
-  Context {Key Value: Type}.
-  Context {NREGS: nat}.
+Class ISA_params := {
+    ISA_NBYTES : N;
+    ISA_NREGS : nat;
+    ISA_instruction_size: list byte -> nat;
+}.
 
+Class ISA_params_ok (params: ISA_params) := {
+    ISA_instruction_size_ok: forall bs, params.(ISA_instruction_size) bs <= List.length bs
+}.
+
+
+Section Machine.
+  Context {Key Value: Type}.
+  Context {ISA : ISA_params}.
   Section TypeDefs.
     Local Open Scope Z_scope.
-    Definition XLEN : Z := (8 * (Z.of_N NBYTES)).
+    Definition XLEN : Z := (8 * (Z.of_N ISA_NBYTES)).
     Definition Addr := bits XLEN.
     Definition TAGLEN := (XLEN - 3).
     Definition Tag := bits TAGLEN.
   End TypeDefs.
+
 
   (* A cap X can be stored in a cap Y only if X can be stored in a Label that Y provides *)
   (* An example where restricting the label of what can be stored in a cap is useful:
@@ -112,10 +126,12 @@ Section Machine.
                          This creates a problem for return sentries, as they need not be in-bounds;
                          the error has to be handled by the caller compartment on return. *)
     }.
+  Notation Memory_data_t := (Addr -> byte).
+  Notation Memory_tags_t := (Tag -> byte).
 
   Record Memory :=
-  { Memory_data : Addr -> byte;
-    Memory_tags : Tag -> byte
+  { Memory_data : Memory_data_t;
+    Memory_tags : Memory_tags_t
   }.
 
   Inductive InterruptStatus :=
@@ -128,7 +144,7 @@ Section Machine.
   Notation CapOrValue := (Cap + Value)%type.
   Notation EXNInfo := Value (only parsing).
 
-  Definition RegisterFile := Vector.t CapOrValue NREGS.
+  Definition RegisterFile := Vector.t CapOrValue ISA_NREGS.
 
   Record TrustedStackFrame := {
       trustedStackFrame_CSP : Cap;
@@ -170,6 +186,12 @@ Section Machine.
   }.
 
   Section StateTransition.
+
+    Class Linker_params := {
+        switcher_exceptionEntryPCC : Cap
+    }.
+    Context {Linked: Linker_params}.
+
     Definition setMachineThread (m: Machine) (tid: nat): Machine :=
       {| machine_memory := m.(machine_memory);
          machine_interruptStatus := m.(machine_interruptStatus);
@@ -197,19 +219,69 @@ Section Machine.
     Definition UserContext : Type := (UserThreadState * Memory).
     Definition SystemContext : Type := (SystemThreadState * InterruptStatus).
 
-    Definition UserStep : UserContext -> (UserContext -> Prop) -> Prop.
+    Variable TODO_EXN_INFO: EXNInfo.
+
+    Inductive Result {T: Type} :=
+    | Ok (t: T)
+    | Exception (exn: EXNInfo).
+    Arguments Result : clear implicits.
+
+    Definition footprint (a: Addr) (n: nat) : list Addr :=
+      List.map (fun i => Zmod.add a (bits.of_Z _ (Z.of_nat i))) (List.seq 0 n).
+
+    Definition load_bytes (m: Memory_data_t) (a: Addr) (n: nat) : list byte :=
+      List.map m (footprint a n).
+
+    Definition ValidFetch (pcc: PCC) (addrs: list Addr) : Prop :=
+      In Perm.Exec pcc.(capPerms) /\
+      Subset addrs pcc.(capAddrs).
+
+    (* Ignores tags?
+     * Exception handling?
+     *)
+    Definition fetch (pcc: PCC) (mem: Memory_data_t) (post: Result (list byte) -> Prop) : Prop :=
+      let bytes := load_bytes mem pcc.(capCursor) (N.to_nat ISA_NBYTES) in
+      let isa_nbytes := ISA_instruction_size bytes in
+      let addrs := footprint pcc.(capCursor) isa_nbytes in
+      let bytes := load_bytes mem pcc.(capCursor) isa_nbytes in
+      (ValidFetch pcc addrs -> post (Ok bytes)) /\
+      (~ValidFetch pcc addrs -> post (Exception TODO_EXN_INFO)).
+
+    Definition user_step_fn (instr: list byte) (userCtx: UserContext) (post: Result UserContext -> Prop) : Prop.
     Admitted.
+
+    Definition UserStep (ctx : UserContext) (post: Result UserContext -> Prop) : Prop :=
+      let '(threadSt, mem) := ctx in
+      res <- fetch threadSt.(thread_pcc) mem.(Memory_data);
+      match res with
+      | Ok instr => user_step_fn instr ctx post
+      | Exception exn => post (Exception exn)
+      end.
 
     Inductive Step1 : Thread -> Memory -> InterruptStatus ->
                       (Thread -> Memory -> InterruptStatus -> Prop) -> Prop :=
-    | Step_User :
+    | Step_UserOk :
       forall t mem istatus mid post,
       ~ InSystemMode t ->
       UserStep (t.(thread_userState), mem) mid ->
-      (forall userSt' mem', mid (userSt', mem') ->
+      (forall userSt' mem', mid (Ok (userSt', mem')) ->
                        post {| thread_userState := userSt';
                                thread_systemState := t.(thread_systemState)
                             |} mem' istatus) ->
+      Step1 t mem istatus post
+    | Step_UserExn :
+      forall t mem istatus mid post,
+      ~ InSystemMode t ->
+      UserStep (t.(thread_userState), mem) mid ->
+      (forall exnInfo, mid (Exception exnInfo) ->
+                  post {| thread_userState := {| thread_pcc := switcher_exceptionEntryPCC;
+                                                 thread_rf := t.(thread_userState).(thread_rf)
+                                              |};
+                          thread_systemState := {| thread_mepcc := t.(thread_userState).(thread_pcc);
+                                                   thread_exceptionInfo := exnInfo;
+                                                   thread_trustedStack := t.(thread_systemState).(thread_trustedStack)
+                                                |}
+                        |} mem InterruptsDisabled) ->
       Step1 t mem istatus post
     | Step_System:
       forall t mem istatus post,
@@ -243,8 +315,6 @@ Module CHERIoTValidation.
   Local Open Scope N_scope.
 
   Arguments Cap : clear implicits.
-  Definition NBYTES := 4.
-  Notation Addr := (@Addr NBYTES).
 
   Inductive CompressedPerm :=
   | MemCapRW (GL: bool) (SL: bool) (LM: bool) (LG: bool) (* Implicit: LD, MC, SD *)
@@ -253,7 +323,13 @@ Module CHERIoTValidation.
   | MemDataOnly (GL: bool) (LD: bool) (SD: bool) (* Implicit: None *)
   | Executable (GL: bool) (SR: bool) (LM: bool) (LG: bool) (* Implicit: EX, LD, MC *)
   | Sealing (GL: bool) (U0: bool) (SE: bool) (US: bool) (* Implicit: None *).
-Search Zmod.
+
+  Instance CHERIOT_params : ISA_params :=
+    {| ISA_NBYTES := 4;
+       ISA_NREGS := 16;
+       ISA_instruction_size := fun x => List.length x; (* PLACEHOLDER *)
+    |}.
+
   Record cheriot_cap :=
   { reserved: bool;
     permissions: CompressedPerm;
@@ -368,7 +444,7 @@ Search Zmod.
            MC := false
         |}
     end.
-  Definition mk_abstract_cap (c: cheriot_cap) : Cap NBYTES N :=
+  Definition mk_abstract_cap (c: cheriot_cap) : Cap N CHERIOT_params :=
     let d := decompress_perm c.(permissions) in
     {|capSealed := if d.(EX)
                    then match c.(otype) with
