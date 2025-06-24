@@ -223,7 +223,8 @@ Section Machine.
 
     Inductive Result {T: Type} :=
     | Ok (t: T)
-    | Exception (exn: EXNInfo).
+    | Exception (exn: EXNInfo)
+    | Fail (* Placeholder *).
     Arguments Result : clear implicits.
 
     Definition footprint (a: Addr) (n: nat) : list Addr :=
@@ -246,6 +247,92 @@ Section Machine.
       let bytes := load_bytes mem pcc.(capCursor) isa_nbytes in
       (ValidFetch pcc addrs -> post (Ok bytes)) /\
       (~ValidFetch pcc addrs -> post (Exception TODO_EXN_INFO)).
+
+    Inductive MemSize :=
+    | Byte
+    | Half
+    | Word
+    | Double.
+
+    Inductive type :=
+    | Ty_CapOrValue
+    | Ty_Value.
+
+    Definition type_denote (t: type) :=
+      match t with
+      | Ty_CapOrValue => CapOrValue
+      | Ty_Value => Value
+      end.
+    Require Import Stdlib.Strings.String.
+
+    (* TODO: PERMS *)
+    Inductive RestrictOps :=
+    | ChangeCursor (fn: Value -> Value)
+    | FilterPerms (fn: Perm.t -> bool)
+    | FilterCapCanStore (fn: Label -> bool)
+    | FilterSealingKeys (fn: Key -> bool)
+    | FilterUnsealingKeys (fn: Key -> bool)
+    | FilterAddrs (fn: Addr -> bool)
+    | FilterCapKeepPerms (fn: Perm.t -> bool)
+    | FilterCapKeepCanStore (fn: Label -> bool)
+    | FilterCapKeepCanBeStored (fn: Label -> bool).
+
+    Inductive expr : type -> Type :=
+    | ValueUnop (fn: Value -> Value) (e1: expr Ty_CapOrValue) : expr Ty_CapOrValue
+    | ValueBinop (fn: Value -> Value -> Value) (e1 e2: expr Ty_CapOrValue) : expr Ty_CapOrValue
+    | ReadReg (idx: Fin.t ISA_NREGS) : expr Ty_CapOrValue
+    | RestrictCap (restrict: list RestrictOps) (c: expr Ty_CapOrValue) : expr Ty_CapOrValue.
+
+    Inductive cmd : Type :=
+    | Done
+    | WriteReg (idx: Fin.t ISA_NREGS) (value: expr Ty_CapOrValue).
+
+    Inductive error_t : Prop :=
+    | Err (s: string).
+
+    Class semantics_parameters (T: Type) :=
+      { err: error_t -> T;
+        option_bind: forall {A}, option A -> error_t -> (A -> T) -> T
+      }.
+    Context {T: Type} {semantics_params : semantics_parameters T}.
+
+    Fixpoint interp_expr (pcc: PCC) (regs: RegisterFile) (mem: Memory)
+                         {tau: type}
+                         (e: expr tau)
+                         (post: type_denote tau -> T)
+                         : T :=
+      match e with
+      | ValueUnop fn e1 =>
+          ve1 <- interp_expr pcc regs mem e1;
+          err (Err "TODO")
+      | _ => err (Err "TODO")
+      end.
+
+    Definition interp_cmd (pcc: PCC) (regs: RegisterFile) (mem: Memory)
+                          (c: cmd)
+                          (post: Result (PCC * RegisterFile * Memory) -> T)
+                          : T :=
+      match c with
+      | Done => post (Ok (pcc,regs,mem))
+      | WriteReg idx value =>
+
+      | _ =>  post Fail
+      end.
+(*     | ReadReg (auth: Fin.t ISA_NREGS) (cont: CapOrValue -> InstructionStep). *)
+
+(*     | Unop ( *)
+
+(*     | LoadData (auth: Fin.t ISA_NREGS) (a: Addr) (length: MemSize) *)
+(*     | StoreData (auth: Fin.t ISA_NREGS) (a: Addr) (length: MemSize) *)
+(*     | LoadCap (auth: Fin.t ISA_NREGS) (a: Addr) (dst: Fin.t ISA_NREGS) *)
+(*     | StoreCap (auth: Fin.t ISA_NREGS) (a: Addr) (src: Fin.t ISA_NREGS) *)
+(*     | RestrictCap (src: Fin.t ISA_NREGS) (dst: Fin.t ISA_NREGS) *)
+(*     | SealCap (auth: Fin.t ISA_NREGS) (src: Fin.t ISA_NREGS) (dst: Fin.t ISA_NREGS) *)
+(*     | UnsealCap (auth: Fin.t ISA_NREGS)(src: Fin.t ISA_NREGS) (dst: Fin.t ISA_NREGS) *)
+(*     | RaiseException *)
+(*     | InvokeCapability (r: Fin.t ISA_NREGS) (r': Fin.t ISA_NREGS). *)
+
+(* Definition unop := *)
 
     Definition user_step_fn (instr: list byte) (userCtx: UserContext) (post: Result UserContext -> Prop) : Prop.
     Admitted.
@@ -489,4 +576,20 @@ Module CHERIoTValidation.
       capKeepCanStore := [Local;NonLocal];
       capKeepCanBeStored := if d.(LG) then [Local;NonLocal] else [Local];
       capCursor := c.(addr) |}.
+
+    Definition x0 : Fin.t 16. apply (@Fin.of_nat_lt 0 16). repeat constructor. Defined.
+    Definition x1 : Fin.t 16. apply (@Fin.of_nat_lt 1 16). repeat constructor. Defined.
+    Definition x2 : Fin.t 16. apply (@Fin.of_nat_lt 2 16). repeat constructor. Defined.
+    Definition x3 : Fin.t 16. apply (@Fin.of_nat_lt 3 16). repeat constructor. Defined.
+    Definition x4 : Fin.t 16. apply (@Fin.of_nat_lt 4 16). repeat constructor. Defined.
+
+    Notation reg_t := (Fin.t ISA_NREGS).
+
+    Definition ADDI (dst src1: reg_t) (imm: Z) : @cmd N Z CHERIOT_params :=
+      WriteReg dst (ValueUnop (Z.add imm) (ReadReg src1)).
+
+    (* Definition LW (dst src1: reg_t) (imm: Z) : @cmd N Z CHERIOT_params := *)
+    (*   WriteReg dst (ValueBinop Z.add (ReadReg src1)). *)
+
+
 End CHERIoTValidation.
