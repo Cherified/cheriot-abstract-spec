@@ -433,6 +433,8 @@ Section Machine.
 
     Definition ReachableMemSame m1 m2 caps := ReachableDataSame m1 m2 caps /\ ReachableTagSame m1 m2 caps.
 
+    (* TODO: All of the following are wrong. Violation should be detected a-priori,
+       not after checking equality of updates *)
     Definition UpdatedDataSame (m1 m2 m1' m2': FullMemory) :=
       forall a, (readByte m1' a <> readByte m1 a \/ readByte m2' a <> readByte m2 a) -> readByte m1' a = readByte m2' a.
 
@@ -534,11 +536,11 @@ Section Machine.
         (forall pcc,
           In Perm.System pcc.(capPerms) ->
           WfSystemInst generalInst pcc).
-
     End GeneralInstruction.
 
     Section CallSentryInst.
-      Variable callSentryInst: UserContext -> InterruptStatus -> Result ExnInfo (PCC * RegisterFile * InterruptStatus).
+      Variable callSentryInst: UserContext -> InterruptStatus ->
+                               Result ExnInfo (PCC * RegisterFile * InterruptStatus).
 
       Definition FuncCallSentry :=
         forall rf pcc ints m1 m2,
