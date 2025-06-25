@@ -354,9 +354,6 @@ Section Machine.
     Definition RegisterFile := list CapOrBytes.
     Definition capsOfRf (rf: RegisterFile) := listSumToInl rf.
 
-    (* TODO: decide on a register file representation. RF manipulations are currently buggy. *)
-    Variable rfIdx_ra : nat.
-
     (* Given that the spec can switch threads at any time,
        interrupts are disabled only to achieve atomicity of a code sequence in single-core machines. *)
     Inductive InterruptStatus :=
@@ -467,6 +464,8 @@ Section Machine.
           | _, _ => False
           end.
 
+      (* TODO: We might need some predicates on all ExnInfo as well (for instance, if NO_EXEC_PERMISSION, then
+         MEPCC tag would still be valid) *)
       Definition WfNormalInst := forall rf pcc mem,
           ValidRf rf ->
           FuncNormal /\
@@ -570,15 +569,18 @@ Section Machine.
                | Some (inl CallEnableInterrupt) => ints' = InterruptsEnabled
                | Some (inl CallDisableInterrupt) => ints' = InterruptsDisabled
                | Some (inl CallInheritInterrupt) => ints' = ints
-               | _ => False (* TODO: CHERIOT's CJALR is defined on unsealed caps too. *)
+               (* TODO: Does this handle unsealed? *)
+               | None => ints' = ints
+               | _ => False
                end /\
              pcc' = setCapSealed src_cap None) /\
              match optLink with
              | Some link =>
+                 (* TODO: Do we need this? We are not imposing any constraint on the memory either *)
                  (forall idx, idx <> link -> nth_error rf' idx = nth_error rf idx) /\
                  (exists linkCap,
                      nth_error rf' link = Some (inl linkCap) /\
-                     ReachableCap mem caps linkCap
+                     ReachableCap mem caps linkCap (* TODO: We need a separate concept of EX-reachable *)
                      /\ linkCap.(capSealed) = Some (inl (if ints
                                                         then RetEnableInterrupt
                                                         else RetDisableInterrupt))
@@ -616,13 +618,14 @@ Section Machine.
                 match src_cap.(capSealed) with
                 | Some (inl RetEnableInterrupt) => ints' = InterruptsEnabled
                 | Some (inl RetDisableInterrupt) => ints' = InterruptsDisabled
-                | _ => False
+                | _ => False (* TODO: if we want to support unsealed returns, how do we do it (we don't have ints)? *)
                 end /\
                 pcc' = setCapSealed src_cap None)
           | Exn e => True
           end.
     End RetSentryInst.
 
+    (* TODO: This might be needed for ECall; or can we move ECall to normal instruction decode? *)
     Section ExnInst.
       Variable exnInst: UserContext -> EXNInfo.
 
@@ -648,29 +651,33 @@ Section Machine.
 
     Section FetchDecodeExecute.
       Variable fetchAddrs: FullMemory -> Addr -> list Addr.
+      (* Addresses fetched should not depend on arbitrary memory regions. *)
+      Definition FetchAddrsOk :=
+        exists (fn: Addr -> list Addr),
+        forall mem1 mem2 addr,
+          (forall a, In a (fn addr) -> readByte mem1 a = readByte mem2 a
+          (* TODO: Do we need tags to be the same? *)
+          (* /\ readTag mem1 (toCapAddr a) = readTag mem2 (toCapAddr a) *) ) ->
+          fetchAddrs mem1 addr = fetchAddrs mem2 addr.
+      Context {fetchAddrsOk: FetchAddrsOk}.
+
       Variable decode : list Byte -> Inst.
       Variable pccNotInBounds: EXNInfo.
 
       Section WithContext.
-        Variable uc: UserContext.
+        Variable fc: UserContext * SystemContext.
+        Definition uc := fst fc.
         Definition mem : FullMemory := snd uc.
         Definition pcc := (fst uc).(thread_pcc).
         Definition rf := (fst uc).(thread_rf).
-        Variable sc: SystemContext.
+        Definition sc := snd fc.
+        Definition sts := fst sc.
         Definition ints := snd sc.
         Definition mepcc := (fst sc).(thread_mepcc).
 
-        (* Addresses fetched should not depend on arbitrary memory regions. *)
-        Definition fetchAddrsOk :=
-          exists (fn: Addr -> list Addr),
-            forall mem1 mem2 addr,
-            (forall a, In a (fn addr) -> readByte mem1 a = readByte mem2 a /\ readTag mem1 a = readTag mem2 a ) ->
-            fetchAddrs mem1 addr = fetchAddrs mem2 addr.
-        Context {fetchAddrsOk: fetchAddrsOk}.
-
         Definition exceptionState (exnInfo: EXNInfo): (UserContext * SystemContext) :=
           ((Build_UserThreadState rf mepcc, mem),
-            (Build_SystemThreadState pcc exnInfo (fst sc).(thread_trustedStack), ints)
+            (Build_SystemThreadState pcc exnInfo sts.(thread_trustedStack), ints)
           ).
 
         Definition threadStepFunction: UserContext * SystemContext :=
@@ -683,13 +690,13 @@ Section Machine.
           | Inst_Call src optLinkReg callSentryInst wf =>
               match callSentryInst uc ints with
               | Ok (pcc', rf', ints') =>
-                   ((Build_UserThreadState rf' pcc', mem), (fst sc, ints'))
+                   ((Build_UserThreadState rf' pcc', mem), (sts, ints'))
               | Exn e => exceptionState e
               end
           | Inst_Ret srcReg retSentryInst wf =>
               match retSentryInst uc with
               | Ok (pcc', ints') =>
-                  ((Build_UserThreadState rf pcc', mem), (fst sc, ints'))
+                  ((Build_UserThreadState rf pcc', mem), (sts, ints'))
               | Exn e => exceptionState e
               end
           | Inst_Exn exnInst wf =>
@@ -701,8 +708,7 @@ Section Machine.
 
         Inductive ThreadStep : (UserContext * SystemContext) -> Prop :=
         | GoodUserThreadStep (inBounds: fetchAddrsInBounds) : ThreadStep threadStepFunction
-        | BadUserFetch (notInBounds: ~ fetchAddrsInBounds)
-          : ThreadStep (exceptionState pccNotInBounds).
+        | BadUserFetch (notInBounds: ~ fetchAddrsInBounds) : ThreadStep (exceptionState pccNotInBounds).
       End WithContext.
 
       Definition setMachineThread (m: Machine) (tid: nat): Machine :=
@@ -712,21 +718,24 @@ Section Machine.
            machine_curThreadId := tid
         |}.
 
+      (* TODO: Can we just have a single step,
+         where if interrupts are disabled, the thread has to match the previous step's?
+         Would such a change create a problem when it comes to implementing the thread switcher? *)
       Inductive SameThreadStep : Machine -> Machine -> Prop :=
       | SameThreadStepOk m1 m2
           (threadIdEq: m2.(machine_curThreadId) = m1.(machine_curThreadId))
           (idleThreadsEq: forall n, n <> m1.(machine_curThreadId) ->
                                nth_error m2.(machine_threads) n = nth_error m1.(machine_threads) n)
           (stepOk: forall userSt' mem' sysSt' interrupt',
-                  exists thread, nth_error m1.(machine_threads) m1.(machine_curThreadId) = Some thread /\
-                  ThreadStep (thread.(thread_userState), m1.(machine_memory))
-                             (thread.(thread_systemState), m1.(machine_interruptStatus))
-                             ((userSt', mem'), (sysSt', interrupt')) ->
-                  m2.(machine_memory) = mem' /\
-                  m2.(machine_interruptStatus) = interrupt' /\
-                  nth_error m2.(machine_threads) m2.(machine_curThreadId)
-                    = Some (Build_Thread userSt' sysSt')) :
-          SameThreadStep m1 m2.
+            exists thread, nth_error m1.(machine_threads) m1.(machine_curThreadId) = Some thread /\
+                             ThreadStep ((thread.(thread_userState), m1.(machine_memory)),
+                                 (thread.(thread_systemState), m1.(machine_interruptStatus)))
+                               ((userSt', mem'), (sysSt', interrupt')) ->
+                           m2.(machine_memory) = mem' /\
+                             m2.(machine_interruptStatus) = interrupt' /\
+                             nth_error m2.(machine_threads) m2.(machine_curThreadId)
+                             = Some (Build_Thread userSt' sysSt')) :
+        SameThreadStep m1 m2.
 
       Inductive MachineStep : Machine -> Machine -> Prop :=
       | Step_SwitchThreads:
@@ -738,9 +747,7 @@ Section Machine.
         forall m1 m2,
         SameThreadStep m1 m2 ->
         MachineStep m1 m2.
-
     End FetchDecodeExecute.
-
   End Machine.
 End Machine.
 
