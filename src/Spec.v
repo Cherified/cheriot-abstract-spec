@@ -584,8 +584,8 @@ Section Machine.
                match src_cap.(capSealed) with
                | Some (inl CallEnableInterrupt) => ints' = InterruptsEnabled
                | Some (inl CallDisableInterrupt) => ints' = InterruptsDisabled
-               | Some (inl CallInheritInterrupt) => ints' = ints (* TODO: Does this handle unsealed? *)
-               | None => ints' = ints
+               | Some (inl CallInheritInterrupt) => ints' = ints
+               | None => ints' = ints (* TODO: Does this handle unsealed? *)
                | _ => False
                end /\
              pcc' = setCapSealed src_cap None) /\
