@@ -583,7 +583,7 @@ Section Machine.
              | Some link =>
                  (* TODO: Do we need to ensure only link register is written?
                     We are not imposing any constraint on the memory either *)
-                 (forall idx, idx <> link -> nth_error rf' idx = nth_error rf idx) /\
+                 (* (forall idx, idx <> link -> nth_error rf' idx = nth_error rf idx) /\ *)
                  (exists linkCap,
                      nth_error rf' link = Some (inl linkCap) /\
                      ReachableCap mem caps linkCap (* TODO: We need a separate concept of EX-reachable *)
