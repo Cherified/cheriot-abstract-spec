@@ -425,20 +425,25 @@ Section Machine.
 
     (* TODO: Check if we can remove checking Load/Cap permission *)
     Definition ReachableTagSame m1 m2 caps :=
-      forall capa p cs cbs, ReachableAddr m1 caps capa ISA_CAPSIZE_BYTES p cs cbs -> In Perm.Load p -> In Perm.Cap p ->
-                               (ReachableAddr m2 caps capa ISA_CAPSIZE_BYTES p cs cbs /\ readTag m1 capa = readTag m2 capa).
+      forall capa p cs cbs, ReachableAddr m1 caps capa ISA_CAPSIZE_BYTES p cs cbs ->
+                            In Perm.Load p -> In Perm.Cap p ->
+                            (ReachableAddr m2 caps capa ISA_CAPSIZE_BYTES p cs cbs /\
+                               readTag m1 capa = readTag m2 capa).
 
     Definition ReachableMemSame m1 m2 caps := ReachableDataSame m1 m2 caps /\ ReachableTagSame m1 m2 caps.
 
     (* TODO: All of the following are wrong. Violation should be detected a-priori,
        not after checking equality of updates *)
     Definition UpdatedDataSame (m1 m2 m1' m2': FullMemory) :=
-      forall a, (readByte m1' a <> readByte m1 a \/ readByte m2' a <> readByte m2 a) -> readByte m1' a = readByte m2' a.
+      forall a, (readByte m1' a <> readByte m1 a \/ readByte m2' a <> readByte m2 a) ->
+                readByte m1' a = readByte m2' a.
 
     Definition UpdatedTagSame (m1 m2 m1' m2': FullMemory) :=
-      forall capa, (readTag m1' capa <> readTag m1 capa \/ readTag m2' capa <> readTag m2 capa) -> readTag m1' capa = readTag m2' capa.
+      forall capa, (readTag m1' capa <> readTag m1 capa \/ readTag m2' capa <> readTag m2 capa) ->
+                   readTag m1' capa = readTag m2' capa.
 
-    Definition UpdatedMemSame (m1 m2 m1' m2': FullMemory) := UpdatedDataSame m1 m2 m1' m2' /\ UpdatedTagSame m1 m2 m1' m2'.
+    Definition UpdatedMemSame (m1 m2 m1' m2': FullMemory) := UpdatedDataSame m1 m2 m1' m2' /\
+                                                               UpdatedTagSame m1 m2 m1' m2'.
 
     Inductive Result {e t} :=
     | Ok : t -> Result
