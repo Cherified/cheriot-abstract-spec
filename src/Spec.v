@@ -671,40 +671,36 @@ Section Machine.
             (Build_SystemThreadState pcc exnInfo (fst sc).(thread_trustedStack), ints)
           ).
 
-        Definition threadStepFunction: option (UserContext * SystemContext) :=
+        Definition threadStepFunction: UserContext * SystemContext :=
           match decode (map (readByte mem) (fetchAddrs mem pcc.(capCursor))) with
           | Inst_General generalInst wf =>
               match generalInst uc sc with
-              | Ok (uc', sc') => Some (uc', sc')
-              | Exn e => Some (exceptionState e)
+              | Ok (uc', sc') => (uc', sc')
+              | Exn e => exceptionState e
               end
           | Inst_Call src optLinkReg callSentryInst wf =>
               match callSentryInst uc ints with
               | Ok (pcc', rf', ints') =>
-                   Some ((Build_UserThreadState rf' pcc', mem), (fst sc, ints'))
-              | Exn e => Some (exceptionState e)
+                   ((Build_UserThreadState rf' pcc', mem), (fst sc, ints'))
+              | Exn e => exceptionState e
               end
           | Inst_Ret srcReg retSentryInst wf =>
               match retSentryInst uc with
               | Ok (pcc', ints') =>
-                  Some ((Build_UserThreadState rf pcc', mem), (fst sc, ints'))
-              | Exn e => Some (exceptionState e)
+                  ((Build_UserThreadState rf pcc', mem), (fst sc, ints'))
+              | Exn e => exceptionState e
               end
           | Inst_Exn exnInst wf =>
-              Some (exceptionState (exnInst uc))
+              exceptionState (exnInst uc)
           end.
 
         Definition fetchAddrsInBounds := Subset (fetchAddrs mem pcc.(capCursor)) pcc.(capAddrs)
                                          /\ In pcc.(capCursor) pcc.(capAddrs).
 
         Inductive ThreadStep : (UserContext * SystemContext) -> Prop :=
-        | GoodUserThreadStep (inBounds: fetchAddrsInBounds) :
-            forall userCtx' sysCtx',
-              threadStepFunction = Some (userCtx', sysCtx') ->
-            ThreadStep (userCtx', sysCtx')
+        | GoodUserThreadStep (inBounds: fetchAddrsInBounds) : ThreadStep threadStepFunction
         | BadUserFetch (notInBounds: ~ fetchAddrsInBounds)
-          : ThreadStep (exceptionState pccNotInBounds)
-        .
+          : ThreadStep (exceptionState pccNotInBounds).
       End WithContext.
 
       Definition setMachineThread (m: Machine) (tid: nat): Machine :=
