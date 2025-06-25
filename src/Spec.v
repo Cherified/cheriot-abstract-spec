@@ -1,4 +1,4 @@
-From Stdlib Require Import List Lia Bool Nat.
+From Stdlib Require Import List Lia Bool Nat NArith.
 Set Primitive Projections.
 
 Section EqSet.
@@ -768,7 +768,6 @@ Section Machine.
 End Machine.
 
 Module CHERIoTValidation.
-  From Stdlib Require Import ZArith.
   Import ListNotations.
   Local Open Scope N_scope.
   Inductive CompressedPerm :=
