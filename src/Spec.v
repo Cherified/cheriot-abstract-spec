@@ -621,7 +621,6 @@ Section Machine.
         Definition pcc := (fst uc).(thread_pcc).
         Definition rf := (fst uc).(thread_rf).
         Variable sc: SystemContext.
-        (* Variable mode : ThreadMode. *)
         Definition ints := snd sc.
 
         (* Addresses fetched should not depend on arbitrary memory regions. *)
@@ -685,16 +684,15 @@ Section Machine.
           (threadIdEq: m2.(machine_curThreadId) = m1.(machine_curThreadId))
           (idleThreadsEq: forall n, n <> m1.(machine_curThreadId) ->
                                nth_error m2.(machine_threads) n = nth_error m1.(machine_threads) n)
-          (stepOk: forall userSt' mem' sysSt' interrupt', (* mode', *)
+          (stepOk: forall userSt' mem' sysSt' interrupt',
                   exists thread, nth_error m1.(machine_threads) m1.(machine_curThreadId) = Some thread /\
                   ThreadStep (thread.(thread_userState), m1.(machine_memory))
                              (thread.(thread_systemState), m1.(machine_interruptStatus))
-                             (* thread.(thread_mode) *)
-                             ((userSt', mem'), (sysSt', interrupt')(* , mode' *)) ->
+                             ((userSt', mem'), (sysSt', interrupt')) ->
                   m2.(machine_memory) = mem' /\
                   m2.(machine_interruptStatus) = interrupt' /\
                   nth_error m2.(machine_threads) m2.(machine_curThreadId)
-                    = Some (Build_Thread userSt' sysSt' (* mode' *))) :
+                    = Some (Build_Thread userSt' sysSt')) :
           SameThreadStep m1 m2.
 
       Inductive MachineStep : Machine -> Machine -> Prop :=
