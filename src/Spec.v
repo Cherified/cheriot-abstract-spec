@@ -127,10 +127,10 @@ Section Machine.
     else inr bytes.
 
   Definition readMemBytes (mem: Memory_t) (a: Addr) (sz: nat) : Bytes :=
-    map mem (seq (fromCapAddr a) sz).
+    map mem (seq a sz).
 
-  Definition readMemTagCap (mem: Memory_t) (tags: Tag_t) (a: CapAddr) : CapOrBytes :=
-    bytesToCap (tags a) (readMemBytes mem (fromCapAddr a) ISA_CAPSIZE_BYTES).
+  Definition readMemTagCap (mem: Memory_t) (tags: Tag_t) (capa: CapAddr) : CapOrBytes :=
+    bytesToCap (tags capa) (readMemBytes mem (fromCapAddr capa) ISA_CAPSIZE_BYTES).
 
   Definition writeMemByte (mem: Memory_t) (a: Addr) (byte: Byte) : Memory_t :=
     fun i => if i =? a
@@ -138,19 +138,19 @@ Section Machine.
              else mem i.
 
   Definition writeMemBytes (mem: Memory_t) (a: Addr) (bytes: Bytes): Memory_t :=
-    fst (fold_left (fun '(mem', i) byte => (writeMemByte mem' (a + i) byte, S i)) bytes (mem, 0)).
+    fst (fold_left (fun '(mem', a') byte => (writeMemByte mem' a' byte, S a')) bytes (mem, a)).
 
-  Definition writeTagTag (tags: Tag_t) (a: CapAddr) (t: bool) : Tag_t := (fun i => if i =? a
-                                                                                   then t
-                                                                                   else tags i).
+  Definition writeTagTag (tags: Tag_t) (capa: CapAddr) (t: bool) : Tag_t := (fun i => if i =? capa
+                                                                                      then t
+                                                                                      else tags i).
 
-  Definition writeMemTagCap (mem: Memory_t) (tags: Tag_t) (a: CapAddr) (c: Cap) : FullMemory :=
-    let capa := fromCapAddr a in
-    (writeMemBytes mem capa (capToBytes c), writeTagTag tags capa true).
+  Definition writeMemTagCap (mem: Memory_t) (tags: Tag_t) (capa: CapAddr) (c: Cap) : FullMemory :=
+    let a := fromCapAddr capa in
+    (writeMemBytes mem a (capToBytes c), writeTagTag tags capa true).
 
-  Definition readByte (mem: FullMemory) (a: Addr) : Byte := (fst mem) a.
+  Definition readByte (mem: FullMemory) := fst mem.
   Definition readBytes (mem: FullMemory) := readMemBytes (fst mem).
-  Definition readTag (mem: FullMemory) (a: CapAddr) : bool := (snd mem) a.
+  Definition readTag (mem: FullMemory) := snd mem.
   Definition readCap (mem: FullMemory) := readMemTagCap (fst mem) (snd mem).
   Definition writeByte (mem: FullMemory) := writeMemByte (fst mem).
   Definition writeBytes (mem: FullMemory) := writeMemBytes (fst mem).
