@@ -157,7 +157,7 @@ Section Machine.
   Definition writeCap (mem: FullMemory) := writeMemTagCap (fst mem) (snd mem).
 
   Definition ExnInfo := Bytes.
-  
+
   Section CurrMemory.
     Variable mem: FullMemory.
 
@@ -560,6 +560,14 @@ Section Machine.
       Definition rf := (fst uc).(thread_rf).
       Variable sc: SystemContext.
       Definition ints := snd sc.
+
+      (* Addresses fetched should not depend on arbitrary memory regions. *)
+      Definition fetchAddrsOk :=
+        exists (fn: Addr -> list Addr),
+          forall mem1 mem2 addr,
+          (forall a, In a (fn addr) -> readByte mem1 a = readByte mem2 a /\ readTag mem1 a = readTag mem2 a ) ->
+          fetchAddrs mem1 addr = fetchAddrs mem2 addr.
+      Variable fetchAddrsOk: fetchAddrsOk.
 
       Definition exceptionState (exnInfo: EXNInfo): UserContext * SystemContext :=
         ((Build_UserThreadState rf exceptionEntryPCC, mem),
