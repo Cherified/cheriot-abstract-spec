@@ -586,7 +586,7 @@ Section Machine.
                  (* (forall idx, idx <> link -> nth_error rf' idx = nth_error rf idx) /\ *)
                  (exists linkCap,
                      nth_error rf' link = Some (inl linkCap) /\
-                     ReachableCap mem caps linkCap (* TODO: We need a separate concept of EX-reachable *)
+                     RestrictUnsealed pcc linkCap (* TODO: Check correctness *)
                      /\ linkCap.(capSealed) = Some (inl (if ints
                                                         then RetEnableInterrupt
                                                         else RetDisableInterrupt))
