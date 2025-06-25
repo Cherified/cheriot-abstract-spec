@@ -610,11 +610,6 @@ Section Machine.
       Variable decode : list Byte -> Inst.
       Variable pccNotInBounds: EXNInfo.
 
-      Variable compartmentCallPCC: Cap. (* This has Exec and System permission; must pass the proof *)
-      Variable compartmentRetPCC: Cap.  (* This has Exec and System permission; must pass the proof *)
-      Variable exceptionEntryPCC: Cap.  (* This has Exec and System permission; must pass the proof *)
-      Variable exceptionRetPCC: Cap.  (* This has Exec and System permission; must pass the proof *)
-
       Section WithContext.
         Variable uc: UserContext.
         Definition mem : FullMemory := snd uc.
@@ -622,6 +617,7 @@ Section Machine.
         Definition rf := (fst uc).(thread_rf).
         Variable sc: SystemContext.
         Definition ints := snd sc.
+        Definition mepcc := (fst sc).(thread_mepcc).
 
         (* Addresses fetched should not depend on arbitrary memory regions. *)
         Definition fetchAddrsOk :=
@@ -632,7 +628,7 @@ Section Machine.
         Context {fetchAddrsOk: fetchAddrsOk}.
 
         Definition exceptionState (exnInfo: EXNInfo): (UserContext * SystemContext) :=
-          ((Build_UserThreadState rf exceptionEntryPCC, mem),
+          ((Build_UserThreadState rf mepcc, mem),
             (Build_SystemThreadState pcc exnInfo (fst sc).(thread_trustedStack), ints)
           ).
 
@@ -641,7 +637,7 @@ Section Machine.
           | Inst_General generalInst wf =>
               match generalInst uc sc with
               | Ok (uc', sc') => (uc', sc')
-              | Exn e => exceptionState e (* TODO: check this is still valid in system mode. *)
+              | Exn e => exceptionState e
               end
           | Inst_Call callSentryInst wf =>
               match callSentryInst uc ints with (* TODO: fix optLink *)
@@ -656,9 +652,7 @@ Section Machine.
               | Exn e => exceptionState e
               end
           | Inst_Exn exnInst wf =>
-            ((Build_UserThreadState rf exceptionEntryPCC, mem),
-              (Build_SystemThreadState pcc (exnInst uc) (fst sc).(thread_trustedStack), ints)
-            )
+              exceptionState (exnInst uc)
           end.
 
         Definition fetchAddrsInBounds := Subset (fetchAddrs mem pcc.(capCursor)) pcc.(capAddrs)
