@@ -453,6 +453,7 @@ Section Machine.
             /\ ValidMemUpdate mem caps mem'
             /\ ReachableCaps mem caps caps'
             /\ In Perm.Exec pcc'.(capPerms)
+            /\ length rf = length rf'
           | Exn _ => True
           end.
     End NormalInst.
@@ -484,6 +485,7 @@ Section Machine.
             /\ ValidMemUpdate mem caps mem'
             /\ ReachableCaps mem caps caps'
             /\ In Perm.Exec pcc'.(capPerms)
+            /\ length rf = length rf'
           | Exn _ => True
           end.
     End SystemInst.
@@ -527,6 +529,7 @@ Section Machine.
           end.
 
       Definition WfCallSentryInst := forall rf pcc ints mem,
+          FuncCallSentry /\
           match callSentryInst (Build_UserThreadState rf pcc, mem) ints with
           | Ok (pcc', optLink, ints') =>
             let caps := pcc :: capsOfRf rf in
@@ -547,8 +550,7 @@ Section Machine.
                | _ => False
                end
             /\ In Perm.Exec pcc'.(capPerms)
-            /\ FuncCallSentry
-          | Exn _ => FuncCallSentry
+          | Exn _ => True
           end.
     End CallSentryInst.
 
@@ -566,20 +568,35 @@ Section Machine.
           | _, _ => False
           end.
 
-      Definition WfRetSentryInst := forall rf pcc mem,
+      Definition setCapSealed (c: Cap) (seal: option SealT) : Cap :=
+        {| capSealed := seal;
+           capPerms := c.(capPerms);
+           capCanStore := c.(capCanStore);
+           capCanBeStored := c.(capCanBeStored);
+           capSealingKeys := c.(capSealingKeys);
+           capUnsealingKeys := c.(capUnsealingKeys);
+           capAddrs := c.(capAddrs);
+           capKeepPerms := c.(capKeepPerms);
+           capKeepCanStore := c.(capKeepCanStore);
+           capKeepCanBeStored := c.(capKeepCanBeStored);
+           capCursor := c.(capCursor)
+        |}.
+
+      Definition WfRetSentryInst (src_idx: RegIdx):= forall rf pcc mem,
+          FuncRetSentry /\
           match retSentryInst (Build_UserThreadState rf pcc, mem) with
           | Ok (pcc', ints') =>
-            let caps := pcc :: capsOfRf rf in
-            In Perm.Exec pcc.(capPerms)
-            /\ ReachableCap mem caps pcc'
-            /\ match pcc'.(capSealed) with
-               | Some (inl RetEnableInterrupt) => ints' = InterruptsEnabled
-               | Some (inl RetDisableInterrupt) => ints' = InterruptsDisabled
-               | _ => False
-               end
-            /\ In Perm.Exec pcc'.(capPerms)
-            /\ FuncRetSentry
-          | Exn e => FuncRetSentry
+            In Perm.Exec pcc.(capPerms) /\
+            (exists src_cap,
+                nth_error rf src_idx = Some (inl src_cap) /\
+                In Perm.Exec src_cap.(capPerms) /\
+                match src_cap.(capSealed) with
+                | Some (inl RetEnableInterrupt) => ints' = InterruptsEnabled
+                | Some (inl RetDisableInterrupt) => ints' = InterruptsDisabled
+                | _ => False
+                end /\
+                pcc' = setCapSealed src_cap None)
+          | Exn e => True
           end.
     End RetSentryInst.
 
@@ -602,7 +619,7 @@ Section Machine.
     Inductive Inst :=
     | Inst_General generalInst (wf: WfGeneralInst generalInst)
     | Inst_Call callSentryInst (wf: WfCallSentryInst callSentryInst)
-    | Inst_Ret retSentryInst (wf: WfRetSentryInst retSentryInst)
+    | Inst_Ret (srcReg: RegIdx) retSentryInst (wf: WfRetSentryInst retSentryInst srcReg)
     | Inst_Exn exnInst (wf: WfExnInst exnInst).
 
     Section FetchDecodeExecute.
@@ -645,7 +662,7 @@ Section Machine.
                 ((Build_UserThreadState rf pcc', mem), (fst sc, ints'))
               | Exn e => exceptionState e
               end
-          | Inst_Ret retSentryInst wf =>
+          | Inst_Ret srcReg retSentryInst wf =>
               match retSentryInst uc with
               | Ok (pcc', ints') =>
                   ((Build_UserThreadState rf pcc', mem), (fst sc, ints'))
