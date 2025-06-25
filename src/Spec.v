@@ -476,7 +476,7 @@ Section Machine.
             /\ ValidMemUpdate mem caps mem'
             /\ ReachableCaps mem caps caps'
             /\ In Perm.Exec pcc'.(capPerms)
-            /\ length rf = length rf'
+            /\ ValidRf rf'
           | Exn _ => True
           end.
     End NormalInst.
@@ -509,7 +509,7 @@ Section Machine.
             /\ ValidMemUpdate mem caps mem'
             /\ ReachableCaps mem caps caps'
             /\ In Perm.Exec pcc'.(capPerms)
-            /\ length rf = length rf'
+            /\ ValidRf rf'
           | Exn _ => True
           end.
     End SystemInst.
@@ -679,7 +679,7 @@ Section Machine.
               | Exn e => Some (exceptionState e)
               end
           | Inst_Call src optLinkReg callSentryInst wf =>
-              match callSentryInst uc ints with (* TODO: fix optLink *)
+              match callSentryInst uc ints with
               | Ok (pcc', rf', ints') =>
                    Some ((Build_UserThreadState rf' pcc', mem), (fst sc, ints'))
               | Exn e => Some (exceptionState e)
