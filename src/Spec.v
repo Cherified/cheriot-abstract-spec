@@ -432,7 +432,7 @@ Section Machine.
 
     Definition ReachableMemSame m1 m2 caps := ReachableDataSame m1 m2 caps /\ ReachableTagSame m1 m2 caps.
 
-    (* TODO: All of the following are wrong. Violation should be detected a-priori,
+    (* TODO: UpdatedMemSame conditions are all wrong should be detected a-priori,
        not after checking equality of updates *)
     Definition UpdatedDataSame (m1 m2 m1' m2': FullMemory) :=
       forall a, (readByte m1' a <> readByte m1 a \/ readByte m2' a <> readByte m2 a) ->
@@ -445,6 +445,7 @@ Section Machine.
     Definition UpdatedMemSame (m1 m2 m1' m2': FullMemory) := UpdatedDataSame m1 m2 m1' m2' /\
                                                                UpdatedTagSame m1 m2 m1' m2'.
 
+    (* TODO: Should e be a parameter in Result? *)
     Inductive Result {e t} :=
     | Ok : t -> Result
     | Exn : e -> Result.
@@ -469,8 +470,8 @@ Section Machine.
           | _, _ => False
           end.
 
-      (* TODO: We might need some predicates on all ExnInfo as well (for instance, if NO_EXEC_PERMISSION, then
-         MEPCC tag would still be valid) *)
+      (* TODO: We might need some provable predicates on all ExnInfo as well
+         (for instance, if NO_EXEC_PERMISSION, then MEPCC tag would still be valid) *)
       Definition WfNormalInst := forall rf pcc mem,
           ValidRf rf ->
           FuncNormal /\
@@ -573,15 +574,15 @@ Section Machine.
                match src_cap.(capSealed) with
                | Some (inl CallEnableInterrupt) => ints' = InterruptsEnabled
                | Some (inl CallDisableInterrupt) => ints' = InterruptsDisabled
-               | Some (inl CallInheritInterrupt) => ints' = ints
-               (* TODO: Does this handle unsealed? *)
+               | Some (inl CallInheritInterrupt) => ints' = ints (* TODO: Does this handle unsealed? *)
                | None => ints' = ints
                | _ => False
                end /\
              pcc' = setCapSealed src_cap None) /\
              match optLink with
              | Some link =>
-                 (* TODO: Do we need this? We are not imposing any constraint on the memory either *)
+                 (* TODO: Do we need to ensure only link register is written?
+                    We are not imposing any constraint on the memory either *)
                  (forall idx, idx <> link -> nth_error rf' idx = nth_error rf idx) /\
                  (exists linkCap,
                      nth_error rf' link = Some (inl linkCap) /\
@@ -723,7 +724,7 @@ Section Machine.
            machine_curThreadId := tid
         |}.
 
-      (* TODO: Can we just have a single step,
+      (* TODO: Can we just have a single MachineStep constructor,
          where if interrupts are disabled, the thread has to match the previous step's?
          Would such a change create a problem when it comes to implementing the thread switcher? *)
       Inductive SameThreadStep : Machine -> Machine -> Prop :=
