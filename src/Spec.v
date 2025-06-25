@@ -429,25 +429,37 @@ Section Machine.
 
     Definition UpdatedMemSame (m1 m2 m1' m2': FullMemory) := UpdatedDataSame m1 m2 m1' m2' /\ UpdatedTagSame m1 m2 m1' m2'.
 
+    Inductive Result {e t} :=
+    | Ok : t -> Result
+    | Exn : e -> Result.
+    Arguments Result : clear implicits.
+
     Section NormalInst.
-      Variable normalInst: UserContext -> UserContext.
+      Variable normalInst: UserContext -> Result ExnInfo UserContext.
 
       Definition FuncNormal :=
         forall rf pcc m1 m2,
           ReachableMemSame m1 m2 (pcc :: capsOfRf rf) ->
-          let '(uts1, m1') := normalInst (Build_UserThreadState rf pcc, m1) in
-          let '(uts2, m2') := normalInst (Build_UserThreadState rf pcc, m2) in
-          uts1 = uts2 /\ UpdatedMemSame m1 m2 m1' m2'.
+          match normalInst (Build_UserThreadState rf pcc, m1),
+                normalInst (Build_UserThreadState rf pcc, m1) with
+          | Ok (uts1, m1'), Ok (uts2, m2') =>
+              uts1 = uts2 /\ UpdatedMemSame m1 m2 m1' m2'
+          | Exn e1, Exn e2 => e1 = e2
+          | _, _ => False
+          end.
 
       Definition WfNormalInst := forall rf pcc mem,
-          let '(Build_UserThreadState rf' pcc', mem') := normalInst (Build_UserThreadState rf pcc, mem) in
-          let caps := pcc :: capsOfRf rf in
-          let caps' := pcc' :: capsOfRf rf' in
-          In Perm.Exec pcc.(capPerms)
-          /\ ValidMemUpdate mem caps mem'
-          /\ ReachableCaps mem caps caps'
-          /\ In Perm.Exec pcc'.(capPerms)
-          /\ FuncNormal.
+          match normalInst (Build_UserThreadState rf pcc, mem) with
+          | Ok (Build_UserThreadState rf' pcc', mem') =>
+            let caps := pcc :: capsOfRf rf in
+            let caps' := pcc' :: capsOfRf rf' in
+            In Perm.Exec pcc.(capPerms)
+            /\ ValidMemUpdate mem caps mem'
+            /\ ReachableCaps mem caps caps'
+            /\ In Perm.Exec pcc'.(capPerms)
+            /\ FuncNormal
+          | Exn e => FuncNormal
+          end.
     End NormalInst.
 
     Section SystemInst.
@@ -588,16 +600,18 @@ Section Machine.
           fetchAddrs mem1 addr = fetchAddrs mem2 addr.
       Variable fetchAddrsOk: fetchAddrsOk.
 
-      Definition exceptionState (exnInfo: EXNInfo): UserContext * SystemContext * ThreadMode :=
+      Definition exceptionState (exnInfo: EXNInfo): (UserContext * SystemContext) :=
         ((Build_UserThreadState rf exceptionEntryPCC, mem),
-          (Build_SystemThreadState pcc exnInfo (fst sc).(thread_trustedStack), ints),
-          SystemMode SystemCall_Exception 0
+          (Build_SystemThreadState pcc exnInfo (fst sc).(thread_trustedStack), ints)
         ).
 
       Definition threadStepFunction: UserContext * SystemContext :=
         match decode (map (readByte mem) (fetchAddrs mem pcc.(capCursor))) with
         | Inst_Normal normalInst wf =>
-            let uc' := normalInst uc in (uc', sc)
+            match normalInst uc with
+            | Ok uc' => (uc', sc)
+            | Exn e => exceptionState e
+            end
         (* | Inst_System systemInst wf => systemInst uc sc *)
         | Inst_Call callSentryInst wf =>
             let '(pcc', optLink, ints') := callSentryInst uc ints in (* TODO: fix optLink *)
@@ -655,7 +669,7 @@ Section Machine.
       | GoodUserThreadStep (inBounds: fetchAddrsInBounds) (inUserMode: mode = UserMode):
           ThreadStep magicThreadStepFunction
       | BadUserFetch (notInBounds: ~ fetchAddrsInBounds) (inUserMode: mode = UserMode)
-        : ThreadStep (exceptionState pccNotInBounds)
+        : ThreadStep (exceptionState pccNotInBounds, SystemMode SystemCall_Exception 0)
       | SystemThreadStep (inSystemMode: exists call offset, mode = SystemMode call offset)
         : ThreadStep magicThreadStepFunction
       .
