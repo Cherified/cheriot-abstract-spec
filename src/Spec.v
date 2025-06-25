@@ -547,7 +547,7 @@ Section Machine.
 
     Section FetchDecodeExecute.
       Variable fetchAddrs: FullMemory -> Addr -> list Addr.
-      Variable decode: FullMemory -> list Addr -> Inst.
+      Variable decode : list Byte -> Inst.
       Variable pccNotInBounds: EXNInfo.
 
       Variable compartmentCallPCC: Cap. (* This has Exec and System permission; must pass the proof *)
@@ -574,7 +574,7 @@ Section Machine.
           (Build_SystemThreadState pcc exnInfo (fst sc).(thread_trustedStack), ints)).
 
       Definition threadStepFunction: UserContext * SystemContext :=
-        match decode mem (fetchAddrs mem pcc.(capCursor)) with
+        match decode (map (readByte mem) (fetchAddrs mem pcc.(capCursor))) with
         | Inst_Normal normalInst wf => let uc' := normalInst uc in (uc', sc)
         | Inst_System systemInst wf => systemInst uc sc
         | Inst_Call callSentryInst wf =>
