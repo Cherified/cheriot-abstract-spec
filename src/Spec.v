@@ -591,16 +591,14 @@ Section Machine.
              pcc' = setCapSealed src_cap None) /\
              match optLink with
              | Some link =>
-                 (* TODO: Do we need to ensure only link register is written?
-                    We are not imposing any constraint on the memory either *)
-                 (* (forall idx, idx <> link -> nth_error rf' idx = nth_error rf idx) /\ *)
-                 (exists linkCap,
-                     nth_error rf' link = Some (inl linkCap) /\
-                     RestrictUnsealed pcc linkCap (* TODO: Check correctness *)
-                     /\ linkCap.(capSealed) = Some (inl (if ints
-                                                        then RetEnableInterrupt
-                                                        else RetDisableInterrupt))
-                     /\ In Perm.Exec linkCap.(capPerms))
+                 (forall idx, idx <> link -> nth_error rf' idx = nth_error rf idx)
+                 /\ (exists linkCap,
+                        nth_error rf' link = Some (inl linkCap)
+                        /\ RestrictUnsealed pcc linkCap (* TODO: Check correctness *)
+                        /\ linkCap.(capSealed) = Some (inl (if ints
+                                                            then RetEnableInterrupt
+                                                            else RetDisableInterrupt))
+                        /\ In Perm.Exec linkCap.(capPerms))
              | None => rf' = rf
              end
           | Exn _ => True
