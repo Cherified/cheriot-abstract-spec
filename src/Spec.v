@@ -399,7 +399,7 @@ Section Machine.
     Definition capsOfThread t := capsOfUserTS t.(thread_userState) ++ capsOfSystemTS t.(thread_systemState).
 
     Record Machine := {
-        machine_memory: Memory_t;
+        machine_memory: FullMemory;
         machine_interruptStatus : InterruptStatus;
         machine_threads : list Thread;
         machine_curThreadId : nat;
@@ -599,102 +599,142 @@ Section Machine.
       Variable exceptionEntryPCC: Cap.  (* This has Exec and System permission; must pass the proof *)
       Variable exceptionRetPCC: Cap.  (* This has Exec and System permission; must pass the proof *)
 
-      Variable uc: UserContext.
-      Definition mem : FullMemory := snd uc.
-      Definition pcc := (fst uc).(thread_pcc).
-      Definition rf := (fst uc).(thread_rf).
-      Variable sc: SystemContext.
-      Variable mode : ThreadMode.
-      Definition ints := snd sc.
+      Section WithContext.
+        Variable uc: UserContext.
+        Definition mem : FullMemory := snd uc.
+        Definition pcc := (fst uc).(thread_pcc).
+        Definition rf := (fst uc).(thread_rf).
+        Variable sc: SystemContext.
+        Variable mode : ThreadMode.
+        Definition ints := snd sc.
 
-      (* Addresses fetched should not depend on arbitrary memory regions. *)
-      Definition fetchAddrsOk :=
-        exists (fn: Addr -> list Addr),
-          forall mem1 mem2 addr,
-          (forall a, In a (fn addr) -> readByte mem1 a = readByte mem2 a /\ readTag mem1 a = readTag mem2 a ) ->
-          fetchAddrs mem1 addr = fetchAddrs mem2 addr.
-      Variable fetchAddrsOk: fetchAddrsOk.
+        (* Addresses fetched should not depend on arbitrary memory regions. *)
+        Definition fetchAddrsOk :=
+          exists (fn: Addr -> list Addr),
+            forall mem1 mem2 addr,
+            (forall a, In a (fn addr) -> readByte mem1 a = readByte mem2 a /\ readTag mem1 a = readTag mem2 a ) ->
+            fetchAddrs mem1 addr = fetchAddrs mem2 addr.
+        Context {fetchAddrsOk: fetchAddrsOk}.
 
-      Definition exceptionState (exnInfo: EXNInfo): (UserContext * SystemContext) :=
-        ((Build_UserThreadState rf exceptionEntryPCC, mem),
-          (Build_SystemThreadState pcc exnInfo (fst sc).(thread_trustedStack), ints)
-        ).
-
-      Definition threadStepFunction: UserContext * SystemContext :=
-        match decode (map (readByte mem) (fetchAddrs mem pcc.(capCursor))) with
-        | Inst_Normal normalInst wf =>
-            match normalInst uc with
-            | Ok uc' => (uc', sc)
-            | Exn e => exceptionState e
-            end
-        (* | Inst_System systemInst wf => systemInst uc sc *)
-        | Inst_Call callSentryInst wf =>
-            match callSentryInst uc ints with (* TODO: fix optLink *)
-            | Ok (pcc', optLink, ints') =>
-              ((Build_UserThreadState rf pcc', mem), (fst sc, ints'))
-            | Exn e => exceptionState e
-            end
-        | Inst_Ret retSentryInst wf =>
-            match retSentryInst uc with
-            | Ok (pcc', ints') =>
-                ((Build_UserThreadState rf pcc', mem), (fst sc, ints'))
-            | Exn e => exceptionState e
-            end
-        (* | Inst_CompartmentCall => *)
-        (*     ((Build_UserThreadState rf compartmentCallPCC, mem), sc) *)
-        (* | Inst_CompartmentRet => *)
-        (*     ((Build_UserThreadState rf compartmentRetPCC, mem), sc) *)
-        | Inst_Exn exnInst wf =>
+        Definition exceptionState (exnInfo: EXNInfo): (UserContext * SystemContext) :=
           ((Build_UserThreadState rf exceptionEntryPCC, mem),
-            (Build_SystemThreadState pcc (exnInst uc) (fst sc).(thread_trustedStack), ints)
-          )
-        end.
+            (Build_SystemThreadState pcc exnInfo (fst sc).(thread_trustedStack), ints)
+          ).
 
-      Definition SystemPCC_eqb (c1 c2: Cap) : bool. Admitted.
-      Definition hasSystemPerm (c: Cap) : bool :=
-        existsb (Perm.t_beq Perm.System) c.(capPerms).
+        Definition threadStepFunction: UserContext * SystemContext :=
+          match decode (map (readByte mem) (fetchAddrs mem pcc.(capCursor))) with
+          | Inst_Normal normalInst wf =>
+              match normalInst uc with
+              | Ok uc' => (uc', sc)
+              | Exn e => exceptionState e
+              end
+          (* | Inst_System systemInst wf => systemInst uc sc *)
+          | Inst_Call callSentryInst wf =>
+              match callSentryInst uc ints with (* TODO: fix optLink *)
+              | Ok (pcc', optLink, ints') =>
+                ((Build_UserThreadState rf pcc', mem), (fst sc, ints'))
+              | Exn e => exceptionState e
+              end
+          | Inst_Ret retSentryInst wf =>
+              match retSentryInst uc with
+              | Ok (pcc', ints') =>
+                  ((Build_UserThreadState rf pcc', mem), (fst sc, ints'))
+              | Exn e => exceptionState e
+              end
+          (* | Inst_CompartmentCall => *)
+          (*     ((Build_UserThreadState rf compartmentCallPCC, mem), sc) *)
+          (* | Inst_CompartmentRet => *)
+          (*     ((Build_UserThreadState rf compartmentRetPCC, mem), sc) *)
+          | Inst_Exn exnInst wf =>
+            ((Build_UserThreadState rf exceptionEntryPCC, mem),
+              (Build_SystemThreadState pcc (exnInst uc) (fst sc).(thread_trustedStack), ints)
+            )
+          end.
 
-      Definition magicThreadStepFunction : UserContext * SystemContext * ThreadMode :=
-        match mode with
-        | UserMode =>
-            let '(uc', sc') := threadStepFunction in
-            let mode' :=
-              if (SystemPCC_eqb (fst uc').(thread_pcc) compartmentCallPCC) then
-                SystemMode SystemCall_CompartmentCall 0
-              else if (SystemPCC_eqb (fst uc').(thread_pcc) compartmentRetPCC) then
-                SystemMode SystemCall_CompartmentRet 0
-              else if (SystemPCC_eqb (fst uc').(thread_pcc) exceptionEntryPCC) then
-                SystemMode SystemCall_Exception 0
-              else if (SystemPCC_eqb (fst uc').(thread_pcc) exceptionRetPCC) then
-                SystemMode SystemCall_ExceptionRet 0
-              else
-                UserMode in
-            (uc', sc', mode')
-        | SystemMode mode offset =>
-            match getSystemInst mode offset with
-            | Inst_System systemInst wf =>
-                let '(uc', sc', delta) := systemInst uc sc in
-                let mode' :=
-                  if hasSystemPerm (fst uc').(thread_pcc) then
-                    SystemMode mode (offset + delta)
-                  else
-                    UserMode in
-                (uc', sc', mode')
-            end
-        end.
+        Definition SystemPCC_eqb (c1 c2: Cap) : bool. Proof using. Admitted.
+        Definition hasSystemPerm (c: Cap) : bool :=
+          existsb (Perm.t_beq Perm.System) c.(capPerms).
 
-      Definition fetchAddrsInBounds := Subset (fetchAddrs mem pcc.(capCursor)) pcc.(capAddrs)
-                                       /\ In pcc.(capCursor) pcc.(capAddrs).
+        Definition magicThreadStepFunction : UserContext * SystemContext * ThreadMode :=
+          match mode with
+          | UserMode =>
+              let '(uc', sc') := threadStepFunction in
+              let mode' :=
+                if (SystemPCC_eqb (fst uc').(thread_pcc) compartmentCallPCC) then
+                  SystemMode SystemCall_CompartmentCall 0
+                else if (SystemPCC_eqb (fst uc').(thread_pcc) compartmentRetPCC) then
+                  SystemMode SystemCall_CompartmentRet 0
+                else if (SystemPCC_eqb (fst uc').(thread_pcc) exceptionEntryPCC) then
+                  SystemMode SystemCall_Exception 0
+                else if (SystemPCC_eqb (fst uc').(thread_pcc) exceptionRetPCC) then
+                  SystemMode SystemCall_ExceptionRet 0
+                else
+                  UserMode in
+              (uc', sc', mode')
+          | SystemMode mode offset =>
+              match getSystemInst mode offset with
+              | Inst_System systemInst wf =>
+                  let '(uc', sc', delta) := systemInst uc sc in
+                  let mode' :=
+                    if hasSystemPerm (fst uc').(thread_pcc) then
+                      SystemMode mode (offset + delta)
+                    else
+                      UserMode in
+                  (uc', sc', mode')
+              end
+          end.
 
-      Inductive ThreadStep : (UserContext * SystemContext * ThreadMode) -> Prop :=
-      | GoodUserThreadStep (inBounds: fetchAddrsInBounds) (inUserMode: mode = UserMode):
-          ThreadStep magicThreadStepFunction
-      | BadUserFetch (notInBounds: ~ fetchAddrsInBounds) (inUserMode: mode = UserMode)
-        : ThreadStep (exceptionState pccNotInBounds, SystemMode SystemCall_Exception 0)
-      | SystemThreadStep (inSystemMode: exists call offset, mode = SystemMode call offset)
-        : ThreadStep magicThreadStepFunction
-      .
+        Definition fetchAddrsInBounds := Subset (fetchAddrs mem pcc.(capCursor)) pcc.(capAddrs)
+                                         /\ In pcc.(capCursor) pcc.(capAddrs).
+
+        Inductive ThreadStep : (UserContext * SystemContext * ThreadMode) -> Prop :=
+        | GoodUserThreadStep (inBounds: fetchAddrsInBounds) (inUserMode: mode = UserMode)
+:
+            ThreadStep magicThreadStepFunction
+        | BadUserFetch (notInBounds: ~ fetchAddrsInBounds) (inUserMode: mode = UserMode)
+          : ThreadStep (exceptionState pccNotInBounds, SystemMode SystemCall_Exception 0)
+        | SystemThreadStep (inSystemMode: exists call offset, mode = SystemMode call offset)
+          : ThreadStep magicThreadStepFunction
+        .
+      End WithContext.
+
+      Definition setMachineThread (m: Machine) (tid: nat): Machine :=
+        {| machine_memory := m.(machine_memory);
+           machine_interruptStatus := m.(machine_interruptStatus);
+           machine_threads := m.(machine_threads);
+           machine_curThreadId := tid
+        |}.
+
+      Inductive SameThreadStep : Machine -> Machine -> Prop :=
+      | SameThreadStepOk m1 m2
+          (threadIdEq: m2.(machine_curThreadId) = m1.(machine_curThreadId))
+          (idleThreadsEq: forall n, n <> m1.(machine_curThreadId) ->
+                               nth_error m2.(machine_threads) n = nth_error m1.(machine_threads) n)
+          (stepOk: forall userSt' mem' sysSt' interrupt' mode',
+                  exists thread, nth_error m1.(machine_threads) m1.(machine_curThreadId) = Some thread /\
+                  ThreadStep (thread.(thread_userState), m1.(machine_memory))
+                             (thread.(thread_systemState), m1.(machine_interruptStatus))
+                             thread.(thread_mode)
+                             ((userSt', mem'), (sysSt', interrupt'), mode') ->
+                  m2.(machine_memory) = mem' /\
+                  m2.(machine_interruptStatus) = interrupt' /\
+                  nth_error m2.(machine_threads) m2.(machine_curThreadId)
+                    = Some (Build_Thread userSt' sysSt' mode')) :
+          SameThreadStep m1 m2.
+
+      Inductive MachineStep : Machine -> Machine -> Prop :=
+      | Step_SwitchThreads:
+        forall m tid',
+        m.(machine_interruptStatus) = InterruptsEnabled ->
+        tid' < List.length m.(machine_threads) ->
+        MachineStep m (setMachineThread m tid')
+      | Step_SameThread:
+        forall m1 m2,
+        SameThreadStep m1 m2 ->
+        MachineStep m1 m2.
+
     End FetchDecodeExecute.
+
   End Machine.
 End Machine.
 
