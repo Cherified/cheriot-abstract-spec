@@ -655,7 +655,10 @@ Section Machine.
       | GoodUserThreadStep (inBounds: fetchAddrsInBounds) (inUserMode: mode = UserMode):
           ThreadStep magicThreadStepFunction
       | BadUserFetch (notInBounds: ~ fetchAddrsInBounds) (inUserMode: mode = UserMode)
-        : ThreadStep (exceptionState pccNotInBounds).
+        : ThreadStep (exceptionState pccNotInBounds)
+      | SystemThreadStep (inSystemMode: exists call offset, mode = SystemMode call offset)
+        : ThreadStep magicThreadStepFunction
+      .
     End FetchDecodeExecute.
   End Machine.
 End Machine.
