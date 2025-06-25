@@ -330,7 +330,7 @@ Section Machine.
     Notation PCC := Cap (only parsing).
     Notation MEPCC := Cap (only parsing). (* While MEPCC can become invalid architecturally,
                                              it shouldn't if the switcher is correct *)
-    Variable EXNInfo: Type.
+    Definition EXNInfo := Bytes.
     Notation RegIdx := nat (only parsing).
 
     Definition RegisterFile := list CapOrBytes.
