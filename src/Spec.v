@@ -56,6 +56,7 @@ Module Perm.
   | Cap
   | Sealing
   | Unsealing.
+  Scheme Equality for t.
 End Perm.
 
 Section Machine.
@@ -380,9 +381,20 @@ Section Machine.
       }.
     Definition capsOfSystemTS sts := sts.(thread_mepcc) :: capsOfTS sts.(thread_trustedStack).
 
+    Inductive SystemCall :=
+    | SystemCall_Exception
+    | SystemCall_ExceptionRet
+    | SystemCall_CompartmentCall
+    | SystemCall_CompartmentRet.
+
+    Inductive ThreadMode :=
+    | UserMode
+    | SystemMode (call: SystemCall) (offset: nat).
+
     Record Thread := {
         thread_userState : UserThreadState;
-        thread_systemState : SystemThreadState
+        thread_systemState : SystemThreadState;
+        thread_mode : ThreadMode
       }.
     Definition capsOfThread t := capsOfUserTS t.(thread_userState) ++ capsOfSystemTS t.(thread_systemState).
 
@@ -439,19 +451,20 @@ Section Machine.
     End NormalInst.
 
     Section SystemInst.
-      Variable systemInst: UserContext -> SystemContext -> (UserContext * SystemContext).
+      Variable systemInst: UserContext -> SystemContext -> (UserContext * SystemContext * nat).
 
       Definition FuncSystem := forall rf pcc mepcc exnInfo ts ints m1 m2,
           ReachableMemSame m1 m2 ((pcc :: capsOfRf rf) ++ (mepcc :: capsOfTS ts)) ->
-          let '((uts1, m1'), sc1) := systemInst (Build_UserThreadState rf pcc, m1)
+          let '((uts1, m1'), sc1, offset) := systemInst (Build_UserThreadState rf pcc, m1)
                                        (Build_SystemThreadState mepcc exnInfo ts, ints) in
-          let '((uts2, m2'), sc2) := systemInst (Build_UserThreadState rf pcc, m2)
+          let '((uts2, m2'), sc2, offset) := systemInst (Build_UserThreadState rf pcc, m2)
                                        (Build_SystemThreadState mepcc exnInfo ts, ints) in
           uts1 = uts2 /\ sc1 = sc2 /\ UpdatedMemSame m1 m2 m1' m2'.
 
       Definition WfSystemInst := forall rf pcc mem mepcc exnInfo ts ints,
           let '((Build_UserThreadState rf' pcc', mem'),
-                  (Build_SystemThreadState mepcc' exnInfo' ts', ints')) :=
+                  (Build_SystemThreadState mepcc' exnInfo' ts', ints'),
+                  offset) :=
             systemInst (Build_UserThreadState rf pcc, mem) (Build_SystemThreadState mepcc exnInfo ts, ints) in
           let caps := (pcc :: capsOfRf rf) ++ (mepcc :: capsOfTS ts) in
           let caps' := (pcc' :: capsOfRf rf') ++ (mepcc' :: capsOfTS ts') in
@@ -489,7 +502,7 @@ Section Machine.
           /\ match pcc'.(capSealed) with
              | Some (inl CallEnableInterrupt) => ints' = InterruptsEnabled
              | Some (inl CallDisableInterrupt) => ints' = InterruptsDisabled
-             | Some (inl CallInteritInterrupt) => ints' = ints
+             | Some (inl CallInheritInterrupt) => ints' = ints
              | _ => False
              end
           /\ In Perm.Exec pcc'.(capPerms)
@@ -538,27 +551,33 @@ Section Machine.
 
     Inductive Inst :=
     | Inst_Normal normalInst (wf: WfNormalInst normalInst)
-    | Inst_System systemInst (wf: WfSystemInst systemInst)
+    (* | Inst_System systemInst (wf: WfSystemInst systemInst) *)
     | Inst_Call callSentryInst (wf: WfCallSentryInst callSentryInst)
     | Inst_Ret retSentryInst (wf: WfRetSentryInst retSentryInst)
-    | Inst_CompartmentCall
-    | Inst_CompartmentRet
+    (* | Inst_CompartmentCall *)
+    (* | Inst_CompartmentRet *)
     | Inst_Exn exnInst (wf: WfExnInst exnInst).
+
+    Inductive SysInst : Type :=
+    | Inst_System systemInst (wf: WfSystemInst systemInst).
 
     Section FetchDecodeExecute.
       Variable fetchAddrs: FullMemory -> Addr -> list Addr.
       Variable decode : list Byte -> Inst.
+      Variable getSystemInst : SystemCall -> nat -> SysInst.
       Variable pccNotInBounds: EXNInfo.
 
       Variable compartmentCallPCC: Cap. (* This has Exec and System permission; must pass the proof *)
       Variable compartmentRetPCC: Cap.  (* This has Exec and System permission; must pass the proof *)
       Variable exceptionEntryPCC: Cap.  (* This has Exec and System permission; must pass the proof *)
+      Variable exceptionRetPCC: Cap.  (* This has Exec and System permission; must pass the proof *)
 
       Variable uc: UserContext.
       Definition mem : FullMemory := snd uc.
       Definition pcc := (fst uc).(thread_pcc).
       Definition rf := (fst uc).(thread_rf).
       Variable sc: SystemContext.
+      Variable mode : ThreadMode.
       Definition ints := snd sc.
 
       (* Addresses fetched should not depend on arbitrary memory regions. *)
@@ -569,35 +588,74 @@ Section Machine.
           fetchAddrs mem1 addr = fetchAddrs mem2 addr.
       Variable fetchAddrsOk: fetchAddrsOk.
 
-      Definition exceptionState (exnInfo: EXNInfo): UserContext * SystemContext :=
+      Definition exceptionState (exnInfo: EXNInfo): UserContext * SystemContext * ThreadMode :=
         ((Build_UserThreadState rf exceptionEntryPCC, mem),
-          (Build_SystemThreadState pcc exnInfo (fst sc).(thread_trustedStack), ints)).
+          (Build_SystemThreadState pcc exnInfo (fst sc).(thread_trustedStack), ints),
+          SystemMode SystemCall_Exception 0
+        ).
 
       Definition threadStepFunction: UserContext * SystemContext :=
         match decode (map (readByte mem) (fetchAddrs mem pcc.(capCursor))) with
-        | Inst_Normal normalInst wf => let uc' := normalInst uc in (uc', sc)
-        | Inst_System systemInst wf => systemInst uc sc
+        | Inst_Normal normalInst wf =>
+            let uc' := normalInst uc in (uc', sc)
+        (* | Inst_System systemInst wf => systemInst uc sc *)
         | Inst_Call callSentryInst wf =>
             let '(pcc', optLink, ints') := callSentryInst uc ints in (* TODO: fix optLink *)
             ((Build_UserThreadState rf pcc', mem), (fst sc, ints'))
         | Inst_Ret retSentryInst wf =>
             let '(pcc', ints') := retSentryInst uc in
             ((Build_UserThreadState rf pcc', mem), (fst sc, ints'))
-        | Inst_CompartmentCall =>
-            ((Build_UserThreadState rf compartmentCallPCC, mem), sc)
-        | Inst_CompartmentRet =>
-            ((Build_UserThreadState rf compartmentRetPCC, mem), sc)
+        (* | Inst_CompartmentCall => *)
+        (*     ((Build_UserThreadState rf compartmentCallPCC, mem), sc) *)
+        (* | Inst_CompartmentRet => *)
+        (*     ((Build_UserThreadState rf compartmentRetPCC, mem), sc) *)
         | Inst_Exn exnInst wf =>
-            ((Build_UserThreadState rf exceptionEntryPCC, mem),
-              (Build_SystemThreadState pcc (exnInst uc) (fst sc).(thread_trustedStack), ints))
+          ((Build_UserThreadState rf exceptionEntryPCC, mem),
+            (Build_SystemThreadState pcc (exnInst uc) (fst sc).(thread_trustedStack), ints)
+          )
+        end.
+
+      Definition SystemPCC_eqb (c1 c2: Cap) : bool. Admitted.
+      Definition hasSystemPerm (c: Cap) : bool :=
+        existsb (Perm.t_beq Perm.System) c.(capPerms).
+
+      Definition magicThreadStepFunction : UserContext * SystemContext * ThreadMode :=
+        match mode with
+        | UserMode =>
+            let '(uc', sc') := threadStepFunction in
+            let mode' :=
+              if (SystemPCC_eqb (fst uc').(thread_pcc) compartmentCallPCC) then
+                SystemMode SystemCall_CompartmentCall 0
+              else if (SystemPCC_eqb (fst uc').(thread_pcc) compartmentRetPCC) then
+                SystemMode SystemCall_CompartmentRet 0
+              else if (SystemPCC_eqb (fst uc').(thread_pcc) exceptionEntryPCC) then
+                SystemMode SystemCall_Exception 0
+              else if (SystemPCC_eqb (fst uc').(thread_pcc) exceptionRetPCC) then
+                SystemMode SystemCall_ExceptionRet 0
+              else
+                UserMode in
+            (uc', sc', mode')
+        | SystemMode mode offset =>
+            match getSystemInst mode offset with
+            | Inst_System systemInst wf =>
+                let '(uc', sc', delta) := systemInst uc sc in
+                let mode' :=
+                  if hasSystemPerm (fst uc').(thread_pcc) then
+                    SystemMode mode (offset + delta)
+                  else
+                    UserMode in
+                (uc', sc', mode')
+            end
         end.
 
       Definition fetchAddrsInBounds := Subset (fetchAddrs mem pcc.(capCursor)) pcc.(capAddrs)
                                        /\ In pcc.(capCursor) pcc.(capAddrs).
 
-      Inductive ThreadStep : (UserContext * SystemContext) -> Prop :=
-      | GoodThreadStep (inBounds: fetchAddrsInBounds): ThreadStep threadStepFunction
-      | BadFetch (notInBounds: ~ fetchAddrsInBounds): ThreadStep (exceptionState pccNotInBounds).
+      Inductive ThreadStep : (UserContext * SystemContext * ThreadMode) -> Prop :=
+      | GoodUserThreadStep (inBounds: fetchAddrsInBounds) (inUserMode: mode = UserMode):
+          ThreadStep magicThreadStepFunction
+      | BadUserFetch (notInBounds: ~ fetchAddrsInBounds) (inUserMode: mode = UserMode)
+        : ThreadStep (exceptionState pccNotInBounds).
     End FetchDecodeExecute.
   End Machine.
 End Machine.
