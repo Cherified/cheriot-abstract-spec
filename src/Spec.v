@@ -316,27 +316,31 @@ Section Machine.
       Section UpdMem.
         Variable mem': FullMemory.
 
-        Definition BasicStPermForAddr (auth: Cap) (a: Addr) (sz: nat) :=
+        Definition StPermForAddr (auth: Cap) (a: Addr) (sz: nat) :=
           ReachableCap auth
           /\ In Perm.Store auth.(capPerms)
           /\ auth.(capSealed) = None
           /\ Subset (seq a sz) auth.(capAddrs).
 
+        Definition StPermForCap (auth: Cap) (capa: CapAddr) :=
+          StPermForAddr auth (fromCapAddr capa) ISA_CAPSIZE_BYTES.
+
         Definition ValidMemCapUpdate :=
           forall capa, readCap mem capa <> readCap mem' capa ->
                           readTag mem' capa = true ->
-                          exists stAddrCap, BasicStPermForAddr stAddrCap (fromCapAddr capa) ISA_CAPSIZE_BYTES
+                          exists stAddrCap, StPermForCap stAddrCap capa
                                             /\ exists stDataCap, ReachableCap stDataCap
-                                                                 /\ (exists l, In l stAddrCap.(capCanStore) /\ In l stDataCap.(capCanBeStored)).
+                                                                 /\ (exists l, In l stAddrCap.(capCanStore) /\
+                                                                                 In l stDataCap.(capCanBeStored)).
 
         Definition ValidMemTagRemoval :=
           forall capa, readTag mem capa = true ->
                           readTag mem' capa = false ->
-                          exists stAddrCap, BasicStPermForAddr stAddrCap (fromCapAddr capa) 1.
+                          exists stAddrCap, StPermForCap stAddrCap capa.
 
         Definition ValidMemDataUpdate :=
           forall a, readByte mem a <> readByte mem' a ->
-                          exists stAddrCap, BasicStPermForAddr stAddrCap a 1.
+                          exists stAddrCap, StPermForAddr stAddrCap a 1.
 
         Definition ValidMemUpdate := ValidMemCapUpdate /\ ValidMemTagRemoval /\ ValidMemDataUpdate.
       End UpdMem.
@@ -418,32 +422,38 @@ Section Machine.
     Definition UserContext : Type := (UserThreadState * FullMemory).
     Definition SystemContext : Type := (SystemThreadState * InterruptStatus).
 
-    (* TODO: Check if we can remove checking Load permission *)
-    Definition ReachableDataSame m1 m2 caps :=
-      forall a sz p cs cbs, ReachableAddr m1 caps a sz p cs cbs -> In Perm.Load p ->
-                            (ReachableAddr m2 caps a sz p cs cbs /\ readByte m1 a = readByte m2 a).
+    Section ReachableMemSame.
+      Variable m1 m2: FullMemory.
+      Variable caps: list Cap.
+      (* TODO: Check if we can remove checking Load permission *)
+      Definition ReachableDataSame :=
+        forall a sz p cs cbs, ReachableAddr m1 caps a sz p cs cbs -> In Perm.Load p ->
+                              (ReachableAddr m2 caps a sz p cs cbs /\ readByte m1 a = readByte m2 a).
 
-    (* TODO: Check if we can remove checking Load/Cap permission *)
-    Definition ReachableTagSame m1 m2 caps :=
-      forall capa p cs cbs, ReachableAddr m1 caps capa ISA_CAPSIZE_BYTES p cs cbs ->
-                            In Perm.Load p -> In Perm.Cap p ->
-                            (ReachableAddr m2 caps capa ISA_CAPSIZE_BYTES p cs cbs /\
-                               readTag m1 capa = readTag m2 capa).
+      (* TODO: Check if we can remove checking Load/Cap permission *)
+      Definition ReachableTagSame :=
+        forall capa p cs cbs, ReachableAddr m1 caps capa ISA_CAPSIZE_BYTES p cs cbs ->
+                              In Perm.Load p -> In Perm.Cap p ->
+                              (ReachableAddr m2 caps capa ISA_CAPSIZE_BYTES p cs cbs /\
+                                 readTag m1 capa = readTag m2 capa).
 
-    Definition ReachableMemSame m1 m2 caps := ReachableDataSame m1 m2 caps /\ ReachableTagSame m1 m2 caps.
+      Definition ReachableMemSame := ReachableDataSame /\ ReachableTagSame.
 
-    (* TODO: UpdatedMemSame conditions are all wrong should be detected a-priori,
-       not after checking equality of updates *)
-    Definition UpdatedDataSame (m1 m2 m1' m2': FullMemory) :=
-      forall a, (readByte m1' a <> readByte m1 a \/ readByte m2' a <> readByte m2 a) ->
-                readByte m1' a = readByte m2' a.
+      Section UpdatedMemSame.
+        Variable m1' m2': FullMemory.
+        (* TODO: Are the UpdatedMemSame conditions all wrong?
+           Should they be detected a-priori instead of checking equality of updates *)
+        Definition UpdatedDataSame :=
+          forall a, (readByte m1' a <> readByte m1 a \/ readByte m2' a <> readByte m2 a) ->
+                    readByte m1' a = readByte m2' a.
 
-    Definition UpdatedTagSame (m1 m2 m1' m2': FullMemory) :=
-      forall capa, (readTag m1' capa <> readTag m1 capa \/ readTag m2' capa <> readTag m2 capa) ->
-                   readTag m1' capa = readTag m2' capa.
+        Definition UpdatedTagSame :=
+          forall capa, (readTag m1' capa <> readTag m1 capa \/ readTag m2' capa <> readTag m2 capa) ->
+                       readTag m1' capa = readTag m2' capa.
 
-    Definition UpdatedMemSame (m1 m2 m1' m2': FullMemory) := UpdatedDataSame m1 m2 m1' m2' /\
-                                                               UpdatedTagSame m1 m2 m1' m2'.
+        Definition UpdatedMemSame := UpdatedDataSame /\ UpdatedTagSame.
+      End UpdatedMemSame.
+    End ReachableMemSame.
 
     (* TODO: Should e be a parameter in Result? *)
     Inductive Result {e t} :=
