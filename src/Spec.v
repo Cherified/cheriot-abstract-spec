@@ -489,60 +489,75 @@ Section Machine.
     End SystemInst.
 
     Section CallSentryInst.
-      Variable callSentryInst: UserContext -> InterruptStatus -> (PCC * option Cap * InterruptStatus).
+      Variable callSentryInst: UserContext -> InterruptStatus -> Result ExnInfo (PCC * option Cap * InterruptStatus).
 
       Definition FuncCallSentry :=
         forall rf pcc ints m1 m2,
           ReachableMemSame m1 m2 (pcc :: capsOfRf rf) ->
-          let '(pcc1', l1, ints1') := callSentryInst (Build_UserThreadState rf pcc, m1) ints in
-          let '(pcc2', l2, ints2') := callSentryInst (Build_UserThreadState rf pcc, m2) ints in
-          pcc1' = pcc2' /\ l1 = l2 /\ ints1' = ints2'.
+          match callSentryInst (Build_UserThreadState rf pcc, m1) ints,
+                callSentryInst (Build_UserThreadState rf pcc, m2) ints  with
+          | Ok (pcc1', l1, ints1'), Ok (pcc2', l2, ints2') =>
+              pcc1' = pcc2' /\ l1 = l2 /\ ints1' = ints2'
+          | Exn e1, Exn e2 =>
+              e1 = e2
+          | _, _ => False
+          end.
 
       Definition WfCallSentryInst := forall rf pcc ints mem,
-          let '(pcc', optLink, ints') := callSentryInst (Build_UserThreadState rf pcc, mem) ints in
-          let caps := pcc :: capsOfRf rf in
-          In Perm.Exec pcc.(capPerms)
-          /\ ReachableCap mem caps pcc'
-          /\ match optLink with
-             | Some link => ReachableCap mem caps link
-                            /\ link.(capSealed) = Some (inl (if ints
-                                                             then RetEnableInterrupt
-                                                             else RetDisableInterrupt))
-                            /\ In Perm.Exec link.(capPerms)
-             | None => True
-             end
-          /\ match pcc'.(capSealed) with
-             | Some (inl CallEnableInterrupt) => ints' = InterruptsEnabled
-             | Some (inl CallDisableInterrupt) => ints' = InterruptsDisabled
-             | Some (inl CallInheritInterrupt) => ints' = ints
-             | _ => False
-             end
-          /\ In Perm.Exec pcc'.(capPerms)
-          /\ FuncCallSentry.
+          match callSentryInst (Build_UserThreadState rf pcc, mem) ints with
+          | Ok (pcc', optLink, ints') =>
+            let caps := pcc :: capsOfRf rf in
+            In Perm.Exec pcc.(capPerms)
+            /\ ReachableCap mem caps pcc'
+            /\ match optLink with
+               | Some link => ReachableCap mem caps link
+                              /\ link.(capSealed) = Some (inl (if ints
+                                                               then RetEnableInterrupt
+                                                               else RetDisableInterrupt))
+                              /\ In Perm.Exec link.(capPerms)
+               | None => True
+               end
+            /\ match pcc'.(capSealed) with
+               | Some (inl CallEnableInterrupt) => ints' = InterruptsEnabled
+               | Some (inl CallDisableInterrupt) => ints' = InterruptsDisabled
+               | Some (inl CallInheritInterrupt) => ints' = ints
+               | _ => False
+               end
+            /\ In Perm.Exec pcc'.(capPerms)
+            /\ FuncCallSentry
+          | Exn _ => FuncCallSentry
+          end.
     End CallSentryInst.
 
     Section RetSentryInst.
-      Variable retSentryInst: UserContext -> (PCC * InterruptStatus).
+      Variable retSentryInst: UserContext -> Result ExnInfo (PCC * InterruptStatus).
 
       Definition FuncRetSentry :=
         forall rf pcc m1 m2,
           ReachableMemSame m1 m2 (pcc :: capsOfRf rf) ->
-          let (pcc1', ints1') := retSentryInst (Build_UserThreadState rf pcc, m1) in
-          let (pcc2', ints2') := retSentryInst (Build_UserThreadState rf pcc, m2) in
-          pcc1' = pcc2'.
+          match retSentryInst (Build_UserThreadState rf pcc, m1),
+                retSentryInst (Build_UserThreadState rf pcc, m2) with
+          | Ok (pcc1', ints1'), Ok (pcc2', ints2') =>
+              pcc1' = pcc2' /\ ints1' = ints2'
+          | Exn e1, Exn e2 => e1 = e2
+          | _, _ => False
+          end.
 
       Definition WfRetSentryInst := forall rf pcc mem,
-          let (pcc', ints') := retSentryInst (Build_UserThreadState rf pcc, mem) in
-          let caps := pcc :: capsOfRf rf in
-          In Perm.Exec pcc.(capPerms)
-          /\ ReachableCap mem caps pcc'
-          /\ match pcc'.(capSealed) with
-             | Some (inl RetEnableInterrupt) => ints' = InterruptsEnabled
-             | Some (inl RetDisableInterrupt) => ints' = InterruptsDisabled
-             | _ => False
-             end
-          /\ In Perm.Exec pcc'.(capPerms)
-          /\ FuncRetSentry.
+          match retSentryInst (Build_UserThreadState rf pcc, mem) with
+          | Ok (pcc', ints') =>
+            let caps := pcc :: capsOfRf rf in
+            In Perm.Exec pcc.(capPerms)
+            /\ ReachableCap mem caps pcc'
+            /\ match pcc'.(capSealed) with
+               | Some (inl RetEnableInterrupt) => ints' = InterruptsEnabled
+               | Some (inl RetDisableInterrupt) => ints' = InterruptsDisabled
+               | _ => False
+               end
+            /\ In Perm.Exec pcc'.(capPerms)
+            /\ FuncRetSentry
+          | Exn e => FuncRetSentry
+          end.
     End RetSentryInst.
 
     Section ExnInst.
@@ -614,11 +629,17 @@ Section Machine.
             end
         (* | Inst_System systemInst wf => systemInst uc sc *)
         | Inst_Call callSentryInst wf =>
-            let '(pcc', optLink, ints') := callSentryInst uc ints in (* TODO: fix optLink *)
-            ((Build_UserThreadState rf pcc', mem), (fst sc, ints'))
+            match callSentryInst uc ints with (* TODO: fix optLink *)
+            | Ok (pcc', optLink, ints') =>
+              ((Build_UserThreadState rf pcc', mem), (fst sc, ints'))
+            | Exn e => exceptionState e
+            end
         | Inst_Ret retSentryInst wf =>
-            let '(pcc', ints') := retSentryInst uc in
-            ((Build_UserThreadState rf pcc', mem), (fst sc, ints'))
+            match retSentryInst uc with
+            | Ok (pcc', ints') =>
+                ((Build_UserThreadState rf pcc', mem), (fst sc, ints'))
+            | Exn e => exceptionState e
+            end
         (* | Inst_CompartmentCall => *)
         (*     ((Build_UserThreadState rf compartmentCallPCC, mem), sc) *)
         (* | Inst_CompartmentRet => *)
