@@ -399,12 +399,6 @@ Section Machine.
       }.
     Definition capsOfSystemTS sts := sts.(thread_mepcc) :: capsOfTS sts.(thread_trustedStack).
 
-    Inductive SystemCall :=
-    | SystemCall_Exception
-    | SystemCall_ExceptionRet
-    | SystemCall_CompartmentCall
-    | SystemCall_CompartmentRet.
-
     Record Thread := {
         thread_userState : UserThreadState;
         thread_systemState : SystemThreadState;
