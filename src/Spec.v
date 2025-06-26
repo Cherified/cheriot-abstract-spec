@@ -61,8 +61,7 @@ End Perm.
 
 Section Machine.
   Context [ISA: ISA_params].
-  Variable Byte: Type.
-  Variable Key: Type.
+  Context [Byte Key: Type].
   Definition Addr := nat.
   Definition CapAddr := nat.
   Definition toCapAddr (a: Addr): CapAddr := Nat.shiftr a ISA_LG_CAPSIZE_BYTES.
@@ -745,19 +744,128 @@ Section Machine.
                              = Some (Build_Thread userSt' sysSt')) :
         SameThreadStep m1 m2.
 
-      Inductive MachineStep : Machine -> Machine -> Prop :=
+      Inductive MachineStep : Machine -> (Machine -> Prop) -> Prop :=
       | Step_SwitchThreads:
-        forall m tid',
+        forall m tid' post,
         m.(machine_interruptStatus) = InterruptsEnabled ->
         tid' < List.length m.(machine_threads) ->
-        MachineStep m (setMachineThread m tid')
+        post (setMachineThread m tid') ->
+        MachineStep m post
       | Step_SameThread:
-        forall m1 m2,
+        forall m1 m2 post,
         SameThreadStep m1 m2 ->
-        MachineStep m1 m2.
+        post m2 ->
+        MachineStep m1 post.
     End FetchDecodeExecute.
   End Machine.
 End Machine.
+
+Section Combinators.
+  Context [State : Type] (step: State -> (State -> Prop) -> Prop).
+  Inductive always(P: State -> Prop)(initial: State): Prop :=
+  | mk_always
+      (invariant: State -> Prop)
+      (Establish: invariant initial)
+      (Preserve: forall s, invariant s -> step s invariant)
+      (Use: forall s, invariant s -> P s).
+
+End Combinators.
+
+Module Properties.
+  Section __.
+    Context [ISA: ISA_params].
+    Context [Byte Key: Type].
+    Context [bytesToCapUnsafe: Bytes (Byte:=Byte) -> Spec.Cap (Key:=Key)].
+
+    Notation FullMemory := (@FullMemory Byte).
+    Notation EXNInfo := (@EXNInfo Byte).
+    Context [fetchAddrs: FullMemory -> Addr -> list Addr].
+    Context [decode: list Byte -> Inst bytesToCapUnsafe].
+    Context [pccNotInBounds : EXNInfo].
+    Notation Machine := (@Machine Byte Key).
+    Notation Cap := (@Cap Key).
+    Notation AddrOffset := nat (only parsing).
+    Notation MachineStep := (MachineStep bytesToCapUnsafe fetchAddrs decode pccNotInBounds).
+    Notation PCC := Cap (only parsing).
+    Notation Thread := (@Thread Byte Key).
+
+    Record ExportEntry := {
+        exportEntryAddr: Addr;
+        exportEntryStackSize : nat;
+        exportEntryNumArgs: nat;
+        exportEntryInterruptStatus: InterruptStatus
+    }.
+
+    Inductive ImportEntry :=
+    | ImportEntry_SealedCapToExportEntry (c: Cap) (* Cap or addr? *)
+    | ImportEntry_SentryToLibraryFunction (c: Cap) (* Cap or addr? *)
+    | ImportEntry_MMIOCap (c: Cap).
+
+    Record Compartment := {
+        compartmentCode: list Addr; (* Includes read only data *)
+        compartmentGlobals: list Addr;
+        compartmentExports: list ExportEntry;
+        compartmentImports: list ImportEntry
+    }.
+
+    Record InitialThreadMetadata := {
+        initThreadEntryPoint: Addr;
+        initThreadStackSize: nat;
+    }.
+
+    (* Initial configuration after linking *)
+    Record Config := {
+        configCompartments: list Compartment;
+        configThreads : list InitialThreadMetadata
+    }.
+
+    Definition Trace : Type. Admitted.
+    Definition State : Type := Machine * Trace.
+
+    Definition WFConfig (config: Config) : Prop.
+    Admitted.
+
+    Section Invariant.
+      Variable config: Config.
+      Variable st: State.
+      Notation machine := (fst st) (only parsing).
+
+      Definition ThreadInv (initialThread: InitialThreadMetadata) (t: Thread) : Prop.
+      Admitted.
+
+      Record Invariant := {
+        Inv_curThread: exists t, nth_error machine.(machine_threads) machine.(machine_curThreadId) = Some t;
+        Inv_threads: Forall2 ThreadInv config.(configThreads) machine.(machine_threads)
+      }.
+    End Invariant.
+
+    Context [ExnHandlerType : Type].
+
+    (* Inductive ImportTableEntry := *)
+    (* | ImportEntry_SealedCapToExportEntry (cap: Cap) *)
+    (* | ImportEntry_SentryToLibraryFunction (cap: Cap) (* Code + read-only globals *) *)
+    (* | ImportEntry_MMIOCap (cap: Cap). *)
+
+    (* Record ExportTableEntry := { *)
+    (*     exportEntryPCC: AddrOffset; *)
+    (*     exportEntryStackSize : nat; *)
+    (*     exportEntryNumArgs: nat; *)
+    (*     exportEntryInterruptStatus: InterruptStatus *)
+    (* }. *)
+
+    (* Record Compartment := { *)
+    (*     compartmentPCC : Cap; *)
+    (*     compartmentCGP : Cap; *)
+    (*     compartmentErrorHandlers: list (nat * ExnHandlerType); *)
+    (*     compartmentImportTable : list (ExportTableEntry) *)
+    (* }. *)
+
+    (* Record GhostState := { *)
+    (*     compartments: list Compartment *)
+    (* }. *)
+
+  End __.
+End Properties.
 
 Module CHERIoTValidation.
   Import ListNotations.
