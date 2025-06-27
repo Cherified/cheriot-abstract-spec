@@ -771,6 +771,16 @@ Section Combinators.
 
 End Combinators.
 
+Definition Disjoint {T: Type} (xs ys: list T) : Prop :=
+  forall t, In t xs -> In t ys -> False.
+
+Definition Separated {T: Type} (xss: list (list T)) : Prop :=
+  forall i j xi xj,
+    i <> j ->
+    nth_error xss i = Some xi ->
+    nth_error xss j = Some xj ->
+    Disjoint xi xj.
+
 Module Properties.
   Section __.
     Context [ISA: ISA_params].
@@ -800,9 +810,10 @@ Module Properties.
     | ImportEntry_SealedCapToExportEntry (c: Cap) (* Cap or addr? *)
     | ImportEntry_SentryToLibraryFunction (c: Cap) (* Cap or addr? *)
     | ImportEntry_MMIOCap (c: Cap).
+    (* | ImportEntry_SharedObject (c: Cap). *) (* TODO! *)
 
     Record Compartment := {
-        compartmentCode: list Addr; (* Includes read only data *)
+        compartmentReadOnly: list Addr; (* Code and read-only data, including import entries *)
         compartmentGlobals: list Addr;
         compartmentExports: list ExportEntry;
         compartmentImports: list ImportEntry
@@ -811,24 +822,91 @@ Module Properties.
     Record InitialThreadMetadata := {
         initThreadEntryPoint: Addr;
         initThreadStackSize: nat;
+        initThreadStackAddr: Addr
     }.
 
-    (* Initial configuration after linking *)
     Record Config := {
         configCompartments: list Compartment;
-        configThreads : list InitialThreadMetadata
+        configThreads : list InitialThreadMetadata;
+        configMMIOAddrs: list Addr;
     }.
-
     Definition Trace : Type. Admitted.
     Definition State : Type := Machine * Trace.
 
-    Definition WFConfig (config: Config) : Prop.
-    Admitted.
+    Definition compartmentFootprint (compartment: Compartment) : list Addr :=
+        compartment.(compartmentReadOnly) ++ compartment.(compartmentGlobals).
+
+    Definition stackFootprint (t: InitialThreadMetadata) : list Addr :=
+      seq t.(initThreadStackAddr) t.(initThreadStackSize).
+
+    Record WFCompartment (compartment: Compartment) := {
+        WFCompartment_addrs: Disjoint compartment.(compartmentReadOnly) compartment.(compartmentGlobals);
+    }.
+
+    (* Memory should be separately divided into:
+       - compartment-owned code&read-only and global regions
+       - stack per thread
+       - device/MMIO memory
+       - TODO(??): pre-shared objects (potentially shared between compartments)
+     *)
+    Definition ConfigFootprints (config: Config) :=
+        (configMMIOAddrs config)::((map compartmentFootprint config.(configCompartments))
+                                   ++ (map stackFootprint config.(configThreads))).
+
+    Definition isSentry (c: Cap) :=
+      match c.(capSealed) with
+      | Some (inl _) => true
+      | _ => false
+      end.
+
+    Definition isSealedDataCap (c: Cap) :=
+      match c.(capSealed) with
+      | Some (inr _) => true
+      | _ => false
+      end.
+
+    (* Import entries should belong to another compartment's read only regions
+       and be exported by the other compartment.
+
+       TODO: These properties potentially are not all needed.
+     *)
+    Definition ImportEntriesOk (config: Config) :=
+      forall i compartment entry,
+        nth_error config.(configCompartments) i = Some compartment ->
+        In entry compartment.(compartmentImports) ->
+        match entry with
+        | ImportEntry_MMIOCap c => Subset c.(capAddrs) config.(configMMIOAddrs)
+        | ImportEntry_SealedCapToExportEntry c =>
+            isSealedDataCap c = true /\
+            (exists j compartment',
+                i <> j /\
+                nth_error config.(configCompartments) j = Some compartment' /\
+                Subset c.(capAddrs) compartment'.(compartmentReadOnly) /\
+                exists export_entry, In export_entry compartment'.(compartmentExports) /\
+                                export_entry.(exportEntryAddr) = c.(capCursor)
+            )
+        | ImportEntry_SentryToLibraryFunction c =>
+            isSentry c = true /\
+            (exists j compartment',
+                i <> j /\
+                nth_error config.(configCompartments) j = Some compartment' /\
+                Subset c.(capAddrs) compartment'.(compartmentReadOnly) /\
+                exists export_entry, In export_entry compartment'.(compartmentExports) /\
+                                export_entry.(exportEntryAddr) = c.(capCursor)
+            )
+        end.
+
+    Record WFConfig (config: Config) := {
+        WFConfig_footprintDisjoint: Separated (ConfigFootprints config);
+        WFConfig_compartments: forall c, In c config.(configCompartments) -> WFCompartment c;
+        WFConfig_importEntriesOk: ImportEntriesOk config
+    }.
 
     Section Invariant.
       Variable config: Config.
       Variable st: State.
       Notation machine := (fst st) (only parsing).
+      Notation trace := (snd st) (only parsing).
 
       Definition ThreadInv (initialThread: InitialThreadMetadata) (t: Thread) : Prop.
       Admitted.
