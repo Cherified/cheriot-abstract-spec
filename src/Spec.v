@@ -61,7 +61,7 @@ End Perm.
 
 Section Machine.
   Context [ISA: ISA_params].
-  Context [Byte Key: Type].
+  Context {Byte Key: Type}.
   Definition Addr := nat.
   Definition CapAddr := nat.
   Definition toCapAddr (a: Addr): CapAddr := Nat.shiftr a ISA_LG_CAPSIZE_BYTES.
@@ -667,6 +667,18 @@ Section Machine.
     | Inst_Ret (srcReg: RegIdx) retSentryInst (wf: WfRetSentryInst retSentryInst srcReg)
     | Inst_Exn exnInst (wf: WfExnInst exnInst).
 
+    (* WIP *)
+    Notation ThreadIdx := nat (only parsing).
+    Inductive SameThreadEvent :=
+    | Ev_Exception
+    | Ev_Call (pcc: PCC) (rf: RegisterFile) (is: InterruptStatus)
+    | Ev_Ret (pcc: PCC) (rf: RegisterFile) (is: InterruptStatus)
+    | Ev_General.
+    Inductive Event :=
+    | Ev_SwitchThreads (idx: nat)
+    | Ev_SameThread (idx: ThreadIdx) (ev: SameThreadEvent).
+    Definition Trace := list Event.
+
     Section FetchDecodeExecute.
       Variable fetchAddrs: FullMemory -> Addr -> list Addr.
       (* Addresses fetched should not depend on arbitrary memory regions. *)
@@ -693,38 +705,38 @@ Section Machine.
         Definition ints := snd sc.
         Definition mepcc := (fst sc).(thread_mepcc).
 
-        Definition exceptionState (exnInfo: EXNInfo): (UserContext * SystemContext) :=
-          ((Build_UserThreadState rf mepcc, mem),
-            (Build_SystemThreadState pcc exnInfo sts.(thread_trustedStack), ints)
-          ).
+        Definition exceptionState (exnInfo: EXNInfo): (UserContext * SystemContext) * SameThreadEvent :=
+          (((Build_UserThreadState rf mepcc, mem),
+             (Build_SystemThreadState pcc exnInfo sts.(thread_trustedStack), ints)
+           ), Ev_Exception).
 
-        Definition threadStepFunction: UserContext * SystemContext :=
+        Definition threadStepFunction: (UserContext * SystemContext) * SameThreadEvent :=
           match decode (map (readByte mem) (fetchAddrs mem pcc.(capCursor))) with
           | Inst_General generalInst wf =>
               match generalInst uc sc with
-              | Ok (uc', sc') => (uc', sc')
-              | Exn e => exceptionState e
+              | Ok (uc', sc') => ((uc', sc'), Ev_General)
+              | Exn e => (exceptionState e)
               end
           | Inst_Call src optLinkReg callSentryInst wf =>
               match callSentryInst uc ints with
               | Ok (pcc', rf', ints') =>
-                   ((Build_UserThreadState rf' pcc', mem), (sts, ints'))
-              | Exn e => exceptionState e
+                   (((Build_UserThreadState rf' pcc', mem), (sts, ints')), Ev_Call pcc' rf' ints')
+              | Exn e => (exceptionState e)
               end
           | Inst_Ret srcReg retSentryInst wf =>
               match retSentryInst uc with
               | Ok (pcc', ints') =>
-                  ((Build_UserThreadState rf pcc', mem), (sts, ints'))
-              | Exn e => exceptionState e
+                  (((Build_UserThreadState rf pcc', mem), (sts, ints')), Ev_Ret pcc' rf ints')
+              | Exn e => (exceptionState e)
               end
           | Inst_Exn exnInst wf =>
-              exceptionState (exnInst uc)
+              (exceptionState (exnInst uc))
           end.
 
         Definition fetchAddrsInBounds := Subset (fetchAddrs mem pcc.(capCursor)) pcc.(capAddrs)
                                          /\ In pcc.(capCursor) pcc.(capAddrs).
 
-        Inductive ThreadStep : (UserContext * SystemContext) -> Prop :=
+        Inductive ThreadStep : ((UserContext * SystemContext) * SameThreadEvent) -> Prop :=
         | GoodUserThreadStep (inBounds: fetchAddrsInBounds) : ThreadStep threadStepFunction
         | BadUserFetch (notInBounds: ~ fetchAddrsInBounds) : ThreadStep (exceptionState pccNotInBounds).
       End WithContext.
@@ -739,8 +751,8 @@ Section Machine.
       (* TODO: Can we just have a single MachineStep constructor,
          where if interrupts are disabled, the thread has to match the previous step's?
          Would such a change create a problem when it comes to implementing the thread switcher? *)
-      Inductive SameThreadStep : Machine -> Machine -> Prop :=
-      | SameThreadStepOk m1 m2
+      Inductive SameThreadStep : Machine -> Machine -> Event -> Prop :=
+      | SameThreadStepOk m1 m2 ev
           (threadIdEq: m2.(machine_curThreadId) = m1.(machine_curThreadId))
           (idleThreadsEq: forall n, n <> m1.(machine_curThreadId) ->
                                nth_error m2.(machine_threads) n = nth_error m1.(machine_threads) n)
@@ -748,49 +760,246 @@ Section Machine.
             exists thread, nth_error m1.(machine_threads) m1.(machine_curThreadId) = Some thread /\
                              ThreadStep ((thread.(thread_userState), m1.(machine_memory)),
                                  (thread.(thread_systemState), m1.(machine_interruptStatus)))
-                               ((userSt', mem'), (sysSt', interrupt')) ->
+                               (((userSt', mem'), (sysSt', interrupt')), ev)->
                            m2.(machine_memory) = mem' /\
                              m2.(machine_interruptStatus) = interrupt' /\
                              nth_error m2.(machine_threads) m2.(machine_curThreadId)
                              = Some (Build_Thread userSt' sysSt')) :
-        SameThreadStep m1 m2.
+        SameThreadStep m1 m2 (Ev_SameThread m2.(machine_curThreadId) ev).
 
-      Inductive MachineStep : Machine -> (Machine -> Prop) -> Prop :=
+      Inductive MachineStep : Machine * Trace -> (Machine * Trace -> Prop) -> Prop :=
       | Step_SwitchThreads:
-        forall m tid' post,
+        forall m tr tid' post,
         m.(machine_interruptStatus) = InterruptsEnabled ->
         tid' < List.length m.(machine_threads) ->
-        post (setMachineThread m tid') ->
-        MachineStep m post
+        post ((setMachineThread m tid'),(tr ++ [Ev_SwitchThreads tid'])) ->
+        MachineStep (m, tr) post
       | Step_SameThread:
-        forall m1 m2 post,
-        SameThreadStep m1 m2 ->
-        post m2 ->
-        MachineStep m1 post.
+        forall m1 m2 tr ev post,
+        SameThreadStep m1 m2 ev ->
+        post (m2, tr ++ [ev]) ->
+        MachineStep (m1, tr) post.
+
     End FetchDecodeExecute.
   End Machine.
 End Machine.
 
-(* Section Combinators. *)
-(*   Context [State : Type] (step: State -> (State -> Prop) -> Prop). *)
-(*   Inductive always(P: State -> Prop)(initial: State): Prop := *)
-(*   | mk_always *)
-(*       (invariant: State -> Prop) *)
-(*       (Establish: invariant initial) *)
-(*       (Preserve: forall s, invariant s -> step s invariant) *)
-(*       (Use: forall s, invariant s -> P s). *)
+Module Combinators.
+  Section __.
+    Context [State : Type] (step: State -> (State -> Prop) -> Prop).
+    Inductive always(P: State -> Prop)(initial: State): Prop :=
+    | mk_always
+        (invariant: State -> Prop)
+        (Establish: invariant initial)
+        (Preserve: forall s, invariant s -> step s invariant)
+        (Use: forall s, invariant s -> P s).
+  End __.
+End Combinators.
 
-(* End Combinators. *)
+Module Separation.
+  Definition Disjoint {T: Type} (xs ys: list T) : Prop :=
+    forall t, In t xs -> In t ys -> False.
 
-Definition Disjoint {T: Type} (xs ys: list T) : Prop :=
-  forall t, In t xs -> In t ys -> False.
+  Definition Separated {T: Type} (xss: list (list T)) : Prop :=
+    forall i j xi xj,
+      i <> j ->
+      nth_error xss i = Some xi ->
+      nth_error xss j = Some xj ->
+      Disjoint xi xj.
 
-Definition Separated {T: Type} (xss: list (list T)) : Prop :=
-  forall i j xi xj,
-    i <> j ->
-    nth_error xss i = Some xi ->
-    nth_error xss j = Some xj ->
-    Disjoint xi xj.
+End Separation.
+
+Section ListUtils.
+  Lemma Forall2_refl {A: Type} (R: A -> A -> Prop) :
+    forall xs,
+    (forall a, R a a) ->
+    Forall2 R xs xs.
+  Proof.
+    induction xs; auto.
+  Qed.
+End ListUtils.
+Module Configuration.
+  Import Separation.
+  Import ListNotations.
+
+  Section __.
+    Context [ISA: ISA_params].
+    Context {Byte Key: Type}.
+    Context {bytesToCapUnsafe: Bytes (Byte:=Byte) -> Spec.Cap (Key:=Key)}.
+
+    Notation FullMemory := (@FullMemory Byte).
+    Notation EXNInfo := (@EXNInfo Byte).
+    Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
+    Context {decode: list Byte -> Inst bytesToCapUnsafe}.
+    Context {pccNotInBounds : EXNInfo}.
+    Notation Machine := (@Machine Byte Key).
+    Notation Cap := (@Cap Key).
+    Notation AddrOffset := nat (only parsing).
+    Notation MachineStep := (MachineStep bytesToCapUnsafe fetchAddrs decode pccNotInBounds).
+    Notation PCC := Cap (only parsing).
+    Notation Thread := (@Thread Byte Key).
+    Notation ReachableCaps := (@ReachableCaps ISA Byte Key bytesToCapUnsafe).
+    Notation RegisterFile := (@RegisterFile Byte Key).
+
+    Definition ExportEntry : Type.
+    Admitted.
+
+    Definition ImportEntry : Type.
+    Admitted.
+
+    Record InitialThreadMetadata := {
+        initThreadEntryPoint: Addr;
+        initThreadRf : list RegisterFile;
+        initThreadStackSize: nat;
+        initThreadStackAddr: Addr
+    }.
+
+    Record Compartment := {
+        compartmentReadOnly: list Addr; (* Code and read-only data, including import entries *)
+        compartmentGlobals: list Addr;
+        compartmentExports: list ExportEntry;
+        compartmentImports: list ImportEntry
+    }.
+
+    Record Config := {
+        configCompartments: list Compartment;
+        configSwitcher: nat;
+        configThreads : list InitialThreadMetadata;
+        configInitMemory: FullMemory
+        (* configMMIOAddrs: list Addr; *)
+    }.
+
+    Definition compartmentFootprint (compartment: Compartment) : list Addr :=
+        compartment.(compartmentReadOnly) ++ compartment.(compartmentGlobals).
+    Definition stackFootprint (t: InitialThreadMetadata) : list Addr :=
+        seq t.(initThreadStackAddr) t.(initThreadStackSize).
+    Record WFCompartment (compartment: Compartment) := {
+        (* WFCompartment_addrs: Disjoint compartment.(compartmentReadOnly) compartment.(compartmentGlobals); *)
+    }.
+
+    Definition WFSwitcher (c: Compartment) : Prop := True.
+
+    Definition ConfigFootprints (config: Config) :=
+        (* (configMMIOAddrs config) :: *)
+          (map compartmentFootprint config.(configCompartments))
+           ++ (map stackFootprint config.(configThreads)).
+    Record WFConfig (config: Config) := {
+        WFConfig_footprintDisjoint: Separated (ConfigFootprints config);
+        WFConfig_compartments: forall c, In c config.(configCompartments) -> WFCompartment c;
+        WFConfig_switcher: exists c, nth_error config.(configCompartments) config.(configSwitcher) = Some c /\
+                                WFSwitcher c
+        (* WFConfig_importEntriesOk: ImportEntriesOk config *)
+    }.
+
+    (* WIP *)
+    Record ValidInitialState (config: Config) (m: Machine) : Prop :=
+      { ValidInit_memory: m.(machine_memory) = config.(configInitMemory)
+      }.
+
+  End __.
+End Configuration.
+
+(* From a valid initial state where threads are in disjoint compartments, for
+   any sequence of same-domain (Ev_General) steps, the reachable caps in each
+   thread do not increase.
+ *)
+Module ThreadIsolatedMonotonicity.
+  Import ListNotations.
+  Import Configuration.
+  Section __.
+    Context [ISA: ISA_params].
+    Context {Byte Key: Type}.
+    Context {bytesToCapUnsafe: Bytes (Byte:=Byte) -> Spec.Cap (Key:=Key)}.
+
+    Notation FullMemory := (@FullMemory Byte).
+    Notation EXNInfo := (@EXNInfo Byte).
+    Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
+    Context {decode: list Byte -> Inst bytesToCapUnsafe}.
+    Context {pccNotInBounds : EXNInfo}.
+    Notation Machine := (@Machine Byte Key).
+    Notation Cap := (@Cap Key).
+    Notation AddrOffset := nat (only parsing).
+    Notation MachineStep := (MachineStep bytesToCapUnsafe fetchAddrs decode pccNotInBounds).
+    Notation PCC := Cap (only parsing).
+    Notation Thread := (@Thread Byte Key).
+    Notation ReachableCaps := (@ReachableCaps ISA Byte Key bytesToCapUnsafe).
+    Notation Trace := (@Trace Byte Key).
+    Notation State := (Machine * Trace)%type.
+    Notation Event := (@Event Byte Key).
+    Notation Config := (@Config ISA Byte Key bytesToCapUnsafe fetchAddrs decode pccNotInBounds).
+
+    Definition SameDomainEvent (ev: Event) : Prop :=
+      (exists idx, ev = Ev_SwitchThreads idx) \/
+      (exists idx, ev = Ev_SameThread idx Ev_General).
+    Definition SameDomainTrace (tr: Trace) : Prop :=
+      Forall SameDomainEvent tr.
+
+    (* TODO: add additional restrictions *)
+    Definition ValidInitialMachine (config: Config) (st: Machine) : Prop :=
+      ValidInitialState config st.
+
+    Section WithConfig.
+      Variable config: Config.
+      Variable initialMachine: Machine.
+
+      Definition ReachableCapSubset (t_init t_cur: Thread) : Prop :=
+        ReachableCaps initialMachine.(machine_memory) (capsOfThread t_init) (capsOfThread t_cur).
+
+      (* A thread's caps are a subset of caps reachable from initial state. *)
+      Definition PThreadIsolatedMonotonicity (st: State) : Prop :=
+        let '(machine, tr) := st in
+        SameDomainTrace tr ->
+        Forall2 ReachableCapSubset
+                initialMachine.(machine_threads) machine.(machine_threads).
+
+      Definition Invariant (st: State) : Prop :=
+        let '(machine, tr) := st in
+        SameDomainTrace tr ->
+        Forall2 ReachableCapSubset
+                initialMachine.(machine_threads) machine.(machine_threads).
+
+      Lemma InvariantInitial  :
+        ValidInitialMachine config initialMachine ->
+        Invariant (initialMachine, []).
+      Proof.
+        cbv [Invariant SameDomainTrace ReachableCapSubset].
+        intros * hValidInit hTr.
+        apply Forall2_refl.
+        solve[constructor; auto].
+      Qed.
+
+      (* TODO: Non-determinism *)
+      Lemma InvariantStep (s: State) :
+        Invariant s ->
+        MachineStep s Invariant.
+      Proof.
+        cbv [Invariant]. destruct s. intros Hinv.
+      Admitted.
+
+      Lemma InvariantUse (s: State) :
+        Invariant s ->
+        PThreadIsolatedMonotonicity s.
+      Proof.
+        auto.
+      Qed.
+    End WithConfig.
+
+    Theorem ThreadIsolatedMonotonicity :
+      forall config initial_machine,
+      WFConfig config ->
+      ValidInitialMachine config initial_machine ->
+      Combinators.always MachineStep (PThreadIsolatedMonotonicity initial_machine) (initial_machine, []).
+    Proof.
+      intros * hwf_config hinit_ok.
+      econstructor.
+      - eapply InvariantInitial; eauto.
+      - eapply InvariantStep; eauto.
+      - eapply InvariantUse; eauto.
+    Qed.
+  End __.
+End ThreadIsolatedMonotonicity.
+
+
 
 Inductive Forall3 {A B C : Type} (R : A -> B -> C -> Prop) : list A -> list B -> list C -> Prop :=
     Forall3_nil : Forall3 R nil nil nil
@@ -850,11 +1059,14 @@ Module Properties.
     }.
 
     (* Each thread is in a compartment. *)
-
     Record ThreadGhostState := {
         threadGhost_compartmentIdx : nat
     }.
 
+    (* The ghost state should capture:
+       - The compartment each thread is in.
+       - The arguments each callee had access to at time of entry, and the history of return values.
+     *)
     Record GhostState : Type := {
         ghostThreads : list ThreadGhostState
     }.
@@ -1117,7 +1329,7 @@ Module CHERIoTValidation.
         |}
     end.
 
-  Definition mk_abstract_cap (c: cheriot_cap) : Cap N :=
+  Definition mk_abstract_cap (c: cheriot_cap) : @Cap N :=
     let d := decompress_perm c.(permissions) in
     {|capSealed := if d.(EX)
                    then match c.(otype) with
