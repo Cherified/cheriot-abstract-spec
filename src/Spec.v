@@ -292,6 +292,17 @@ Section Machine.
            capKeepCanBeStored := c.(capKeepCanBeStored);
            capCursor := c.(capCursor)
         |}.
+      Definition isSentry (c: Cap) :=
+        match c.(capSealed) with
+        | Some (inl _) => true
+        | _ => false
+        end.
+
+      Definition isSealedDataCap (c: Cap) :=
+        match c.(capSealed) with
+        | Some (inr _) => true
+        | _ => false
+        end.
 
     End CapHelpers.
 
@@ -760,16 +771,16 @@ Section Machine.
   End Machine.
 End Machine.
 
-Section Combinators.
-  Context [State : Type] (step: State -> (State -> Prop) -> Prop).
-  Inductive always(P: State -> Prop)(initial: State): Prop :=
-  | mk_always
-      (invariant: State -> Prop)
-      (Establish: invariant initial)
-      (Preserve: forall s, invariant s -> step s invariant)
-      (Use: forall s, invariant s -> P s).
+(* Section Combinators. *)
+(*   Context [State : Type] (step: State -> (State -> Prop) -> Prop). *)
+(*   Inductive always(P: State -> Prop)(initial: State): Prop := *)
+(*   | mk_always *)
+(*       (invariant: State -> Prop) *)
+(*       (Establish: invariant initial) *)
+(*       (Preserve: forall s, invariant s -> step s invariant) *)
+(*       (Use: forall s, invariant s -> P s). *)
 
-End Combinators.
+(* End Combinators. *)
 
 Definition Disjoint {T: Type} (xs ys: list T) : Prop :=
   forall t, In t xs -> In t ys -> False.
@@ -780,6 +791,11 @@ Definition Separated {T: Type} (xss: list (list T)) : Prop :=
     nth_error xss i = Some xi ->
     nth_error xss j = Some xj ->
     Disjoint xi xj.
+
+Inductive Forall3 {A B C : Type} (R : A -> B -> C -> Prop) : list A -> list B -> list C -> Prop :=
+    Forall3_nil : Forall3 R nil nil nil
+  | Forall3_cons : forall (x : A) (y : B) (z: C) (l : list A) (l' : list B) (l'': list C),
+                   R x y z -> Forall3 R l l' l'' -> Forall3 R (x :: l) (y :: l') (z::l'').
 
 Module Properties.
   Section __.
@@ -798,6 +814,7 @@ Module Properties.
     Notation MachineStep := (MachineStep bytesToCapUnsafe fetchAddrs decode pccNotInBounds).
     Notation PCC := Cap (only parsing).
     Notation Thread := (@Thread Byte Key).
+    Notation ReachableCaps := (@ReachableCaps ISA Byte Key bytesToCapUnsafe).
 
     Record ExportEntry := {
         exportEntryAddr: Addr;
@@ -827,11 +844,23 @@ Module Properties.
 
     Record Config := {
         configCompartments: list Compartment;
+        configSwitcher: nat;
         configThreads : list InitialThreadMetadata;
         configMMIOAddrs: list Addr;
     }.
+
+    (* Each thread is in a compartment. *)
+
+    Record ThreadGhostState := {
+        threadGhost_compartmentIdx : nat
+    }.
+
+    Record GhostState : Type := {
+        ghostThreads : list ThreadGhostState
+    }.
+
     Definition Trace : Type. Admitted.
-    Definition State : Type := Machine * Trace.
+    Definition State : Type := Machine * GhostState * Trace.
 
     Definition compartmentFootprint (compartment: Compartment) : list Addr :=
         compartment.(compartmentReadOnly) ++ compartment.(compartmentGlobals).
@@ -844,26 +873,15 @@ Module Properties.
     }.
 
     (* Memory should be separately divided into:
-       - compartment-owned code&read-only and global regions
-       - stack per thread
-       - device/MMIO memory
-       - TODO(??): pre-shared objects (potentially shared between compartments)
+       - Compartment-owned code&read-only and global regions.
+       - A stack per thread.
+       - Device and MMIO memory
+       - TODO(??): Pre-shared objects (potentially shared between compartments).
      *)
     Definition ConfigFootprints (config: Config) :=
-        (configMMIOAddrs config)::((map compartmentFootprint config.(configCompartments))
+        (configMMIOAddrs config)
+          ::((map compartmentFootprint config.(configCompartments))
                                    ++ (map stackFootprint config.(configThreads))).
-
-    Definition isSentry (c: Cap) :=
-      match c.(capSealed) with
-      | Some (inl _) => true
-      | _ => false
-      end.
-
-    Definition isSealedDataCap (c: Cap) :=
-      match c.(capSealed) with
-      | Some (inr _) => true
-      | _ => false
-      end.
 
     (* Import entries should belong to another compartment's read only regions
        and be exported by the other compartment.
@@ -896,51 +914,79 @@ Module Properties.
             )
         end.
 
+    (* TODO *)
+    Definition WFSwitcher (c: Compartment) : Prop := True.
+
     Record WFConfig (config: Config) := {
         WFConfig_footprintDisjoint: Separated (ConfigFootprints config);
         WFConfig_compartments: forall c, In c config.(configCompartments) -> WFCompartment c;
+        WFConfig_switcher: exists c, nth_error config.(configCompartments) config.(configSwitcher) = Some c /\
+                                WFSwitcher c;
         WFConfig_importEntriesOk: ImportEntriesOk config
     }.
+
+    (* Initially:
+     * - The only caps a compartment has access to outside itself are in the import table,
+           - either in the MMIO region, a sentry, or sealed with a key that only the switcher can access.
+           - indirectly, a compartment has access to read only data from library calls.
+     * - Only the switcher has:
+         - system access permission.
+         - the unsealing key for export data entries.
+     *)
+    Definition InitialMachine (config: Config) : Machine.
+    Admitted.
 
     Section Invariant.
       Variable config: Config.
       Variable st: State.
-      Notation machine := (fst st) (only parsing).
-      Notation trace := (snd st) (only parsing).
+      Notation machine := (fst (fst st)) (only parsing).
+      Notation trace := ((snd st)) (only parsing).
+      Notation ghost := (snd (fst st)) (only parsing).
+      Notation memory := machine.(machine_memory).
 
-      Definition ThreadInv (initialThread: InitialThreadMetadata) (t: Thread) : Prop.
-      Admitted.
+      Section WithThread.
+        Variable t: Thread.
+        Variable tghost: ThreadGhostState.
+        Notation rf := t.(thread_userState).(thread_rf).
+        Notation pcc := t.(thread_userState).(thread_pcc).
+        Notation baseCaps := (pcc::(capsOfRf rf)).
+
+        (* Threads running in user mode:
+           - do not have access to the system access permission.
+           - do not have access to the unsealing key for export data entries.
+         *)
+        Record InUserMode : Prop := {
+            userMode_noSystemAccessPerm :
+              forall c caps, ReachableCaps memory baseCaps caps ->
+                        In c caps ->
+                        In Perm.System c.(capPerms) ->
+                        c.(capSealed) = None ->
+                        False
+        }.
+
+        Record InSystemMode : Prop := {
+        }.
+      End WithThread.
+
+      (* Top-level invariant: a compartment should only have access to its caps
+         from its initial state and any caps explicitly passed through
+         arguments/return values.
+       *)
+      Record ThreadInv (initialThread: InitialThreadMetadata) (t: Thread) (tghost: ThreadGhostState): Prop :=
+      { threadInUserMode : tghost.(threadGhost_compartmentIdx) <> config.(configSwitcher) ->
+                           InUserMode t
+      ; threadInSystemMode : tghost.(threadGhost_compartmentIdx) = config.(configSwitcher) ->
+                             InSystemMode
+      }.
 
       Record Invariant := {
         Inv_curThread: exists t, nth_error machine.(machine_threads) machine.(machine_curThreadId) = Some t;
-        Inv_threads: Forall2 ThreadInv config.(configThreads) machine.(machine_threads)
+        Inv_threads: Forall3 ThreadInv config.(configThreads) machine.(machine_threads) ghost.(ghostThreads)
       }.
+
     End Invariant.
 
     Context [ExnHandlerType : Type].
-
-    (* Inductive ImportTableEntry := *)
-    (* | ImportEntry_SealedCapToExportEntry (cap: Cap) *)
-    (* | ImportEntry_SentryToLibraryFunction (cap: Cap) (* Code + read-only globals *) *)
-    (* | ImportEntry_MMIOCap (cap: Cap). *)
-
-    (* Record ExportTableEntry := { *)
-    (*     exportEntryPCC: AddrOffset; *)
-    (*     exportEntryStackSize : nat; *)
-    (*     exportEntryNumArgs: nat; *)
-    (*     exportEntryInterruptStatus: InterruptStatus *)
-    (* }. *)
-
-    (* Record Compartment := { *)
-    (*     compartmentPCC : Cap; *)
-    (*     compartmentCGP : Cap; *)
-    (*     compartmentErrorHandlers: list (nat * ExnHandlerType); *)
-    (*     compartmentImportTable : list (ExportTableEntry) *)
-    (* }. *)
-
-    (* Record GhostState := { *)
-    (*     compartments: list Compartment *)
-    (* }. *)
 
   End __.
 End Properties.
