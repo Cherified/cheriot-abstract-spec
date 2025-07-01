@@ -715,7 +715,7 @@ Section Machine.
           | Inst_General generalInst wf =>
               match generalInst uc sc with
               | Ok (uc', sc') => ((uc', sc'), Ev_General)
-              | Exn e => (exceptionState e)
+              | Exn e => exceptionState e
               end
           | Inst_Call src optLinkReg callSentryInst wf =>
               match callSentryInst uc ints with
@@ -737,8 +737,10 @@ Section Machine.
                                          /\ In pcc.(capCursor) pcc.(capAddrs).
 
         Inductive ThreadStep : ((UserContext * SystemContext) * SameThreadEvent) -> Prop :=
-        | GoodUserThreadStep (inBounds: fetchAddrsInBounds) : ThreadStep threadStepFunction
-        | BadUserFetch (notInBounds: ~ fetchAddrsInBounds) : ThreadStep (exceptionState pccNotInBounds).
+        | GoodUserThreadStep (inBounds: fetchAddrsInBounds) :
+          ThreadStep threadStepFunction
+        | BadUserFetch (notInBounds: ~ fetchAddrsInBounds) :
+            ThreadStep (exceptionState pccNotInBounds).
       End WithContext.
 
       Definition setMachineThread (m: Machine) (tid: nat): Machine :=
@@ -752,33 +754,26 @@ Section Machine.
          where if interrupts are disabled, the thread has to match the previous step's?
          Would such a change create a problem when it comes to implementing the thread switcher? *)
       Inductive SameThreadStep : Machine -> Machine -> Event -> Prop :=
-      | SameThreadStepOk m1 m2 ev
+      | SameThreadStepOk :
+        forall m1 m2 ev
           (threadIdEq: m2.(machine_curThreadId) = m1.(machine_curThreadId))
           (idleThreadsEq: forall n, n <> m1.(machine_curThreadId) ->
-                               nth_error m2.(machine_threads) n = nth_error m1.(machine_threads) n)
-          (stepOk: forall userSt' mem' sysSt' interrupt',
-            exists thread, nth_error m1.(machine_threads) m1.(machine_curThreadId) = Some thread /\
-                             ThreadStep ((thread.(thread_userState), m1.(machine_memory)),
-                                 (thread.(thread_systemState), m1.(machine_interruptStatus)))
-                               (((userSt', mem'), (sysSt', interrupt')), ev)->
-                           m2.(machine_memory) = mem' /\
-                             m2.(machine_interruptStatus) = interrupt' /\
-                             nth_error m2.(machine_threads) m2.(machine_curThreadId)
-                             = Some (Build_Thread userSt' sysSt')) :
-        SameThreadStep m1 m2 (Ev_SameThread m2.(machine_curThreadId) ev).
-
-      Inductive MachineStep : Machine * Trace -> (Machine * Trace -> Prop) -> Prop :=
-      | Step_SwitchThreads:
-        forall m tr tid' post,
-        m.(machine_interruptStatus) = InterruptsEnabled ->
-        tid' < List.length m.(machine_threads) ->
-        post ((setMachineThread m tid'),(tr ++ [Ev_SwitchThreads tid'])) ->
-        MachineStep (m, tr) post
-      | Step_SameThread:
-        forall m1 m2 tr ev post,
-        SameThreadStep m1 m2 ev ->
-        post (m2, tr ++ [ev]) ->
-        MachineStep (m1, tr) post.
+                            nth_error m2.(machine_threads) n = nth_error m1.(machine_threads) n)
+          (stepOk: exists thread userSt' sysSt',
+                   nth_error m1.(machine_threads) m1.(machine_curThreadId) = Some thread /\
+                   ThreadStep ((thread.(thread_userState), m1.(machine_memory)),
+                               (thread.(thread_systemState), m1.(machine_interruptStatus)))
+                              ((userSt', m2.(machine_memory)), (sysSt', m2.(machine_interruptStatus)), ev) /\
+                   nth_error m2.(machine_threads) m2.(machine_curThreadId) = Some (Build_Thread userSt' sysSt')),
+          SameThreadStep m1 m2 (Ev_SameThread m2.(machine_curThreadId) ev).
+      Inductive MachineStep : Machine * Trace -> Machine * Trace -> Prop :=
+      | Step_SwitchThreads m tr tid'
+          (iEnabled: m.(machine_interruptStatus) = InterruptsEnabled)
+          (tidOk: tid' < List.length m.(machine_threads)):
+        MachineStep (m, tr) ((setMachineThread m tid'),(tr ++ [Ev_SwitchThreads tid']))
+      | Step_SameThread m1 m2 tr ev
+          (stepOk:SameThreadStep m1 m2 ev):
+        MachineStep (m1, tr) (m2, tr ++ [ev]) .
 
     End FetchDecodeExecute.
   End Machine.
@@ -786,12 +781,12 @@ End Machine.
 
 Module Combinators.
   Section __.
-    Context [State : Type] (step: State -> (State -> Prop) -> Prop).
+    Context [State : Type] (step: State -> State -> Prop).
     Inductive always(P: State -> Prop)(initial: State): Prop :=
     | mk_always
         (invariant: State -> Prop)
         (Establish: invariant initial)
-        (Preserve: forall s, invariant s -> step s invariant)
+        (Preserve: forall s t, invariant s -> step s t -> invariant t)
         (Use: forall s, invariant s -> P s).
   End __.
 End Combinators.
@@ -808,6 +803,99 @@ Module Separation.
       Disjoint xi xj.
 
 End Separation.
+Lemma simple_tuple_inversion:
+  forall {A} {B} (a: A) (b: B) x y,
+  (a,b) = (x,y) ->
+  a = x /\ b = y.
+Proof.
+  intros. inversion H. auto.
+Qed.
+
+Tactic Notation "simplify_eq" := repeat
+  match goal with
+  | H : False |- _ => contradiction
+  | H : ?x = _ |- _ => subst x
+  | H: _ = ?x |- _ => subst x
+  | [ H: (_,_) = (_,_) |- _ ] =>
+    apply simple_tuple_inversion in H;
+    let Hl := fresh H "l" in let Hr := fresh H "r" in destruct H as [Hl Hr]
+  end.
+Tactic Notation "inv" ident(H) :=
+  inversion H; clear H; simplify_eq.
+
+Ltac destruct_products :=
+  repeat match goal with
+  | p: _ * _  |- _ => destruct p
+  | H: _ /\ _ |- _ => let Hl := fresh H "l" in let Hr := fresh H "r" in destruct H as [Hl Hr]
+  | E: exists y, _ |- _ => let yf := fresh y in destruct E as [yf E]
+  end.
+Ltac destruct_matches_in e :=
+  lazymatch e with
+  | context[match ?d with | _ => _ end] =>
+      destruct_matches_in d
+  | _ =>
+      destruct e eqn:?
+  end.
+
+Ltac destruct_matches_in_hyp H :=
+  lazymatch type of H with
+  | context[match ?d with | _ => _ end] =>
+      destruct_matches_in d
+  | ?v =>
+      let H1 := fresh H in
+      destruct v eqn:H1
+  end.
+Tactic Notation "case_match" "eqn" ":" ident(Hd) :=
+  match goal with
+  | H : context [ match ?x with _ => _ end ] |- _ => destruct x eqn:Hd
+  | |- context [ match ?x with _ => _ end ] => destruct x eqn:Hd
+  end.
+Ltac case_match :=
+  let H := fresh in case_match eqn:H.
+Search Nat.eqb true.
+Ltac simplify_nats :=
+  match goal with
+  | H: Nat.eqb _ _ = true |- _ =>
+      rewrite PeanoNat.Nat.eqb_eq in H
+  | H: Nat.eqb _ _ = false |- _ =>
+      rewrite PeanoNat.Nat.eqb_neq in H
+  end.
+Ltac fast_done :=
+  solve
+    [ eassumption
+    | symmetry; eassumption
+    | reflexivity ].
+Tactic Notation "fast_by" tactic(tac) :=
+  tac; fast_done.
+Ltac done :=
+  solve
+  [ repeat first
+    [ fast_done
+    | solve [trivial]
+    | progress intros
+    | solve [symmetry; trivial]
+    | discriminate
+    | contradiction
+    | split
+    ]
+  ].
+Tactic Notation "by" tactic(tac) :=
+  tac; done.
+
+Section OptionUtils.
+  Lemma Some_inj :
+    forall A (x y:A),
+    Some x = Some y ->
+    x = y.
+  Proof.
+    intros. inversion H. auto.
+  Qed.
+
+End OptionUtils.
+Ltac option_simpl :=
+  match goal with
+  | H : Some ?x = Some _ |- _ => apply Some_inj in H; simplify_eq
+  end.
 
 Section ListUtils.
   Lemma Forall2_refl {A: Type} (R: A -> A -> Prop) :
@@ -817,7 +905,85 @@ Section ListUtils.
   Proof.
     induction xs; auto.
   Qed.
+  Lemma Forall2_nth_error1 : forall A B (R: A -> B -> Prop) xs ys,
+      length xs = length ys ->
+      (forall idx x y, nth_error xs idx = Some x ->
+                  nth_error ys idx = Some y ->
+                  R x y) ->
+      Forall2 R xs ys.
+  Proof.
+    induction xs.
+    - destruct ys; try discriminate; auto.
+    - destruct ys; try discriminate.
+      intros; constructor; eauto.
+      + eapply H0 with (idx := 0); eauto.
+      + eapply IHxs; eauto.
+        intros; eapply H0 with (idx := S idx); auto.
+  Qed.
+
+
+  Lemma Forall2_nth_error2 : forall A B (R: A -> B -> Prop) xs ys,
+      Forall2 R xs ys ->
+      forall idx x y,
+      nth_error xs idx = Some x ->
+      nth_error ys idx = Some y ->
+      R x y.
+  Proof.
+    induction 1.
+    - intros *; rewrite nth_error_nil. discriminate.
+    - destruct idx; cbn; intros;
+        repeat match goal with
+        | H: Some _ = Some _ |- _ => apply Some_inj in H; subst
+        end; eauto.
+  Qed.
+
 End ListUtils.
+
+Tactic Notation "destruct_or" "?" ident(H) :=
+  repeat match type of H with
+  | False => destruct H
+  | _ \/ _ => destruct H as [H|H]
+  end.
+Tactic Notation "destruct_or" "!" ident(H) := hnf in H; progress (destruct_or? H).
+
+Tactic Notation "destruct_or" "?" :=
+  repeat match goal with H : _ |- _ => progress (destruct_or? H) end.
+Tactic Notation "destruct_or" "!" :=
+  progress destruct_or?.
+Lemma Some_not_None :
+  forall A (a: A) x,
+  x = Some a ->
+  x <> None.
+Proof.
+  destruct x; congruence.
+Qed.
+
+Lemma listUpdate_length:
+  forall A (xs ys: list A) idx a,
+  (forall n, n <> idx -> nth_error xs n = nth_error ys n) ->
+  idx < length xs ->
+  nth_error ys idx = Some a ->
+  length xs = length ys.
+Proof.
+  intros * herror hlen hsome.
+  destruct_with_eqn (Nat.eqb (length xs) (length ys)); simplify_nats; auto.
+  exfalso.
+  assert (length xs < length ys \/ length ys < length xs) as Hcase by lia.
+  destruct_or! Hcase; exfalso.
+  - rewrite<-nth_error_Some in Hcase.
+    rewrite<-herror in Hcase by lia.
+    rewrite nth_error_Some in Hcase. lia.
+  - destruct_with_eqn (Nat.ltb idx (length ys)).
+    + rewrite PeanoNat.Nat.ltb_lt in *.
+      rewrite<-nth_error_Some in Hcase.
+      rewrite herror in Hcase by lia.
+      rewrite nth_error_Some in Hcase. lia.
+    + rewrite PeanoNat.Nat.ltb_nlt in *.
+      apply Some_not_None in hsome.
+      apply nth_error_Some in hsome. lia.
+Qed.
+Create HintDb invariants.
+
 Module Configuration.
   Import Separation.
   Import ListNotations.
@@ -894,10 +1060,72 @@ Module Configuration.
     (* WIP *)
     Record ValidInitialState (config: Config) (m: Machine) : Prop :=
       { ValidInit_memory: m.(machine_memory) = config.(configInitMemory)
+      ; ValidInit_threadId: machine_curThreadId m < length (machine_threads m)
       }.
 
+    Record GlobalInvariant (config: Config) (m: Machine) : Prop :=
+    { Inv_curThread: m.(machine_curThreadId) < length m.(machine_threads)
+    }.
+
+    Hint Resolve Inv_curThread : invariants.
+
+    Section Proofs.
+      Lemma InvariantInitial :
+        forall config m,
+          ValidInitialState config m ->
+          GlobalInvariant config m.
+      Proof.
+        intros * hvalid.
+        constructor.
+        apply hvalid.
+      Qed.
+      Notation SameThreadStep := (SameThreadStep bytesToCapUnsafe fetchAddrs decode pccNotInBounds).
+
+      Lemma SameThreadStep_lengthThreads:
+        forall m1 m2 ev,
+          machine_curThreadId m1 < length (machine_threads m1) ->
+          SameThreadStep m1 m2 ev ->
+          length (machine_threads m1) = length (machine_threads m2).
+      Proof.
+        intros * hlen hstep.
+        inv hstep. destruct_products.
+        eapply listUpdate_length; eauto.
+        - intros. symmetry; eauto.
+        - rewrite<-threadIdEq. eauto.
+      Qed.
+
+      Lemma SameThreadStep_curId:
+        forall m1 m2 ev,
+          machine_curThreadId m1 < length (machine_threads m1) ->
+          SameThreadStep m1 m2 ev ->
+          machine_curThreadId m2 < length (machine_threads m2).
+      Proof.
+        intros * hlen hstep.
+        pose proof (SameThreadStep_lengthThreads _ _ _ hlen hstep) as hlen'.
+        inv hstep; destruct_products.
+        rewrite threadIdEq. lia.
+      Qed.
+
+      Lemma GlobalInvariantStep :
+        forall config s tr s' tr',
+        GlobalInvariant config s ->
+        MachineStep (s, tr) (s',tr') ->
+        GlobalInvariant config s'.
+      Proof.
+        intros * hinv hstep.
+        inv hstep.
+        - constructor; cbv [setMachineThread machine_threads machine_curThreadId]; auto.
+        - constructor.
+          eapply SameThreadStep_curId; eauto with invariants.
+      Qed.
+
+    End Proofs.
   End __.
+
+  Hint Resolve Inv_curThread : invariants.
+
 End Configuration.
+
 
 (* From a valid initial state where threads are in disjoint compartments, for
    any sequence of same-domain (Ev_General) steps, the reachable caps in each
@@ -927,10 +1155,16 @@ Module ThreadIsolatedMonotonicity.
     Notation State := (Machine * Trace)%type.
     Notation Event := (@Event Byte Key).
     Notation Config := (@Config ISA Byte Key bytesToCapUnsafe fetchAddrs decode pccNotInBounds).
+    Notation SameThreadStep := (SameThreadStep bytesToCapUnsafe fetchAddrs decode pccNotInBounds).
+
+
 
     Definition SameDomainEvent (ev: Event) : Prop :=
-      (exists idx, ev = Ev_SwitchThreads idx) \/
-      (exists idx, ev = Ev_SameThread idx Ev_General).
+      match ev with
+      | Ev_SwitchThreads _ => True
+      | Ev_SameThread _ Ev_General => True
+      | _ => False
+      end.
     Definition SameDomainTrace (tr: Trace) : Prop :=
       Forall SameDomainEvent tr.
 
@@ -942,39 +1176,83 @@ Module ThreadIsolatedMonotonicity.
       Variable config: Config.
       Variable initialMachine: Machine.
 
-      Definition ReachableCapSubset (t_init t_cur: Thread) : Prop :=
-        ReachableCaps initialMachine.(machine_memory) (capsOfThread t_init) (capsOfThread t_cur).
+      Definition ReachableCapSubset (m_init m_cur: FullMemory) (t_init t_cur: Thread) : Prop :=
+        forall caps,
+          ReachableCaps m_cur (capsOfThread t_cur) caps ->
+          ReachableCaps m_init (capsOfThread t_init) caps.
 
       (* A thread's caps are a subset of caps reachable from initial state. *)
       Definition PThreadIsolatedMonotonicity (st: State) : Prop :=
         let '(machine, tr) := st in
         SameDomainTrace tr ->
-        Forall2 ReachableCapSubset
+        Forall2 (ReachableCapSubset initialMachine.(machine_memory) machine.(machine_memory))
                 initialMachine.(machine_threads) machine.(machine_threads).
 
       Definition Invariant (st: State) : Prop :=
         let '(machine, tr) := st in
-        SameDomainTrace tr ->
-        Forall2 ReachableCapSubset
-                initialMachine.(machine_threads) machine.(machine_threads).
+        GlobalInvariant config machine /\
+        (SameDomainTrace tr ->
+         Forall2 (ReachableCapSubset initialMachine.(machine_memory) machine.(machine_memory))
+                 initialMachine.(machine_threads) machine.(machine_threads)).
 
       Lemma InvariantInitial  :
         ValidInitialMachine config initialMachine ->
         Invariant (initialMachine, []).
       Proof.
-        cbv [Invariant SameDomainTrace ReachableCapSubset].
-        intros * hValidInit hTr.
-        apply Forall2_refl.
-        solve[constructor; auto].
+        cbv [Invariant SameDomainTrace ReachableCapSubset ValidInitialMachine].
+        intros * hValidInit; split.
+        - apply Configuration.InvariantInitial. auto.
+        - intros hTr.
+          apply Forall2_refl. auto.
       Qed.
 
-      (* TODO: Non-determinism *)
-      Lemma InvariantStep (s: State) :
-        Invariant s ->
-        MachineStep s Invariant.
+
+      Lemma SameDomainStepOk:
+        forall mem_init t_inits m1 m2 ev ,
+        machine_curThreadId m1 < length (machine_threads m1) ->
+        Forall2 (ReachableCapSubset mem_init m1.(machine_memory)) t_inits (machine_threads m1) ->
+        SameDomainEvent ev ->
+        SameThreadStep m1 m2 ev ->
+        Forall2 (ReachableCapSubset mem_init m2.(machine_memory)) t_inits (machine_threads m2).
       Proof.
-        cbv [Invariant]. destruct s. intros Hinv.
+        cbv [SameDomainEvent].
+        intros * hlen hinit hev hstep.
+        pose proof (SameThreadStep_lengthThreads _ _ _ hlen hstep) as Hlen.
+        inv hstep. destruct_products.
+        inv stepOkrl. rename H0 into hstep.
+        revert hstep. cbv [threadStepFunction exceptionState uc sc fst snd].
+        repeat (case_match; simplify_eq); try congruence.
+        intros; simplify_eq.
+        apply Forall2_nth_error1; auto.
+        - erewrite Forall2_length; eauto.
+        - intros * hx hy.
+          destruct_with_eqn (Nat.eqb idx (m1.(machine_curThreadId))); simplify_nats; subst.
+          + rewrite threadIdEq in *.
+            rewrite stepOkrr in *. option_simpl.
+            admit.
+          + admit.
+            (* eapply Forall2_nth_error2; eauto. *)
+            (* by (rewrite<-idleThreadsEq). *)
       Admitted.
+
+      Lemma InvariantStep (s: State) :
+        forall t,
+        Invariant s ->
+        MachineStep s t ->
+        Invariant t.
+      Proof.
+        cbv [Invariant SameDomainTrace]. intros * hinv hstep. destruct s. destruct t.
+        destruct_products.
+        split; auto.
+        - eapply GlobalInvariantStep; eauto.
+        - intros htr.
+          inversion hstep; subst.
+          + cbv [setMachineThread machine_threads].
+            apply hinvr. apply Forall_app in htr. intuition.
+          + apply Forall_app in htr. destruct htr as (htr_t0 & htr_ev).
+            eapply SameDomainStepOk; eauto with invariants.
+            by (inversion htr_ev).
+      Qed.
 
       Lemma InvariantUse (s: State) :
         Invariant s ->
@@ -992,7 +1270,7 @@ Module ThreadIsolatedMonotonicity.
     Proof.
       intros * hwf_config hinit_ok.
       econstructor.
-      - eapply InvariantInitial; eauto.
+      - eapply InvariantInitial. eauto.
       - eapply InvariantStep; eauto.
       - eapply InvariantUse; eauto.
     Qed.
