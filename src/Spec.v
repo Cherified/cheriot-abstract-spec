@@ -212,9 +212,8 @@ Section Machine.
          capAddrs           := loaded.(capAddrs);
          capKeepPerms       := AttenuatePermsIfNotSealed  sealed loadAuthCap.(capKeepPerms) loaded.(capKeepPerms);
          capKeepCanStore    := AttenuateLabelsIfNotSealed sealed loadAuthCap.(capKeepCanStore) loaded.(capKeepCanStore);
-         (* This is also a quirk of CHERIoT as in the case of restricting caps.
-            Ideally, no attenuation (implicit or explicit) must happen under a seal *)
-         capKeepCanBeStored := LabelIntersect loadAuthCap.(capKeepCanBeStored) loaded.(capKeepCanBeStored);
+         (* TODO: Double check this does not attenuate if sealed *)
+         capKeepCanBeStored := AttenuateLabelsIfNotSealed sealed loadAuthCap.(capKeepCanBeStored) loaded.(capKeepCanBeStored);
          capCursor          := loaded.(capCursor)
       |}.
 
@@ -262,8 +261,7 @@ Section Machine.
           restrictSealedAddrsEq: EqSet z.(capAddrs) y.(capAddrs);
           restrictSealedKeepPermsSubset: EqSet z.(capKeepPerms) y.(capKeepPerms);
           restrictSealedKeepCanStoreSubset: EqSet z.(capKeepCanStore) y.(capKeepCanStore);
-          (* Ditto above *)
-          restrictSealedKeepCanBeStoredSubset: Subset z.(capKeepCanBeStored) y.(capKeepCanBeStored);
+          restrictSealedKeepCanBeStoredSubset: EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored);
           restrictSealedCursorEq: z.(capCursor) = y.(capCursor) }.
 
       Definition Restrict : Prop :=
@@ -815,6 +813,30 @@ Tactic Notation "simplify_eq" := repeat
 Tactic Notation "inv" ident(H) :=
   inversion H; clear H; simplify_eq.
 
+Ltac simpl_match :=
+  let repl_match_goal d d' :=
+      replace d with d';
+      lazymatch goal with
+      | [ |- context[match d' with _ => _ end] ] => fail
+      | _ => idtac
+      end in
+  let repl_match_hyp H d d' :=
+      replace d with d' in H;
+      lazymatch type of H with
+      | context[match d' with _ => _ end] => fail
+      | _ => idtac
+      end in
+  match goal with
+  | [ Heq: ?d = ?d' |- context[match ?d with _ => _ end] ] =>
+      repl_match_goal d d'
+  | [ Heq: ?d' = ?d |- context[match ?d with _ => _ end] ] =>
+      repl_match_goal d d'
+  | [ Heq: ?d = ?d', H: context[match ?d with _ => _ end] |- _ ] =>
+      repl_match_hyp H d d'
+  | [ Heq: ?d' = ?d, H: context[match ?d with _ => _ end] |- _ ] =>
+      repl_match_hyp H d d'
+  end.
+
 Ltac destruct_products :=
   repeat match goal with
   | p: _ * _  |- _ => destruct p
@@ -1106,6 +1128,10 @@ Module Configuration.
     Notation StPermForAddr := (StPermForAddr bytesToCapUnsafe).
     Notation RegisterFile := (@RegisterFile Byte Key).
     Notation ThreadStep := (ThreadStep bytesToCapUnsafe fetchAddrs decode pccNotInBounds).
+    Notation LoadCap := (LoadCap bytesToCapUnsafe).
+    Notation CapOrBytes := (@CapOrBytes Byte Key).
+    (* TODO: decidable equality *)
+    Notation EqDecider f := (forall x y, BoolSpec (x = y) (x <> y) (f x y)).
 
     Definition ExportEntry : Type.
     Admitted.
@@ -1324,29 +1350,6 @@ Module Configuration.
         intros *. case_match; try congruence.
         rewrite andb_true_iff in *. destruct_products; auto.
       Qed.
-  Ltac simpl_match :=
-    let repl_match_goal d d' :=
-        replace d with d';
-        lazymatch goal with
-        | [ |- context[match d' with _ => _ end] ] => fail
-        | _ => idtac
-        end in
-    let repl_match_hyp H d d' :=
-        replace d with d' in H;
-        lazymatch type of H with
-        | context[match d' with _ => _ end] => fail
-        | _ => idtac
-        end in
-    match goal with
-    | [ Heq: ?d = ?d' |- context[match ?d with _ => _ end] ] =>
-        repl_match_goal d d'
-    | [ Heq: ?d' = ?d |- context[match ?d with _ => _ end] ] =>
-        repl_match_goal d d'
-    | [ Heq: ?d = ?d', H: context[match ?d with _ => _ end] |- _ ] =>
-        repl_match_hyp H d d'
-    | [ Heq: ?d' = ?d, H: context[match ?d with _ => _ end] |- _ ] =>
-        repl_match_hyp H d d'
-    end.
 Lemma SubsetFilter1:
   forall {A} (xs ys: list A) eqb,
   (forall p q, eqb p q = true -> p = q) ->
@@ -1372,7 +1375,6 @@ Qed.
              end.
         all: by (apply internal_Label_dec_bl || apply Perm.internal_t_dec_bl).
       Qed.
-
       Lemma generalInstOkCommon:
         forall userSt mem sysSt istatus userSt' mem' sysSt' istatus' generalInst,
           WfGeneralInst bytesToCapUnsafe generalInst ->
@@ -1506,6 +1508,45 @@ Qed.
         - constructor; cbv [setMachineThread machine_threads machine_curThreadId]; auto.
         - eapply SameThreadStepOk; eauto.
       Qed.
+
+      Section Helpers.
+        Context {Cap_eqb: Cap -> Cap -> bool}.
+        Context {Cap_eq_dec: EqDecider Cap_eqb}.
+        Context {CapOrBytes_eqb: CapOrBytes -> CapOrBytes -> bool}.
+        Context {CapOrBytes_eq_dec: EqDecider CapOrBytes_eqb}.
+
+        Lemma LoadCapUpdate:
+          forall mem mem' x y z caps,
+          ReachableCap mem caps x ->
+          LoadCap mem' x y z ->
+          ValidMemCapUpdate mem caps mem' ->
+          ReachableCap mem caps z.
+        Proof.
+          cbv [ValidMemCapUpdate].
+          intros * hauth hload hupdate.
+          inv hload. destruct_products.
+          specialize (hupdate capa). rewrite loadFromAuth0r in *.
+          destruct (CapOrBytes_eq_dec (readCap bytesToCapUnsafe mem0 capa) (inl y) ) as [Heq | Hneq].
+          - eapply StepLoadCap with (y := y); eauto.
+            constructor; eauto.
+          - propositional.
+            specialize hupdate with (1 := Hneq) (2 := eq_refl).
+            destruct_products.
+            eapply StepRestrict; eauto.
+            eapply AttenuateRestrict; eauto.
+        Qed.
+        Lemma LoadCapUpdate':
+          forall mem mem' x y z caps,
+          ReachableCap mem caps x ->
+          LoadCap mem' x y z ->
+          ValidMemUpdate mem caps mem' ->
+          ReachableCap mem caps z.
+        Proof.
+          cbv[ValidMemUpdate].
+          intros; eapply LoadCapUpdate; destruct_products; eauto.
+        Qed.
+      End Helpers.
+
     End Proofs.
   End __.
   Hint Resolve Inv_curThread : invariants.
@@ -1547,7 +1588,7 @@ Module ThreadIsolatedMonotonicity.
     Notation ValidMemDataUpdate := (ValidMemDataUpdate bytesToCapUnsafe).
     Notation StPermForCap := (StPermForCap bytesToCapUnsafe).
     Notation StPermForAddr := (StPermForAddr bytesToCapUnsafe).
-Notation LoadCap := (LoadCap bytesToCapUnsafe).
+    Notation LoadCap := (LoadCap bytesToCapUnsafe).
     Notation CapOrBytes := (@CapOrBytes Byte Key).
     (* TODO: decidable equality *)
     Notation EqDecider f := (forall x y, BoolSpec (x = y) (x <> y) (f x y)).
@@ -1555,7 +1596,6 @@ Notation LoadCap := (LoadCap bytesToCapUnsafe).
     Context {Cap_eq_dec: EqDecider Cap_eqb}.
     Context {CapOrBytes_eqb: CapOrBytes -> CapOrBytes -> bool}.
     Context {CapOrBytes_eq_dec: EqDecider CapOrBytes_eqb}.
-
 
     Definition SameDomainEvent (ev: Event) : Prop :=
       match ev with
@@ -1640,36 +1680,6 @@ Ltac simplify_invariants :=
       eapply GlobalInvariantImpliesValidRf with (1 := H) (2 := H1)
   end.
 
-Lemma LoadCapUpdate:
-  forall mem mem' x y z caps,
-  ReachableCap mem caps x ->
-  LoadCap mem' x y z ->
-  ValidMemCapUpdate mem caps mem' ->
-  ReachableCap mem caps z.
-Proof.
-  cbv [ValidMemCapUpdate].
-  intros * hauth hload hupdate.
-  inv hload. destruct_products.
-  specialize (hupdate capa). rewrite loadFromAuth0r in *.
-  destruct (CapOrBytes_eq_dec (readCap bytesToCapUnsafe mem0 capa) (inl y) ) as [Heq | Hneq].
-  - eapply StepLoadCap with (y := y); eauto.
-    constructor; eauto.
-  - propositional.
-    specialize hupdate with (1 := Hneq) (2 := eq_refl).
-    destruct_products.
-    eapply StepRestrict; eauto.
-    eapply AttenuateRestrict; eauto.
-Qed.
-Lemma LoadCapUpdate':
-  forall mem mem' x y z caps,
-  ReachableCap mem caps x ->
-  LoadCap mem' x y z ->
-  ValidMemUpdate mem caps mem' ->
-  ReachableCap mem caps z.
-Proof.
-  cbv[ValidMemUpdate].
-  intros; eapply LoadCapUpdate; destruct_products; eauto.
-Qed.
 Lemma ReachableCap_ValidUpdate:
   forall mem mem' caps caps' c,
   ReachableCap mem' caps' c ->
