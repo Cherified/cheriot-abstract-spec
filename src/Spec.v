@@ -77,6 +77,7 @@ Section Machine.
   Inductive Label :=
   | Local
   | NonLocal.
+  Scheme Equality for Label.
 
   (* Represents Call and Return sentries *)
   Inductive Sentry :=
@@ -184,6 +185,39 @@ Section Machine.
       | _ => false
       end.
 
+    Definition isSealed (c: Cap) :=
+      match c.(capSealed) with
+      | Some _ => true
+      | _ => false
+      end.
+
+    Notation PermIntersect perms1 perms2 := (filter (fun p => existsb (Perm.t_beq p) perms2) perms1).
+    Notation LabelIntersect labels1 labels2 := (filter (fun p => existsb (Label_beq p) labels2) labels1).
+
+    Definition AttenuatePermsIfNotSealed (sealed: bool) (perms1 perms2: list Perm.t) :=
+      if sealed then perms2
+      else PermIntersect perms1 perms2.
+    Definition AttenuateLabelsIfNotSealed (sealed: bool) (labels1 labels2: list Label) :=
+      if sealed then labels2
+      else LabelIntersect labels1 labels2.
+
+    Definition attenuate (loadAuthCap: Cap) (loaded: Cap) : Cap :=
+      let sealed := isSealed loaded in
+      {| capSealed          := loaded.(capSealed);
+         capPerms           := AttenuatePermsIfNotSealed  sealed loadAuthCap.(capKeepPerms) loaded.(capPerms);
+         capCanStore        := AttenuateLabelsIfNotSealed sealed loadAuthCap.(capKeepCanStore) loaded.(capKeepCanStore);
+         capCanBeStored     := AttenuateLabelsIfNotSealed sealed loadAuthCap.(capKeepCanBeStored) loaded.(capCanBeStored);
+         capSealingKeys     := loaded.(capSealingKeys);
+         capUnsealingKeys   := loaded.(capUnsealingKeys);
+         capAddrs           := loaded.(capAddrs);
+         capKeepPerms       := AttenuatePermsIfNotSealed  sealed loadAuthCap.(capKeepPerms) loaded.(capKeepPerms);
+         capKeepCanStore    := AttenuateLabelsIfNotSealed sealed loadAuthCap.(capKeepCanStore) loaded.(capKeepCanStore);
+         (* This is also a quirk of CHERIoT as in the case of restricting caps.
+            Ideally, no attenuation (implicit or explicit) must happen under a seal *)
+         capKeepCanBeStored := LabelIntersect loadAuthCap.(capKeepCanBeStored) loaded.(capKeepCanBeStored);
+         capCursor          := loaded.(capCursor)
+      |}.
+
   End CapHelpers.
 
   Section CurrMemory.
@@ -237,55 +271,14 @@ Section Machine.
         end.
 
       Variable x: Cap.
-      (* When a cap y is loaded using a cap x, then the attentuation of x comes into play to create z *)
-
-      Record NonRestrictEqs : Prop := {
-          nonRestrictAuthUnsealed: x.(capSealed) = None;
-          nonRestrictSealingKeysEq: EqSet z.(capSealingKeys) y.(capSealingKeys);
-          nonRestrictUnsealingKeysEq: EqSet z.(capUnsealingKeys) y.(capUnsealingKeys);
-          nonRestrictAddrsEq: EqSet z.(capAddrs) y.(capAddrs);
-          nonRestrictCursorEq: z.(capCursor) = y.(capCursor) }.
-
-      Record AttenuatePerms : Prop := {
-          attenuatePerms: forall p, In p z.(capPerms) -> (In p x.(capKeepPerms) /\ In p y.(capPerms));
-          attenuateKeepPerms: forall p, In p z.(capKeepPerms) ->
-                                        (In p x.(capKeepPerms) /\ In p y.(capKeepPerms)) }.
-
-      Record NonAttenuatePerms : Prop := {
-          nonAttenuatePerms: EqSet z.(capPerms) y.(capPerms);
-          nonAttenuateKeepPerms: EqSet z.(capKeepPerms) y.(capKeepPerms) }.
-
-      Record AttenuateCanStore : Prop := {
-          attenuateCanStore: forall p, In p z.(capCanStore) -> (In p x.(capKeepCanStore) /\ In p y.(capCanStore));
-          attenuateKeepCanStore: forall p, In p z.(capKeepCanStore) ->
-                                           (In p x.(capKeepCanStore) /\ In p y.(capKeepCanStore)) }.
-
-      Record NonAttenuateCanStore : Prop := {
-          nonAttenuateCanStore: EqSet z.(capCanStore) y.(capCanStore);
-          nonAttenuateKeepCanStore: EqSet z.(capKeepCanStore) y.(capKeepCanStore) }.
-
-      Record LoadCap : Prop := {
-          loadNonRestrictEqs: NonRestrictEqs;
+      Record LoadCap : Prop :=
+        { loadAuthUnsealed : x.(capSealed) = None;
           loadAuthPerm: In Perm.Load x.(capPerms) /\ In Perm.Cap x.(capPerms);
-          loadFromAuth: exists capa, Subset (seq (fromCapAddr capa) ISA_CAPSIZE_BYTES) x.(capAddrs) /\ readCap mem capa = inl y;
-          loadSealEq: z.(capSealed) = y.(capSealed);
-          loadAttenuatePerms: match y.(capSealed) with
-                              | None => AttenuatePerms
-                              | Some k => NonAttenuatePerms
-                              end;
-          loadAttenuateCanStore: match y.(capSealed) with
-                                 | None => AttenuateCanStore
-                                 | Some k => NonAttenuateCanStore
-                                 end;
-          (* This is also a quirk of CHERIoT as in the case of restricting caps.
-           Ideally, no attenuation (implicit or explicit) must happen under a seal *)
-          loadAttenuateCanBeStored: forall r, In r z.(capCanBeStored) ->
-                                              (In r x.(capKeepCanBeStored) /\ In r y.(capCanBeStored));
-          loadKeepCanBeStored: match y.(capSealed) with
-                               | None => forall r, In r z.(capKeepCanBeStored) ->
-                                                   (In r x.(capKeepCanBeStored) /\ In r y.(capKeepCanBeStored))
-                               | Some _ => EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored)
-                               end}.
+          loadFromAuth: exists capa, Subset (seq (fromCapAddr capa) ISA_CAPSIZE_BYTES) x.(capAddrs) /\
+                                readCap mem capa = inl y;
+          (* When a cap y is loaded using a cap x, then the attentuation of x comes into play to create z *)
+          loadAttenuate: z = attenuate x y
+        }.
 
       (* Cap z is the sealed version of cap y using a key in x *)
       Definition Seal : Prop :=
@@ -1492,6 +1485,8 @@ Module ThreadIsolatedMonotonicity.
     Notation ValidMemDataUpdate := (ValidMemDataUpdate bytesToCapUnsafe).
     Notation StPermForCap := (StPermForCap bytesToCapUnsafe).
     Notation StPermForAddr := (StPermForAddr bytesToCapUnsafe).
+    Notation LoadCap := (LoadCap bytesToCapUnsafe).
+
     Definition SameDomainEvent (ev: Event) : Prop :=
       match ev with
       | Ev_SwitchThreads _ => True
@@ -1504,22 +1499,24 @@ Module ThreadIsolatedMonotonicity.
       forall caps,
         ReachableCaps m_cur (capsOfThread t_cur) caps ->
         ReachableCaps m_init (capsOfThread t_init) caps.
-    Definition ReachableWriteAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
+
+    Definition ReachableRWAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
       exists p cs cbs ,
-        ReachableAddr mem caps a 1 p cs cbs /\ In Perm.Store p.
-    Definition WriteableAddressesDisjoint (mem: FullMemory) (c1 c2: list Cap) : Prop :=
+        ReachableAddr mem caps a 1 p cs cbs /\ (In Perm.Store p \/ In Perm.Load p).
+    Definition RWAddressesDisjoint (mem: FullMemory) (c1 c2: list Cap) : Prop :=
       forall a,
-        ReachableWriteAddr mem c1 a ->
-        ReachableWriteAddr mem c2 a ->
+        ReachableRWAddr mem c1 a ->
+        ReachableRWAddr mem c2 a ->
         False.
-    (* Threads only have write access to disjoint addresses. *)
-    Definition WriteIsolatedThreads (machine: Machine) : Prop :=
-      Pairwise (WriteableAddressesDisjoint machine.(machine_memory))
+
+    (* Threads only have read/write access to disjoint addresses. *)
+    Definition IsolatedThreads (machine: Machine) : Prop :=
+      Pairwise (RWAddressesDisjoint machine.(machine_memory))
                (map capsOfThread machine.(machine_threads)).
     (* TODO: write in terms of restrictions on the initial configuration. *)
     Definition ValidInitialMachine (config: Config) (st: Machine) : Prop :=
       ValidInitialState config st /\
-      WriteIsolatedThreads st.
+      IsolatedThreads st.
     Section WithConfig.
       Variable config: Config.
       Variable initialMachine: Machine.
@@ -1532,7 +1529,7 @@ Module ThreadIsolatedMonotonicity.
                 initialMachine.(machine_threads) machine.(machine_threads).
       Record Invariant' machine : Prop :=
         {
-          Inv_Isolation: WriteIsolatedThreads machine;
+          Inv_Isolation: IsolatedThreads machine;
           Inv_Monotonicity:
            Forall2 (ReachableCapSubset initialMachine.(machine_memory) machine.(machine_memory))
              initialMachine.(machine_threads) machine.(machine_threads)
@@ -1572,6 +1569,70 @@ Ltac simplify_invariants :=
     |- ValidRf (thread_rf (thread_userState ?thread)) =>
       eapply GlobalInvariantImpliesValidRf with (1 := H) (2 := H1)
   end.
+Lemma ReachableCap_ValidUpdate:
+  forall mem mem' caps caps' c,
+  ReachableCap mem' caps' c ->
+  ValidMemUpdate mem caps mem' ->
+  ReachableCaps mem caps caps' ->
+  ReachableCap mem caps c.
+Proof.
+  cbv [ReachableCaps].
+  induction 1; intros * hreach hcaps'; propositional.
+  - auto.
+  - eapply StepRestrict; eauto.
+  - eapply StepLoadCap with (x := x) (y := y); auto.
+
+Lemma LoadCapUnsafe:
+  forall mem mem' x y z caps,
+  LoadCap mem' x y z ->
+  ValidMemUpdate mem caps mem' ->
+  LoadCap mem x y z.
+Proof.
+  intros * hload hupdate.
+
+
+admit.
+  - eapply StepSeal with (3 := xyz); auto.
+  - eapply StepUnseal with (3 := xyz); auto.
+Admitted.
+
+      Lemma ReachableCaps_ValidUpdate:
+        forall mem mem' caps caps' cs,
+        ValidMemUpdate mem caps mem' ->
+        ReachableCaps mem caps caps' ->
+        ReachableCaps mem' caps' cs ->
+        ReachableCaps mem caps cs.
+      Proof.
+        cbv[ReachableCaps].
+        intros * hupdate hcaps hcaps' * hcaps0.
+        pose proof (hcaps' _ hcaps0) as hc'.
+        eapply ReachableCap_ValidUpdate; eauto.
+      Qed.
+
+      Lemma ReachableCapSubset_ValidUpdate:
+        forall mem0 mem mem' thread0 thread thread',
+        ReachableCapSubset mem0 mem thread0 thread ->
+        ValidMemUpdate mem (capsOfThread thread) mem' ->
+        ReachableCaps mem (capsOfThread thread) (capsOfThread thread') ->
+        ReachableCapSubset mem0 mem' thread0 thread'.
+      Proof.
+        cbv[ReachableCapSubset].
+        intros * hinit hmem hcaps.
+        pose proof (hinit _ hcaps) as hcaps0'.
+        intros * hcaps'.
+        specialize ReachableCaps_ValidUpdate with (1 := hmem) (2 := hcaps) (3 := hcaps'); auto.
+      Qed.
+
+      Lemma InvariantImpliesReachableCapSubset:
+        forall m thread thread' id,
+          Invariant' m ->
+          nth_error (machine_threads initialMachine) id = Some thread ->
+          nth_error (machine_threads m) id = Some thread' ->
+          ReachableCapSubset (machine_memory initialMachine) (machine_memory m) thread thread'.
+      Proof.
+        intros. eapply Forall2_nth_error2 with (1 := Inv_Monotonicity _ H); eauto.
+      Qed.
+
       Lemma SameDomainStepOk:
         forall m m' ev,
           GlobalInvariant config m ->
@@ -1592,12 +1653,11 @@ Ltac simplify_invariants :=
         intros; simplify_eq.
         specialize generalInstOkCommon with (1 := wf) (2 := H0); intros hok.
         assert_pre_and_specialize hok.
-        { simplify_invariants.
-}
+        { simplify_invariants. }
         cbn in hok. destruct_products.
 
-        assert (WriteIsolatedThreads m') as hisolated'.
-        { cbv [WriteIsolatedThreads].
+        assert (IsolatedThreads m') as hisolated'.
+        { cbv [IsolatedThreads].
           admit.
         }
         constructor; auto.
@@ -1607,12 +1667,10 @@ Ltac simplify_invariants :=
           destruct_with_eqn (Nat.eqb idx (m'.(machine_curThreadId))); simplify_nats; subst.
           + rewrite threadIdEq in *.
             rewrite stepOkrr in *. option_simpl.
-            (* Not too bad? *)
-  (* ReachableCapSubset (machine_memory initialMachine) (machine_memory m) x0 *)
-  (*   {| thread_userState := userSt; thread_systemState := sysSt |} *)
-
-  (*           cbv[ReachableCapSubset]. *)
-            admit.
+            assert (ReachableCapSubset (machine_memory initialMachine) (machine_memory m)
+                                       x thread) as hsubset0.
+            { eapply InvariantImpliesReachableCapSubset; eauto. }
+            eapply ReachableCapSubset_ValidUpdate with (mem := machine_memory m); cbv[capsOfThread]; eauto.
           + (* Separation *)
             admit.
       Admitted.
