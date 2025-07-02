@@ -905,8 +905,34 @@ Tactic Notation "destruct_or" "!" :=
 
 End OptionUtils.
 Ltac option_simpl :=
-  match goal with
+  repeat match goal with
   | H : Some ?x = Some _ |- _ => apply Some_inj in H; simplify_eq
+  | H : ?x = Some ?y, H1 : ?x = Some ?z |- _ => rewrite H in H1; apply Some_inj in H1; try subst y; try subst z
+  end.
+
+Ltac simplify_Result :=
+  repeat match goal with
+  | H: match ?x with | Ok _ => _ | Exn _ => False end |- _ =>
+      let Ht := fresh H "Ok" in
+      destruct x eqn:Ht; [ | contradiction]
+  end.
+Tactic Notation "split_and" :=
+  match goal with
+  | |- _/\ _ => split
+  end.
+Tactic Notation "split_and" "?" := repeat split_and.
+Tactic Notation "split_and" "!" := hnf; split_and; split_and?.
+Lemma Subset_app:
+  forall {A} (xs ys: list A),
+  Subset xs (xs ++ ys).
+Proof.
+  cbv[Subset].
+  intros. apply in_or_app. auto.
+Qed.
+Ltac simplify_Subset :=
+  repeat match goal with
+  | |- Subset ?x (?x ++ _) =>
+      apply Subset_app
   end.
 
 Section ListUtils.
@@ -942,7 +968,6 @@ Section ListUtils.
         intros; eapply H0 with (idx := S idx); auto.
   Qed.
 
-
   Lemma Forall2_nth_error2 : forall A B (R: A -> B -> Prop) xs ys,
       Forall2 R xs ys ->
       forall idx x y,
@@ -956,6 +981,23 @@ Section ListUtils.
         repeat match goal with
         | H: Some _ = Some _ |- _ => apply Some_inj in H; subst
         end; eauto.
+  Qed.
+
+  Lemma Forall2_nth_error2' : forall A B (R: A -> B -> Prop) xs ys idx,
+      Forall2 R xs ys ->
+      idx < length xs ->
+      exists x y,
+      nth_error xs idx = Some x /\
+      nth_error ys idx = Some y /\
+      R x y.
+  Proof.
+    intros.
+    destruct (nth_error xs idx) eqn:?.
+    destruct (nth_error ys idx) eqn:?.
+    - exists a; exists b; repeat split; auto.
+      eapply Forall2_nth_error2; eauto.
+    - apply nth_error_None in Heqo0. rewrite Forall2_length with (1 := H) in H0. lia.
+    - apply nth_error_None in Heqo. lia.
   Qed.
 
 End ListUtils.
@@ -981,7 +1023,7 @@ Qed.
 
 Lemma listUpdate_length:
   forall A (xs ys: list A) idx a,
-  (forall n, n <> idx -> nth_error xs n = nth_error ys n) ->
+  (forall n, n <> idx -> nth_error ys n = nth_error xs n) ->
   idx < length xs ->
   nth_error ys idx = Some a ->
   length xs = length ys.
@@ -992,22 +1034,43 @@ Proof.
   assert (length xs < length ys \/ length ys < length xs) as Hcase by lia.
   destruct_or! Hcase; exfalso.
   - rewrite<-nth_error_Some in Hcase.
-    rewrite<-herror in Hcase by lia.
+    rewrite herror in Hcase by lia.
     rewrite nth_error_Some in Hcase. lia.
   - destruct_with_eqn (Nat.ltb idx (length ys)).
     + rewrite PeanoNat.Nat.ltb_lt in *.
       rewrite<-nth_error_Some in Hcase.
-      rewrite herror in Hcase by lia.
+      rewrite<-herror in Hcase by lia.
       rewrite nth_error_Some in Hcase. lia.
     + rewrite PeanoNat.Nat.ltb_nlt in *.
       apply Some_not_None in hsome.
       apply nth_error_Some in hsome. lia.
 Qed.
 Create HintDb invariants.
+Set Nested Proofs Allowed.
+Import ListNotations.
+
+Ltac consider X :=
+  unfold X in *.
+Ltac simplify_Forall :=
+  repeat match goal with
+  | H : Forall _ (_ ++ _ ) |- _ =>
+      apply Forall_app in H;
+      let Hl := fresh H "l" in let Hr := fresh H "r" in destruct H as [Hl Hr]
+  | H : Forall _ [_] |- _ =>
+      apply Forall_one in H
+  end.
+Ltac propositional :=
+  repeat match goal with
+  | H1: ?x -> _, H2: ?x |- _ =>
+      specialize H1 with (1 := H2)
+  end.
+Ltac assert_pre_and_specialize H :=
+  match type of H with
+  | ?x -> _ => let Hx := fresh in assert x as Hx; [ | specialize H with (1 := Hx); clear Hx]
+  end.
 
 Module Configuration.
   Import Separation.
-  Import ListNotations.
 
   Section __.
     Context [ISA: ISA_params].
@@ -1026,7 +1089,20 @@ Module Configuration.
     Notation PCC := Cap (only parsing).
     Notation Thread := (@Thread Byte Key).
     Notation ReachableCaps := (@ReachableCaps ISA Byte Key bytesToCapUnsafe).
+    Notation ReachableAddr := (@ReachableAddr ISA Byte Key bytesToCapUnsafe).
+    Notation Trace := (@Trace Byte Key).
+    Notation State := (Machine * Trace)%type.
+    Notation Event := (@Event Byte Key).
+    Notation SameThreadStep := (SameThreadStep bytesToCapUnsafe fetchAddrs decode pccNotInBounds).
+    Notation ValidMemUpdate := (@ValidMemUpdate ISA Byte Key bytesToCapUnsafe).
+    Notation ReachableCap := (ReachableCap bytesToCapUnsafe).
+    Notation ValidMemCapUpdate := (ValidMemCapUpdate bytesToCapUnsafe).
+    Notation ValidMemTagRemoval := (ValidMemTagRemoval bytesToCapUnsafe).
+    Notation ValidMemDataUpdate := (ValidMemDataUpdate bytesToCapUnsafe).
+    Notation StPermForCap := (StPermForCap bytesToCapUnsafe).
+    Notation StPermForAddr := (StPermForAddr bytesToCapUnsafe).
     Notation RegisterFile := (@RegisterFile Byte Key).
+    Notation ThreadStep := (ThreadStep bytesToCapUnsafe fetchAddrs decode pccNotInBounds).
 
     Definition ExportEntry : Type.
     Admitted.
@@ -1077,7 +1153,10 @@ Module Configuration.
                                 WFSwitcher c
         (* WFConfig_importEntriesOk: ImportEntriesOk config *)
     }.
-    Definition ThreadInv (t: InitialThreadMetadata) (t: Thread) : Prop := True.
+    Record ThreadInv (t: InitialThreadMetadata) (t: Thread) : Prop :=
+    { Inv_validRf : ValidRf t.(thread_userState).(thread_rf)
+    }.
+
     Record GlobalInvariant (config: Config) (m: Machine) : Prop :=
     { Inv_curThread: m.(machine_curThreadId) < length m.(machine_threads)
     ; Inv_threads : Forall2 ThreadInv config.(configThreads) m.(machine_threads)
@@ -1090,7 +1169,7 @@ Module Configuration.
       }.
 
     Hint Resolve Inv_curThread : invariants.
-
+    Hint Resolve Inv_validRf: invariants.
     Section Proofs.
       Lemma InvariantInitial :
         forall config m,
@@ -1102,7 +1181,22 @@ Module Configuration.
         - apply hvalid.
         - apply ValidInit_invariant. auto.
       Qed.
-      Notation SameThreadStep := (SameThreadStep bytesToCapUnsafe fetchAddrs decode pccNotInBounds).
+
+      Lemma GlobalInvariantImpliesValidRf:
+        forall config m id thread,
+          GlobalInvariant config m ->
+          nth_error (machine_threads m) id = Some thread ->
+          ValidRf (thread_rf (thread_userState thread)).
+      Proof.
+        intros * hinv hthread.
+        apply Inv_threads in hinv.
+        destruct (nth_error (configThreads config) id) eqn:hconfig.
+        - apply Forall2_nth_error2 with (x := i) (y := thread) (idx := id) in hinv.
+          all: auto.
+          apply hinv.
+        - apply nth_error_None in hconfig. apply Forall2_length in hinv.
+          apply Some_not_None in hthread. apply nth_error_Some in hthread. lia.
+      Qed.
 
       Lemma SameThreadStep_lengthThreads:
         forall m1 m2 ev,
@@ -1113,8 +1207,7 @@ Module Configuration.
         intros * hlen hstep.
         inv hstep. destruct_products.
         eapply listUpdate_length; eauto.
-        - intros. symmetry; eauto.
-        - rewrite<-threadIdEq. eauto.
+        rewrite<-threadIdEq. eauto.
       Qed.
 
       Lemma SameThreadStep_curId:
@@ -1127,6 +1220,185 @@ Module Configuration.
         pose proof (SameThreadStep_lengthThreads _ _ _ hlen hstep) as hlen'.
         inv hstep; destruct_products.
         rewrite threadIdEq. lia.
+      Qed.
+      Lemma ReachableCapIncrease:
+        forall mem caps capss caps',
+          ReachableCap mem caps caps' ->
+          Subset caps capss ->
+          ReachableCap mem capss caps'.
+      Proof.
+        cbv[Subset].
+        induction 1; intros hsubset.
+        - apply Refl; auto.
+        - eapply StepRestrict; eauto.
+        - eapply StepLoadCap; eauto.
+        - apply StepSeal with (x := x) (y := y); auto.
+        - apply StepUnseal with (x := x) (y := y); auto.
+      Qed.
+      Lemma ReachableCaps_app:
+        forall mem c1 c2 cs,
+          ReachableCaps mem c1 c2 ->
+          ReachableCaps mem (c1 ++ cs) (c2 ++ cs).
+      Proof.
+        cbv[ReachableCaps].
+        intros * Hin * Hin2.
+        apply in_app_or in Hin2.
+        destruct_or! Hin2.
+        - eapply ReachableCapIncrease; eauto. apply Subset_app.
+        - constructor. apply in_app_iff; auto.
+      Qed.
+      Lemma StPermForAddrSubset:
+        forall mem caps caps' capa a size ,
+          StPermForAddr mem caps capa a size ->
+          Subset caps caps' ->
+          StPermForAddr mem caps' capa a size.
+      Proof.
+        cbv[StPermForAddr].
+        intros. destruct_products.
+        split_and!; auto.
+        eapply ReachableCapIncrease; eauto.
+      Qed.
+      Lemma StPermForCapSubset:
+        forall mem caps caps' addr capa,
+          StPermForCap mem caps addr capa ->
+          Subset caps caps' ->
+          StPermForCap mem caps' addr capa.
+      Proof.
+        cbv[StPermForCap].
+        intros. destruct_products.
+        eapply StPermForAddrSubset; eauto.
+      Qed.
+      Lemma ValidMemTagRemovalSubset:
+        forall mem mem' caps caps',
+          ValidMemTagRemoval mem caps mem' ->
+          Subset caps caps' ->
+          ValidMemTagRemoval mem caps' mem'.
+      Proof.
+        cbv[ValidMemTagRemoval].
+        intros. specialize H with (1 := H1) (2 := H2). destruct_products.
+        eexists. eapply StPermForCapSubset; eauto.
+      Qed.
+      Lemma ValidMemDataUpdateSubset:
+        forall mem mem' caps caps',
+          ValidMemDataUpdate mem caps mem' ->
+          Subset caps caps' ->
+          ValidMemDataUpdate mem caps' mem'.
+      Proof.
+        cbv[ValidMemDataUpdate].
+        intros. specialize H with (1 := H1). destruct_products.
+        eexists. eapply StPermForAddrSubset; eauto.
+      Qed.
+      Lemma ValidMemCapUpdateSubset:
+        forall mem mem' caps caps',
+          ValidMemCapUpdate mem caps mem' ->
+          Subset caps caps' ->
+          ValidMemCapUpdate mem caps' mem'.
+      Proof.
+        cbv[ValidMemCapUpdate].
+        intros * hupdate subset * hcap htag.
+        specialize hupdate with (1 := hcap) (2 := htag).
+        destruct_products. eexists; split; auto.
+        - eapply StPermForCapSubset; eauto.
+        - exists stDataCap. split_and!; eauto.
+          eapply ReachableCapIncrease; eauto.
+      Qed.
+      Lemma ValidMemUpdateSubset:
+        forall mem mem' caps caps',
+          ValidMemUpdate mem caps mem' ->
+          Subset caps caps' ->
+          ValidMemUpdate mem caps' mem'.
+      Proof.
+        cbv[ValidMemUpdate].
+        intros * hsubset hupdate. destruct_products.
+        split_and!; by (eapply ValidMemCapUpdateSubset || eapply ValidMemTagRemovalSubset || eapply ValidMemDataUpdateSubset).
+      Qed.
+
+      Lemma generalInstOkCommon:
+        forall userSt mem sysSt istatus userSt' mem' sysSt' istatus' generalInst,
+          WfGeneralInst bytesToCapUnsafe generalInst ->
+          generalInst (userSt, mem) (sysSt, istatus) = Ok (userSt', mem', (sysSt', istatus')) ->
+          ValidRf (thread_rf userSt) ->
+          let caps := (capsOfUserTS userSt ++ capsOfSystemTS sysSt) in
+          let caps' := (capsOfUserTS userSt' ++ capsOfSystemTS sysSt') in
+          ValidMemUpdate mem caps mem' /\
+            ReachableCaps mem caps caps' /\
+            In Perm.Exec (thread_pcc userSt).(capPerms) /\
+            In Perm.Exec (thread_pcc userSt').(capPerms) /\
+            ValidRf (thread_rf userSt').
+      Proof.
+        cbv[WfGeneralInst WfSystemInst WfNormalInst].
+        intros * [hwf_user hwf_sys] hinst hpre.
+        destruct (in_dec Perm.t_eq_dec Perm.System (capPerms (thread_pcc userSt)));
+          [ clear hwf_user; rename i into hmode| clear hwf_sys].
+        - specialize hwf_sys with (1 := hmode) (2 := hpre) (mem := mem0)
+                                  (mepcc := thread_mepcc sysSt) (exnInfo := thread_exceptionInfo sysSt)
+                                  (ts := thread_trustedStack sysSt) (ints := istatus).
+          setoid_rewrite hinst in hwf_sys. destruct_products. auto.
+        - cbv[capsOfUserTS capsOfSystemTS]. destruct_products.
+          specialize hwf_userl with (1 := hpre) (pcc := thread_pcc userSt) (mem := mem0).
+          specialize hwf_userr with (1 := n) (rf := thread_rf userSt) (mem := mem0) (sysCtx := (sysSt, istatus)).
+          destruct userSt. cbv [thread_rf thread_pcc] in *.
+          rewrite hinst in hwf_userr.
+          simplify_Result. destruct_products; simplify_eq.
+          split_and!; auto.
+          + eapply ValidMemUpdateSubset; eauto. simplify_Subset.
+          + apply ReachableCaps_app. auto.
+      Qed.
+
+      Lemma ValidRfUpdate:
+        forall rf rf' v idx,
+          @ValidRf ISA Byte Key rf ->
+          (forall n, n <> idx -> nth_error rf' n = nth_error rf n) ->
+          idx < length rf ->
+          nth_error rf' idx = Some v ->
+          ValidRf rf'.
+      Proof.
+        cbv[ValidRf]. intros * hrf hsame hlen hsome.
+        rewrite<-hrf. symmetry.
+        eapply listUpdate_length; eauto.
+      Qed.
+
+      Lemma callSentryOkCommon:
+        forall callSentryInst srcReg optLink userSt mem istatus pcc' rf' istatus',
+          WfCallSentryInst bytesToCapUnsafe callSentryInst srcReg optLink ->
+          callSentryInst (userSt, mem) istatus = Ok (pcc', rf', istatus') ->
+          ValidRf (thread_rf userSt) ->
+          ValidRf rf' /\
+          In Perm.Exec pcc'.(capPerms).
+      Proof.
+        cbv[WfCallSentryInst].
+        intros * hwf hinst hpre.
+        specialize hwf with (1 := hpre) (pcc := thread_pcc userSt) (ints := istatus) (mem := mem0).
+        setoid_rewrite hinst in hwf.
+        destruct_products. simplify_eq.
+        split; auto.
+        destruct optLink eqn:?; simplify_eq; auto.
+        destruct_products.
+        eapply ValidRfUpdate with (idx := n) (1 := hpre); eauto.
+        rewrite hpre. auto.
+      Qed.
+
+      Lemma ThreadStep_ThreadInv:
+        forall x thread mem istatus userSt' mem' sysSt' istatus' ev,
+        ThreadInv x thread ->
+        ThreadStep (thread_userState thread, mem, (thread_systemState thread, istatus))
+                   (userSt', mem', (sysSt', istatus'), ev) ->
+        ThreadInv x {| thread_userState := userSt'; thread_systemState := sysSt' |}.
+      Proof.
+        intros * hinv hstep.
+        inv hstep.
+        - constructor.
+          consider threadStepFunction; cbn.
+          repeat destruct_matches_in_hyp H0; cbv[exceptionState] in *; simplify_eq; cbn; cbv[rf uc sc fst snd ints] in *.
+          all: repeat match goal with
+                | H: WfGeneralInst _ ?generalInst,
+                  H1: ?generalInst _ _ = Ok _ |- ValidRf _ =>
+                    eapply generalInstOkCommon with (1 := H) (2 := H1); by (eauto with invariants)
+                | H: WfCallSentryInst _ ?callSentryInst _ _ ,
+                  H1: ?callSentryInst _ _ = Ok _ |- ValidRf _ =>
+                    eapply callSentryOkCommon with (1 := H) (2 := H1); by (eauto with invariants)
+                end; eauto with invariants.
+        - constructor; cbn. apply hinv.
       Qed.
 
       Lemma SameThreadStep_ThreadInv:
@@ -1142,7 +1414,15 @@ Module Configuration.
         apply Forall2_nth_error1.
         - apply Forall2_length in hinv. rewrite hinv.
           eapply SameThreadStep_lengthThreads; eauto.
-        - cbv[ThreadInv]. auto.
+        - intros * hconfig hthread.
+          pose proof hinv as hinv0.
+          eapply Forall2_nth_error2' with (idx := idx) in hinv.
+          2: { apply nth_error_Some. eapply Some_not_None; eauto. }
+          destruct_products. option_simpl.
+          rewrite threadIdEq in *.
+          destruct (PeanoNat.Nat.eq_dec idx (machine_curThreadId m1)); subst; option_simpl.
+          + eapply ThreadStep_ThreadInv; eauto.
+          + rewrite idleThreadsEq with (1 := n) in *. option_simpl. auto.
       Qed.
 
       Lemma SameThreadStepOk :
@@ -1157,7 +1437,6 @@ Module Configuration.
         - eapply SameThreadStep_curId; eauto.
         - eapply SameThreadStep_ThreadInv; eauto.
       Qed.
-
       Lemma GlobalInvariantStep :
         forall config s tr s' tr',
         GlobalInvariant config s ->
@@ -1171,14 +1450,10 @@ Module Configuration.
         - constructor; cbv [setMachineThread machine_threads machine_curThreadId]; auto.
         - eapply SameThreadStepOk; eauto.
       Qed.
-
     End Proofs.
   End __.
-
   Hint Resolve Inv_curThread : invariants.
-
 End Configuration.
-
 
 (* From a valid initial state where threads are in disjoint compartments, for
    any sequence of same-domain (Ev_General) steps, the reachable caps in each
@@ -1192,7 +1467,6 @@ Module ThreadIsolatedMonotonicity.
     Context [ISA: ISA_params].
     Context {Byte Key: Type}.
     Context {bytesToCapUnsafe: Bytes (Byte:=Byte) -> Spec.Cap (Key:=Key)}.
-
     Notation FullMemory := (@FullMemory Byte).
     Notation EXNInfo := (@EXNInfo Byte).
     Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
@@ -1218,7 +1492,6 @@ Module ThreadIsolatedMonotonicity.
     Notation ValidMemDataUpdate := (ValidMemDataUpdate bytesToCapUnsafe).
     Notation StPermForCap := (StPermForCap bytesToCapUnsafe).
     Notation StPermForAddr := (StPermForAddr bytesToCapUnsafe).
-
     Definition SameDomainEvent (ev: Event) : Prop :=
       match ev with
       | Ev_SwitchThreads _ => True
@@ -1227,44 +1500,36 @@ Module ThreadIsolatedMonotonicity.
       end.
     Definition SameDomainTrace (tr: Trace) : Prop :=
       Forall SameDomainEvent tr.
-
     Definition ReachableCapSubset (m_init m_cur: FullMemory) (t_init t_cur: Thread) : Prop :=
       forall caps,
         ReachableCaps m_cur (capsOfThread t_cur) caps ->
         ReachableCaps m_init (capsOfThread t_init) caps.
-
     Definition ReachableWriteAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
       exists p cs cbs ,
         ReachableAddr mem caps a 1 p cs cbs /\ In Perm.Store p.
-
     Definition WriteableAddressesDisjoint (mem: FullMemory) (c1 c2: list Cap) : Prop :=
       forall a,
         ReachableWriteAddr mem c1 a ->
         ReachableWriteAddr mem c2 a ->
         False.
-
     (* Threads only have write access to disjoint addresses. *)
     Definition WriteIsolatedThreads (machine: Machine) : Prop :=
       Pairwise (WriteableAddressesDisjoint machine.(machine_memory))
                (map capsOfThread machine.(machine_threads)).
-
     (* TODO: write in terms of restrictions on the initial configuration. *)
     Definition ValidInitialMachine (config: Config) (st: Machine) : Prop :=
       ValidInitialState config st /\
       WriteIsolatedThreads st.
-
     Section WithConfig.
       Variable config: Config.
       Variable initialMachine: Machine.
       Variable pfValidInitialMachine: ValidInitialMachine config initialMachine.
-
       (* A thread's caps are a subset of caps reachable from initial state. *)
       Definition PThreadIsolatedMonotonicity (st: State) : Prop :=
         let '(machine, tr) := st in
         SameDomainTrace tr ->
         Forall2 (ReachableCapSubset initialMachine.(machine_memory) machine.(machine_memory))
                 initialMachine.(machine_threads) machine.(machine_threads).
-
       Record Invariant' machine : Prop :=
         {
           Inv_Isolation: WriteIsolatedThreads machine;
@@ -1272,29 +1537,11 @@ Module ThreadIsolatedMonotonicity.
            Forall2 (ReachableCapSubset initialMachine.(machine_memory) machine.(machine_memory))
              initialMachine.(machine_threads) machine.(machine_threads)
         }.
-
       Definition Invariant (st: State) :=
         GlobalInvariant config (fst st) /\
         (SameDomainTrace (snd st) -> Invariant' (fst st)).
-
       Hint Resolve Inv_Monotonicity : invariants.
       Hint Resolve Inv_Isolation: invariants.
-Ltac simplify_Forall :=
-  repeat match goal with
-  | H : Forall _ (_ ++ _ ) |- _ =>
-      apply Forall_app in H;
-      let Hl := fresh H "l" in let Hr := fresh H "r" in destruct H as [Hl Hr]
-  | H : Forall _ [_] |- _ =>
-      apply Forall_one in H
-  end.
-Ltac propositional :=
-  repeat match goal with
-  | H1: ?x -> _, H2: ?x |- _ =>
-      specialize H1 with (1 := H2)
-  end.
-Ltac consider X :=
-  unfold X in *.
-
       Lemma InvariantInitial  :
         Invariant (initialMachine, []).
       Proof.
@@ -1307,7 +1554,6 @@ Ltac consider X :=
           + cbv [SameDomainTrace ReachableCapSubset ValidInitialMachine].
             apply Forall2_refl. auto.
       Qed.
-
       Lemma GlobalInvariant_length:
         forall m,
           GlobalInvariant config m ->
@@ -1319,161 +1565,13 @@ Ltac consider X :=
         apply Configuration.InvariantInitial in H. destruct H.
         apply Forall2_length in Inv_threads1. auto.
       Qed.
-Set Nested Proofs Allowed.
-Ltac simplify_Result :=
+Ltac simplify_invariants :=
   repeat match goal with
-  | H: match ?x with | Ok _ => _ | Exn _ => False end |- _ =>
-      let Ht := fresh H "Ok" in
-      destruct x eqn:Ht; [ | contradiction]
+  | H: GlobalInvariant _ ?m,
+    H1: nth_error (machine_threads ?m) _ = Some ?thread
+    |- ValidRf (thread_rf (thread_userState ?thread)) =>
+      eapply GlobalInvariantImpliesValidRf with (1 := H) (2 := H1)
   end.
-Tactic Notation "split_and" :=
-  match goal with
-  | |- _/\ _ => split
-  end.
-Tactic Notation "split_and" "?" := repeat split_and.
-Tactic Notation "split_and" "!" := hnf; split_and; split_and?.
-Lemma Subset_app:
-  forall {A} (xs ys: list A),
-  Subset xs (xs ++ ys).
-Proof.
-  cbv[Subset].
-  intros. apply in_or_app. auto.
-Qed.
-Ltac simplify_Subset :=
-  repeat match goal with
-  | |- Subset ?x (?x ++ _) =>
-      apply Subset_app
-  end.
-
-Lemma ReachableCapIncrease:
-  forall mem caps capss caps',
-  ReachableCap mem caps caps' ->
-  Subset caps capss ->
-  ReachableCap mem capss caps'.
-Proof.
-  cbv[Subset].
-  induction 1; intros hsubset.
-  - apply Refl; auto.
-  - eapply StepRestrict; eauto.
-  - eapply StepLoadCap; eauto.
-  - apply StepSeal with (x := x) (y := y); auto.
-  - apply StepUnseal with (x := x) (y := y); auto.
-Qed.
-
-Lemma ReachableCaps_app:
-  forall mem c1 c2 cs,
-  ReachableCaps mem c1 c2 ->
-  ReachableCaps mem (c1 ++ cs) (c2 ++ cs).
-Proof.
-  cbv[ReachableCaps].
-  intros * Hin * Hin2.
-  apply in_app_or in Hin2.
-  destruct_or! Hin2.
-  - eapply ReachableCapIncrease; eauto. apply Subset_app.
-  - constructor. apply in_app_iff; auto.
-Qed.
-Lemma StPermForAddrSubset:
-  forall mem caps caps' capa a size ,
-  StPermForAddr mem caps capa a size ->
-  Subset caps caps' ->
-  StPermForAddr mem caps' capa a size.
-Proof.
-  cbv[StPermForAddr].
-  intros. destruct_products.
-  split_and!; auto.
-  eapply ReachableCapIncrease; eauto.
-Qed.
-
-Lemma StPermForCapSubset:
-  forall mem caps caps' addr capa,
-  StPermForCap mem caps addr capa ->
-  Subset caps caps' ->
-  StPermForCap mem caps' addr capa.
-Proof.
-  cbv[StPermForCap].
-  intros. destruct_products.
-  eapply StPermForAddrSubset; eauto.
-Qed.
-
-Lemma ValidMemTagRemovalSubset:
-  forall mem mem' caps caps',
-  ValidMemTagRemoval mem caps mem' ->
-  Subset caps caps' ->
-  ValidMemTagRemoval mem caps' mem'.
-Proof.
-  cbv[ValidMemTagRemoval].
-  intros. specialize H with (1 := H1) (2 := H2). destruct_products.
-  eexists. eapply StPermForCapSubset; eauto.
-Qed.
-Lemma ValidMemDataUpdateSubset:
-  forall mem mem' caps caps',
-  ValidMemDataUpdate mem caps mem' ->
-  Subset caps caps' ->
-  ValidMemDataUpdate mem caps' mem'.
-Proof.
-  cbv[ValidMemDataUpdate].
-  intros. specialize H with (1 := H1). destruct_products.
-  eexists. eapply StPermForAddrSubset; eauto.
-Qed.
-
-Lemma ValidMemCapUpdateSubset:
-  forall mem mem' caps caps',
-  ValidMemCapUpdate mem caps mem' ->
-  Subset caps caps' ->
-  ValidMemCapUpdate mem caps' mem'.
-Proof.
-  cbv[ValidMemCapUpdate].
-  intros * hupdate subset * hcap htag.
-  specialize hupdate with (1 := hcap) (2 := htag).
-  destruct_products. eexists; split; auto.
-  - eapply StPermForCapSubset; eauto.
-  - exists stDataCap. split_and!; eauto.
-    eapply ReachableCapIncrease; eauto.
-Qed.
-
-Lemma ValidMemUpdateSubset:
-  forall mem mem' caps caps',
-  ValidMemUpdate mem caps mem' ->
-  Subset caps caps' ->
-  ValidMemUpdate mem caps' mem'.
-Proof.
-  cbv[ValidMemUpdate].
-  intros * hsubset hupdate. destruct_products.
-  split_and!; by (eapply ValidMemCapUpdateSubset || eapply ValidMemTagRemovalSubset || eapply ValidMemDataUpdateSubset).
-Qed.
-
-Lemma generalInstOkCommon:
-  forall userSt mem sysSt istatus userSt' mem' sysSt' istatus' generalInst,
-  WfGeneralInst bytesToCapUnsafe generalInst ->
-  generalInst (userSt, mem) (sysSt, istatus) = Ok (userSt', mem', (sysSt', istatus')) ->
-  ValidRf (thread_rf userSt) ->
-  let caps := (capsOfUserTS userSt ++ capsOfSystemTS sysSt) in
-  let caps' := (capsOfUserTS userSt' ++ capsOfSystemTS sysSt') in
-  ValidMemUpdate mem caps mem' /\
-  ReachableCaps mem caps caps' /\
-  In Perm.Exec (thread_pcc userSt).(capPerms) /\
-  In Perm.Exec (thread_pcc userSt').(capPerms) /\
-  ValidRf (thread_rf userSt').
-Proof.
-  cbv[WfGeneralInst WfSystemInst WfNormalInst].
-  intros * [hwf_user hwf_sys] hinst hpre.
-  destruct (in_dec Perm.t_eq_dec Perm.System (capPerms (thread_pcc userSt)));
-    [ clear hwf_user; rename i into hmode| clear hwf_sys].
-  - specialize hwf_sys with (1 := hmode) (2 := hpre) (mem := mem0)
-                            (mepcc := thread_mepcc sysSt) (exnInfo := thread_exceptionInfo sysSt)
-                            (ts := thread_trustedStack sysSt) (ints := istatus).
-    setoid_rewrite hinst in hwf_sys. destruct_products. auto.
-  - cbv[capsOfUserTS capsOfSystemTS]. destruct_products.
-    specialize hwf_userl with (1 := hpre) (pcc := thread_pcc userSt) (mem := mem0).
-    specialize hwf_userr with (1 := n) (rf := thread_rf userSt) (mem := mem0) (sysCtx := (sysSt, istatus)).
-    destruct userSt. cbv [thread_rf thread_pcc] in *.
-    rewrite hinst in hwf_userr.
-    simplify_Result. destruct_products; simplify_eq.
-    split_and!; auto.
-    + eapply ValidMemUpdateSubset; eauto. simplify_Subset.
-    + apply ReachableCaps_app. auto.
-Qed.
-
       Lemma SameDomainStepOk:
         forall m m' ev,
           GlobalInvariant config m ->
@@ -1492,11 +1590,16 @@ Qed.
         revert hstep. cbv [threadStepFunction exceptionState uc sc fst snd].
         repeat (case_match; simplify_eq); try congruence.
         intros; simplify_eq.
+        specialize generalInstOkCommon with (1 := wf) (2 := H0); intros hok.
+        assert_pre_and_specialize hok.
+        { simplify_invariants.
+}
+        cbn in hok. destruct_products.
 
         assert (WriteIsolatedThreads m') as hisolated'.
-        { cbv[WriteIsolatedThreads].
-
-admit. }
+        { cbv [WriteIsolatedThreads].
+          admit.
+        }
         constructor; auto.
         apply Forall2_nth_error1; auto.
         - apply GlobalInvariant_length. auto.
@@ -1504,39 +1607,15 @@ admit. }
           destruct_with_eqn (Nat.eqb idx (m'.(machine_curThreadId))); simplify_nats; subst.
           + rewrite threadIdEq in *.
             rewrite stepOkrr in *. option_simpl.
+            (* Not too bad? *)
+  (* ReachableCapSubset (machine_memory initialMachine) (machine_memory m) x0 *)
+  (*   {| thread_userState := userSt; thread_systemState := sysSt |} *)
+
+  (*           cbv[ReachableCapSubset]. *)
             admit.
-          + admit.
+          + (* Separation *)
+            admit.
       Admitted.
-
-      (* Lemma SameDomainStepOk: *)
-      (*   forall mem_init t_inits m1 m2 ev , *)
-      (*   machine_curThreadId m1 < length (machine_threads m1) -> *)
-      (*   Forall2 (ReachableCapSubset mem_init m1.(machine_memory)) t_inits (machine_threads m1) -> *)
-      (*   SameDomainEvent ev -> *)
-      (*   SameThreadStep m1 m2 ev -> *)
-      (*   Forall2 (ReachableCapSubset mem_init m2.(machine_memory)) t_inits (machine_threads m2). *)
-      (* Proof. *)
-      (*   cbv [SameDomainEvent]. *)
-      (*   intros * hlen hinit hev hstep. *)
-      (*   pose proof (SameThreadStep_lengthThreads _ _ _ hlen hstep) as Hlen. *)
-      (*   inv hstep. destruct_products. *)
-      (*   inv stepOkrl. rename H0 into hstep. *)
-      (*   revert hstep. cbv [threadStepFunction exceptionState uc sc fst snd]. *)
-      (*   repeat (case_match; simplify_eq); try congruence. *)
-      (*   intros; simplify_eq. *)
-      (*   apply Forall2_nth_error1; auto. *)
-      (*   - erewrite Forall2_length; eauto. *)
-      (*   - intros * hx hy. *)
-      (*     destruct_with_eqn (Nat.eqb idx (m1.(machine_curThreadId))); simplify_nats; subst. *)
-      (*     + rewrite threadIdEq in *. *)
-      (*       rewrite stepOkrr in *. option_simpl. *)
-      (*       admit. *)
-      (*     + *)
-
-      (*       admit. *)
-      (*       (* eapply Forall2_nth_error2; eauto. *) *)
-      (*       (* by (rewrite<-idleThreadsEq). *) *)
-      (* Admitted. *)
 
       Lemma InvariantStep (s: State) :
         forall t,
