@@ -205,7 +205,7 @@ Section Machine.
       let sealed := isSealed loaded in
       {| capSealed          := loaded.(capSealed);
          capPerms           := AttenuatePermsIfNotSealed  sealed loadAuthCap.(capKeepPerms) loaded.(capPerms);
-         capCanStore        := AttenuateLabelsIfNotSealed sealed loadAuthCap.(capKeepCanStore) loaded.(capKeepCanStore);
+         capCanStore        := AttenuateLabelsIfNotSealed sealed loadAuthCap.(capKeepCanStore) loaded.(capCanStore);
          capCanBeStored     := AttenuateLabelsIfNotSealed sealed loadAuthCap.(capKeepCanBeStored) loaded.(capCanBeStored);
          capSealingKeys     := loaded.(capSealingKeys);
          capUnsealingKeys   := loaded.(capUnsealingKeys);
@@ -224,6 +224,7 @@ Section Machine.
     Variable mem: FullMemory.
 
     Section CapStep.
+      Variable x: Cap.
       Variable y z: Cap.
 
       Definition SealEq := z.(capSealed) = y.(capSealed).
@@ -261,7 +262,8 @@ Section Machine.
           restrictSealedAddrsEq: EqSet z.(capAddrs) y.(capAddrs);
           restrictSealedKeepPermsSubset: EqSet z.(capKeepPerms) y.(capKeepPerms);
           restrictSealedKeepCanStoreSubset: EqSet z.(capKeepCanStore) y.(capKeepCanStore);
-          restrictSealedKeepCanBeStoredSubset: EqSet z.(capKeepCanBeStored) y.(capKeepCanBeStored);
+          (* Ditto above *)
+          restrictSealedKeepCanBeStoredSubset: Subset z.(capKeepCanBeStored) y.(capKeepCanBeStored);
           restrictSealedCursorEq: z.(capCursor) = y.(capCursor) }.
 
       Definition Restrict : Prop :=
@@ -270,7 +272,6 @@ Section Machine.
         | _ => RestrictSealed
         end.
 
-      Variable x: Cap.
       Record LoadCap : Prop :=
         { loadAuthUnsealed : x.(capSealed) = None;
           loadAuthPerm: In Perm.Load x.(capPerms) /\ In Perm.Cap x.(capPerms);
@@ -322,12 +323,13 @@ Section Machine.
           StPermForAddr auth (fromCapAddr capa) ISA_CAPSIZE_BYTES.
 
         Definition ValidMemCapUpdate :=
-          forall capa, readCap mem capa <> readCap mem' capa ->
-                          readTag mem' capa = true ->
-                          exists stAddrCap, StPermForCap stAddrCap capa
-                                            /\ exists stDataCap, ReachableCap stDataCap
-                                                                 /\ (exists l, In l stAddrCap.(capCanStore) /\
-                                                                                 In l stDataCap.(capCanBeStored)).
+          forall capa stDataCap, readCap mem capa <> readCap mem' capa ->
+                            readCap mem' capa = inl stDataCap ->
+                            ReachableCap stDataCap /\
+                            exists stAddrCap, StPermForCap stAddrCap capa
+                                         /\ (exists l, In l stAddrCap.(capCanStore) /\
+                                                 In l stDataCap.(capCanBeStored)
+                                           ).
 
         Definition ValidMemTagRemoval :=
           forall capa, readTag mem capa = true ->
@@ -922,10 +924,18 @@ Proof.
   cbv[Subset].
   intros. apply in_or_app. auto.
 Qed.
+Lemma Subset_refl :
+  forall {A} (xs: list A),
+  Subset xs xs.
+Proof.
+  cbv[Subset]. auto.
+Qed.
 Ltac simplify_Subset :=
   repeat match goal with
   | |- Subset ?x (?x ++ _) =>
       apply Subset_app
+  | |- Subset ?x ?x =>
+      apply Subset_refl
   end.
 
 Section ListUtils.
@@ -1290,10 +1300,10 @@ Module Configuration.
         cbv[ValidMemCapUpdate].
         intros * hupdate subset * hcap htag.
         specialize hupdate with (1 := hcap) (2 := htag).
-        destruct_products. eexists; split; auto.
-        - eapply StPermForCapSubset; eauto.
-        - exists stDataCap. split_and!; eauto.
-          eapply ReachableCapIncrease; eauto.
+        destruct_products. split; eauto.
+        - eapply ReachableCapIncrease; eauto.
+        - eexists; split; eauto.
+          eapply StPermForCapSubset; eauto.
       Qed.
       Lemma ValidMemUpdateSubset:
         forall mem mem' caps caps',
@@ -1304,6 +1314,63 @@ Module Configuration.
         cbv[ValidMemUpdate].
         intros * hsubset hupdate. destruct_products.
         split_and!; by (eapply ValidMemCapUpdateSubset || eapply ValidMemTagRemovalSubset || eapply ValidMemDataUpdateSubset).
+      Qed.
+      Lemma readCapImpliesTag:
+        forall mem capa cap,
+          readCap bytesToCapUnsafe mem capa = inl cap ->
+          readTag mem capa = true.
+      Proof.
+        cbv[readCap readTag readMemTagCap bytesToCap].
+        intros *. case_match; try congruence.
+        rewrite andb_true_iff in *. destruct_products; auto.
+      Qed.
+  Ltac simpl_match :=
+    let repl_match_goal d d' :=
+        replace d with d';
+        lazymatch goal with
+        | [ |- context[match d' with _ => _ end] ] => fail
+        | _ => idtac
+        end in
+    let repl_match_hyp H d d' :=
+        replace d with d' in H;
+        lazymatch type of H with
+        | context[match d' with _ => _ end] => fail
+        | _ => idtac
+        end in
+    match goal with
+    | [ Heq: ?d = ?d' |- context[match ?d with _ => _ end] ] =>
+        repl_match_goal d d'
+    | [ Heq: ?d' = ?d |- context[match ?d with _ => _ end] ] =>
+        repl_match_goal d d'
+    | [ Heq: ?d = ?d', H: context[match ?d with _ => _ end] |- _ ] =>
+        repl_match_hyp H d d'
+    | [ Heq: ?d' = ?d, H: context[match ?d with _ => _ end] |- _ ] =>
+        repl_match_hyp H d d'
+    end.
+Lemma SubsetFilter1:
+  forall {A} (xs ys: list A) eqb,
+  (forall p q, eqb p q = true -> p = q) ->
+  Subset (filter (fun p => existsb (eqb p) xs) ys) xs.
+Proof.
+  cbv[Subset]. intros * eqb *.
+  rewrite filter_In, existsb_exists.
+  intros; destruct_products; eauto.
+  apply eqb in Hrr. subst; auto.
+Qed.
+
+      Lemma AttenuateRestrict:
+        forall (x y: Cap),
+          Restrict y (attenuate x y).
+      Proof.
+        cbv [attenuate Restrict].
+        intros.
+        case_match; constructor; cbn; cbv[SealEq isSealed]; cbn; repeat simpl_match; cbn.
+        all: repeat match goal with
+             | |- EqSet ?x ?x => cbv[EqSet]; reflexivity
+             | |- Subset (filter _ _) _ => apply SubsetFilter1
+             | |- _ => progress (simplify_Subset || auto)
+             end.
+        all: by (apply internal_Label_dec_bl || apply Perm.internal_t_dec_bl).
       Qed.
 
       Lemma generalInstOkCommon:
@@ -1350,7 +1417,6 @@ Module Configuration.
         rewrite<-hrf. symmetry.
         eapply listUpdate_length; eauto.
       Qed.
-
       Lemma callSentryOkCommon:
         forall callSentryInst srcReg optLink userSt mem istatus pcc' rf' istatus',
           WfCallSentryInst bytesToCapUnsafe callSentryInst srcReg optLink ->
@@ -1370,7 +1436,6 @@ Module Configuration.
         eapply ValidRfUpdate with (idx := n) (1 := hpre); eauto.
         rewrite hpre. auto.
       Qed.
-
       Lemma ThreadStep_ThreadInv:
         forall x thread mem istatus userSt' mem' sysSt' istatus' ev,
         ThreadInv x thread ->
@@ -1393,7 +1458,6 @@ Module Configuration.
                 end; eauto with invariants.
         - constructor; cbn. apply hinv.
       Qed.
-
       Lemma SameThreadStep_ThreadInv:
         forall config m1 m2 ev,
           machine_curThreadId m1 < length (machine_threads m1) ->
@@ -1417,7 +1481,6 @@ Module Configuration.
           + eapply ThreadStep_ThreadInv; eauto.
           + rewrite idleThreadsEq with (1 := n) in *. option_simpl. auto.
       Qed.
-
       Lemma SameThreadStepOk :
         forall config s s' ev,
         GlobalInvariant config s ->
@@ -1447,7 +1510,6 @@ Module Configuration.
   End __.
   Hint Resolve Inv_curThread : invariants.
 End Configuration.
-
 (* From a valid initial state where threads are in disjoint compartments, for
    any sequence of same-domain (Ev_General) steps, the reachable caps in each
    thread do not increase.
@@ -1485,7 +1547,15 @@ Module ThreadIsolatedMonotonicity.
     Notation ValidMemDataUpdate := (ValidMemDataUpdate bytesToCapUnsafe).
     Notation StPermForCap := (StPermForCap bytesToCapUnsafe).
     Notation StPermForAddr := (StPermForAddr bytesToCapUnsafe).
-    Notation LoadCap := (LoadCap bytesToCapUnsafe).
+Notation LoadCap := (LoadCap bytesToCapUnsafe).
+    Notation CapOrBytes := (@CapOrBytes Byte Key).
+    (* TODO: decidable equality *)
+    Notation EqDecider f := (forall x y, BoolSpec (x = y) (x <> y) (f x y)).
+    Context {Cap_eqb: Cap -> Cap -> bool}.
+    Context {Cap_eq_dec: EqDecider Cap_eqb}.
+    Context {CapOrBytes_eqb: CapOrBytes -> CapOrBytes -> bool}.
+    Context {CapOrBytes_eq_dec: EqDecider CapOrBytes_eqb}.
+
 
     Definition SameDomainEvent (ev: Event) : Prop :=
       match ev with
@@ -1569,6 +1639,37 @@ Ltac simplify_invariants :=
     |- ValidRf (thread_rf (thread_userState ?thread)) =>
       eapply GlobalInvariantImpliesValidRf with (1 := H) (2 := H1)
   end.
+
+Lemma LoadCapUpdate:
+  forall mem mem' x y z caps,
+  ReachableCap mem caps x ->
+  LoadCap mem' x y z ->
+  ValidMemCapUpdate mem caps mem' ->
+  ReachableCap mem caps z.
+Proof.
+  cbv [ValidMemCapUpdate].
+  intros * hauth hload hupdate.
+  inv hload. destruct_products.
+  specialize (hupdate capa). rewrite loadFromAuth0r in *.
+  destruct (CapOrBytes_eq_dec (readCap bytesToCapUnsafe mem0 capa) (inl y) ) as [Heq | Hneq].
+  - eapply StepLoadCap with (y := y); eauto.
+    constructor; eauto.
+  - propositional.
+    specialize hupdate with (1 := Hneq) (2 := eq_refl).
+    destruct_products.
+    eapply StepRestrict; eauto.
+    eapply AttenuateRestrict; eauto.
+Qed.
+Lemma LoadCapUpdate':
+  forall mem mem' x y z caps,
+  ReachableCap mem caps x ->
+  LoadCap mem' x y z ->
+  ValidMemUpdate mem caps mem' ->
+  ReachableCap mem caps z.
+Proof.
+  cbv[ValidMemUpdate].
+  intros; eapply LoadCapUpdate; destruct_products; eauto.
+Qed.
 Lemma ReachableCap_ValidUpdate:
   forall mem mem' caps caps' c,
   ReachableCap mem' caps' c ->
@@ -1577,24 +1678,13 @@ Lemma ReachableCap_ValidUpdate:
   ReachableCap mem caps c.
 Proof.
   cbv [ReachableCaps].
-  induction 1; intros * hreach hcaps'; propositional.
+  induction 1; intros * hupdate hcaps'; propositional.
   - auto.
   - eapply StepRestrict; eauto.
-  - eapply StepLoadCap with (x := x) (y := y); auto.
-
-Lemma LoadCapUnsafe:
-  forall mem mem' x y z caps,
-  LoadCap mem' x y z ->
-  ValidMemUpdate mem caps mem' ->
-  LoadCap mem x y z.
-Proof.
-  intros * hload hupdate.
-
-
-admit.
+  - eapply LoadCapUpdate'; eauto.
   - eapply StepSeal with (3 := xyz); auto.
   - eapply StepUnseal with (3 := xyz); auto.
-Admitted.
+Qed.
 
       Lemma ReachableCaps_ValidUpdate:
         forall mem mem' caps caps' cs,
