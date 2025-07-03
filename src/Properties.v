@@ -2,352 +2,9 @@ From Stdlib Require Import List Lia Bool Nat NArith.
 Set Primitive Projections.
 From cheriot Require Import Spec.
 
-Module Combinators.
-  Section __.
-    Context [State : Type] (step: State -> State -> Prop).
-    Inductive always(P: State -> Prop)(initial: State): Prop :=
-    | mk_always
-        (invariant: State -> Prop)
-        (Establish: invariant initial)
-        (Preserve: forall s t, invariant s -> step s t -> invariant t)
-        (Use: forall s, invariant s -> P s).
-  End __.
-End Combinators.
-
-Module Separation.
-  Definition Disjoint {T: Type} (xs ys: list T) : Prop :=
-    forall t, In t xs -> In t ys -> False.
-
-  Definition Pairwise {T: Type} (P: T -> T -> Prop) (xss: list T) : Prop :=
-    forall i j xi xj,
-      i <> j ->
-      nth_error xss i = Some xi ->
-      nth_error xss j = Some xj ->
-      P xi xj.
-
-  Definition Separated {T: Type} (xss: list (list T)) : Prop :=
-    Pairwise Disjoint xss.
-
-End Separation.
-
-Lemma simple_tuple_inversion:
-  forall {A} {B} (a: A) (b: B) x y,
-  (a,b) = (x,y) ->
-  a = x /\ b = y.
-Proof.
-  intros. inversion H. auto.
-Qed.
-
-Tactic Notation "simplify_eq" := repeat
-  match goal with
-  | H : False |- _ => contradiction
-  | H : ?x = _ |- _ => subst x
-  | H: _ = ?x |- _ => subst x
-  | [ H: (_,_) = (_,_) |- _ ] =>
-    apply simple_tuple_inversion in H;
-    let Hl := fresh H "l" in let Hr := fresh H "r" in destruct H as [Hl Hr]
-  end.
-Tactic Notation "inv" ident(H) :=
-  inversion H; clear H; simplify_eq.
-
-Ltac simpl_match :=
-  let repl_match_goal d d' :=
-      replace d with d';
-      lazymatch goal with
-      | [ |- context[match d' with _ => _ end] ] => fail
-      | _ => idtac
-      end in
-  let repl_match_hyp H d d' :=
-      replace d with d' in H;
-      lazymatch type of H with
-      | context[match d' with _ => _ end] => fail
-      | _ => idtac
-      end in
-  match goal with
-  | [ Heq: ?d = ?d' |- context[match ?d with _ => _ end] ] =>
-      repl_match_goal d d'
-  | [ Heq: ?d' = ?d |- context[match ?d with _ => _ end] ] =>
-      repl_match_goal d d'
-  | [ Heq: ?d = ?d', H: context[match ?d with _ => _ end] |- _ ] =>
-      repl_match_hyp H d d'
-  | [ Heq: ?d' = ?d, H: context[match ?d with _ => _ end] |- _ ] =>
-      repl_match_hyp H d d'
-  end.
-
-Ltac destruct_products :=
-  repeat match goal with
-  | p: _ * _  |- _ => destruct p
-  | H: _ /\ _ |- _ => let Hl := fresh H "l" in let Hr := fresh H "r" in destruct H as [Hl Hr]
-  | E: exists y, _ |- _ => let yf := fresh y in destruct E as [yf E]
-  | H: context[let '(_,_) := ?x in _] |- _ =>
-    destruct x eqn:?
-  | |- context[let '(_,_) := ?x in _] =>
-    destruct x eqn:?
-  end.
-Ltac destruct_matches_in e :=
-  lazymatch e with
-  | context[match ?d with | _ => _ end] =>
-      destruct_matches_in d
-  | _ =>
-      destruct e eqn:?
-  end.
-
-Ltac destruct_matches_in_hyp H :=
-  lazymatch type of H with
-  | context[match ?d with | _ => _ end] =>
-      destruct_matches_in d
-  | ?v =>
-      let H1 := fresh H in
-      destruct v eqn:H1
-  end.
-Tactic Notation "case_match" "eqn" ":" ident(Hd) :=
-  match goal with
-  | H : context [ match ?x with _ => _ end ] |- _ => destruct x eqn:Hd
-  | |- context [ match ?x with _ => _ end ] => destruct x eqn:Hd
-  end.
-Ltac case_match :=
-  let H := fresh in case_match eqn:H.
-Ltac simplify_nats :=
-  match goal with
-  | H: Nat.eqb _ _ = true |- _ =>
-      rewrite PeanoNat.Nat.eqb_eq in H
-  | H: Nat.eqb _ _ = false |- _ =>
-      rewrite PeanoNat.Nat.eqb_neq in H
-  end.
-Ltac fast_done :=
-  solve
-    [ eassumption
-    | symmetry; eassumption
-    | reflexivity ].
-Tactic Notation "fast_by" tactic(tac) :=
-  tac; fast_done.
-Ltac done :=
-  solve
-  [ repeat first
-    [ fast_done
-    | solve [trivial]
-    | progress intros
-    | solve [symmetry; trivial]
-    | discriminate
-    | contradiction
-    | split
-    ]
-  ].
-Tactic Notation "by" tactic(tac) :=
-  tac; done.
-
-Section OptionUtils.
-  Lemma Some_inj :
-    forall A (x y:A),
-    Some x = Some y ->
-    x = y.
-  Proof.
-    intros. inversion H. auto.
-  Qed.
-Tactic Notation "destruct_or" "?" ident(H) :=
-  repeat match type of H with
-  | False => destruct H
-  | _ \/ _ => destruct H as [H|H]
-  end.
-Tactic Notation "destruct_or" "!" ident(H) := hnf in H; progress (destruct_or? H).
-
-Tactic Notation "destruct_or" "?" :=
-  repeat match goal with H : _ |- _ => progress (destruct_or? H) end.
-Tactic Notation "destruct_or" "!" :=
-  progress destruct_or?.
-
-End OptionUtils.
-Ltac option_simpl :=
-  repeat match goal with
-  | H : Some ?x = Some _ |- _ => apply Some_inj in H; simplify_eq
-  | H : ?x = Some ?y, H1 : ?x = Some ?z |- _ => rewrite H in H1; apply Some_inj in H1; try subst y; try subst z
-  | H : None = Some _ |- _ => clear - H; discriminate
-  | H : Some _ = None  |- _ => clear - H; discriminate
-  end.
-Lemma option_map_Some:
-  forall {A B} (f: A -> B) xs b,
-  option_map f xs = Some b ->
-  exists a, xs = Some a /\ f a = b.
-Proof.
-  cbv[option_map]. intros *. destruct xs; intuition option_simpl; eauto.
-Qed.
-
-Ltac simplify_Result :=
-  repeat match goal with
-  | H: match ?x with | Ok _ => _ | Exn _ => False end |- _ =>
-      let Ht := fresh H "Ok" in
-      destruct x eqn:Ht; [ | contradiction]
-  end.
-Tactic Notation "split_and" :=
-  match goal with
-  | |- _/\ _ => split
-  end.
-Tactic Notation "split_and" "?" := repeat split_and.
-Tactic Notation "split_and" "!" := hnf; split_and; split_and?.
-Lemma SubsetFilter1:
-  forall {A} (xs ys: list A) eqb,
-  (forall p q, eqb p q = true -> p = q) ->
-  Subset (filter (fun p => existsb (eqb p) xs) ys) xs.
-Proof.
-  cbv[Subset]. intros * eqb *.
-  rewrite filter_In, existsb_exists.
-  intros; destruct_products; eauto.
-  apply eqb in Hrr. subst; auto.
-Qed.
-
-Lemma Subset_app:
-  forall {A} (xs ys: list A),
-  Subset xs (xs ++ ys).
-Proof.
-  cbv[Subset].
-  intros. apply in_or_app. auto.
-Qed.
-Lemma Subset_refl :
-  forall {A} (xs: list A),
-  Subset xs xs.
-Proof.
-  cbv[Subset]. auto.
-Qed.
-Ltac simplify_Subset :=
-  repeat match goal with
-  | |- Subset ?x (?x ++ _) =>
-      apply Subset_app
-  | |- Subset ?x ?x =>
-      apply Subset_refl
-  end.
-
-Section ListUtils.
-  Import ListNotations.
-  Lemma Forall_one:
-    forall {T} (x: T) P,
-    Forall P [x] ->
-    P x.
-  Proof.
-    inversion 1. auto.
-  Qed.
-
-  Lemma Forall2_refl {A: Type} (R: A -> A -> Prop) :
-    forall xs,
-    (forall a, R a a) ->
-    Forall2 R xs xs.
-  Proof.
-    induction xs; auto.
-  Qed.
-  Lemma Forall2_nth_error1 : forall A B (R: A -> B -> Prop) xs ys,
-      length xs = length ys ->
-      (forall idx x y, nth_error xs idx = Some x ->
-                  nth_error ys idx = Some y ->
-                  R x y) ->
-      Forall2 R xs ys.
-  Proof.
-    induction xs.
-    - destruct ys; try discriminate; auto.
-    - destruct ys; try discriminate.
-      intros; constructor; eauto.
-      + eapply H0 with (idx := 0); eauto.
-      + eapply IHxs; eauto.
-        intros; eapply H0 with (idx := S idx); auto.
-  Qed.
-
-  Lemma Forall2_nth_error2 : forall A B (R: A -> B -> Prop) xs ys,
-      Forall2 R xs ys ->
-      forall idx x y,
-      nth_error xs idx = Some x ->
-      nth_error ys idx = Some y ->
-      R x y.
-  Proof.
-    induction 1.
-    - intros *; rewrite nth_error_nil. discriminate.
-    - destruct idx; cbn; intros;
-        repeat match goal with
-        | H: Some _ = Some _ |- _ => apply Some_inj in H; subst
-        end; eauto.
-  Qed.
-
-  Lemma Forall2_nth_error2' : forall A B (R: A -> B -> Prop) xs ys idx,
-      Forall2 R xs ys ->
-      idx < length xs ->
-      exists x y,
-      nth_error xs idx = Some x /\
-      nth_error ys idx = Some y /\
-      R x y.
-  Proof.
-    intros.
-    destruct (nth_error xs idx) eqn:?.
-    destruct (nth_error ys idx) eqn:?.
-    - exists a; exists b; repeat split; auto.
-      eapply Forall2_nth_error2; eauto.
-    - apply nth_error_None in Heqo0. rewrite Forall2_length with (1 := H) in H0. lia.
-    - apply nth_error_None in Heqo. lia.
-  Qed.
-
-End ListUtils.
-
-Tactic Notation "destruct_or" "?" ident(H) :=
-  repeat match type of H with
-  | False => destruct H
-  | _ \/ _ => destruct H as [H|H]
-  end.
-Tactic Notation "destruct_or" "!" ident(H) := hnf in H; progress (destruct_or? H).
-
-Tactic Notation "destruct_or" "?" :=
-  repeat match goal with H : _ |- _ => progress (destruct_or? H) end.
-Tactic Notation "destruct_or" "!" :=
-  progress destruct_or?.
-Lemma Some_not_None :
-  forall A (a: A) x,
-  x = Some a ->
-  x <> None.
-Proof.
-  destruct x; congruence.
-Qed.
-
-Lemma listUpdate_length:
-  forall A (xs ys: list A) idx a,
-  (forall n, n <> idx -> nth_error ys n = nth_error xs n) ->
-  idx < length xs ->
-  nth_error ys idx = Some a ->
-  length xs = length ys.
-Proof.
-  intros * herror hlen hsome.
-  destruct_with_eqn (Nat.eqb (length xs) (length ys)); simplify_nats; auto.
-  exfalso.
-  assert (length xs < length ys \/ length ys < length xs) as Hcase by lia.
-  destruct_or! Hcase; exfalso.
-  - rewrite<-nth_error_Some in Hcase.
-    rewrite herror in Hcase by lia.
-    rewrite nth_error_Some in Hcase. lia.
-  - destruct_with_eqn (Nat.ltb idx (length ys)).
-    + rewrite PeanoNat.Nat.ltb_lt in *.
-      rewrite<-nth_error_Some in Hcase.
-      rewrite<-herror in Hcase by lia.
-      rewrite nth_error_Some in Hcase. lia.
-    + rewrite PeanoNat.Nat.ltb_nlt in *.
-      apply Some_not_None in hsome.
-      apply nth_error_Some in hsome. lia.
-Qed.
 Create HintDb invariants.
 Import ListNotations.
 
-Ltac consider X :=
-  unfold X in *.
-Ltac simplify_Forall :=
-  repeat match goal with
-  | H : Forall _ (_ ++ _ ) |- _ =>
-      apply Forall_app in H;
-      let Hl := fresh H "l" in let Hr := fresh H "r" in destruct H as [Hl Hr]
-  | H : Forall _ [_] |- _ =>
-      apply Forall_one in H
-  end.
-Ltac propositional :=
-  repeat match goal with
-  | H1: ?x -> _, H2: ?x |- _ =>
-      specialize H1 with (1 := H2)
-  end.
-Ltac assert_pre_and_specialize H :=
-  match type of H with
-  | ?x -> _ => let Hx := fresh in assert x as Hx; [ | specialize H with (1 := Hx); clear Hx]
-  end.
 Set Nested Proofs Allowed.
 
 Module Configuration.
@@ -413,8 +70,8 @@ Module Configuration.
         cbv [ValidMemCapUpdate].
         intros * hauth hload hupdate.
         inv hload. destruct_products.
-        specialize (hupdate capa). rewrite loadFromAuth0r in *.
-        destruct (CapOrBytes_eq_dec (readCap mem0 capa) (inl y) ) as [Heq | Hneq].
+        specialize (hupdate capa). rewrite loadFromAuthr in *.
+        destruct (CapOrBytes_eq_dec (readCap mem capa) (inl y) ) as [Heq | Hneq].
         - eapply StepLoadCap with (y := y); eauto.
           constructor; eauto.
         - propositional.
@@ -558,10 +215,10 @@ Module Configuration.
         inv hload. destruct_products. constructor; eauto.
         eexists; split; eauto.
         unfold ValidMemCapUpdate in *.
-        specialize hupdate with (capa := capa) (stDataCap := y) (2 := loadFromAuth0r).
-        destruct (CapOrBytes_eq_dec (readCap mem0 capa) (inl y) ) as [Heq | Hneq]; auto.
+        specialize hupdate with (capa := capa) (stDataCap := y) (2 := loadFromAuthr).
+        destruct (CapOrBytes_eq_dec (readCap mem capa) (inl y) ) as [Heq | Hneq]; auto.
         exfalso.
-        rewrite loadFromAuth0r in *. propositional.
+        rewrite loadFromAuthr in *. propositional.
         destruct_products.
         consider StPermForCap. consider StPermForAddr. destruct_products.
         pose proof ISA_CAPSIZE_BYTES_NONZERO.
@@ -584,7 +241,7 @@ Module Configuration.
         - apply Refl; auto.
         - eapply StepRestrict; eauto.
         - eapply StepLoadCap; eauto.
-          eapply LoadCapUpdateDisjointUnchanged with (mem' := mem') (mem := mem0); eauto.
+          eapply LoadCapUpdateDisjointUnchanged with (mem' := mem') (mem := mem); eauto.
         - eapply StepSeal with (3:= xyz); auto.
         - eapply StepUnseal with (3:= xyz); auto.
       Qed.
@@ -919,14 +576,14 @@ Module Configuration.
         intros * [hwf_user hwf_sys] hinst hpre.
         destruct (in_dec Perm.t_eq_dec Perm.System (capPerms (thread_pcc userSt)));
           [ clear hwf_user; rename i into hmode| clear hwf_sys].
-        - specialize hwf_sys with (1 := hmode) (2 := hpre) (mem := mem0)
+        - specialize hwf_sys with (1 := hmode) (2 := hpre) (mem := mem)
                                   (mepcc := thread_mepcc sysSt) (exnInfo := thread_exceptionInfo sysSt)
                                   (ts := thread_trustedStack sysSt) (ints := istatus).
           setoid_rewrite hinst in hwf_sys. destruct_products. auto.
         - cbv[capsOfUserTS capsOfSystemTS]. destruct_products.
-          specialize hwf_userl with (1 := hpre) (pcc := thread_pcc userSt) (mem := mem0).
-          specialize hwf_userr with (1 := n) (rf := thread_rf userSt) (mem := mem0) (sysCtx := (sysSt, istatus)).
-          destruct userSt. cbv [thread_rf thread_pcc] in *.
+          specialize hwf_userl with (1 := hpre) (pcc := thread_pcc userSt) (mem := mem).
+          specialize hwf_userr with (1 := n) (rf := thread_rf userSt) (mem := mem) (sysCtx := (sysSt, istatus)).
+          destruct userSt. cbv [Spec.thread_rf Spec.thread_pcc] in *.
           rewrite hinst in hwf_userr.
           simplify_Result. destruct_products; simplify_eq.
           split_and!; auto.
@@ -956,7 +613,7 @@ Module Configuration.
       Proof.
         cbv[WfCallSentryInst].
         intros * hwf hinst hpre.
-        specialize hwf with (1 := hpre) (pcc := thread_pcc userSt) (ints := istatus) (mem := mem0).
+        specialize hwf with (1 := hpre) (pcc := thread_pcc userSt) (ints := istatus) (mem := mem).
         setoid_rewrite hinst in hwf.
         destruct_products. simplify_eq.
         split; auto.
@@ -1140,13 +797,14 @@ Module ThreadIsolatedMonotonicity.
         apply Configuration.InvariantInitial in H. destruct H.
         apply Forall2_length in Inv_threads1. auto.
       Qed.
-Ltac simplify_invariants :=
-  repeat match goal with
-  | H: GlobalInvariant _ ?m,
-    H1: nth_error (machine_threads ?m) _ = Some ?thread
-    |- ValidRf (thread_rf (thread_userState ?thread)) =>
-      eapply GlobalInvariantImpliesValidRf with (1 := H) (2 := H1)
-  end.
+
+      Ltac simplify_invariants :=
+        repeat match goal with
+          | H: GlobalInvariant _ ?m,
+              H1: nth_error (machine_threads ?m) _ = Some ?thread
+            |- ValidRf (thread_rf (thread_userState ?thread)) =>
+              eapply GlobalInvariantImpliesValidRf with (1 := H) (2 := H1)
+          end.
 
 
       Lemma ReachableCapSubset_ValidUpdate:
@@ -1216,7 +874,7 @@ Proof.
   eapply hdisjoint.
   - eapply ReachableRWAddr_ValidUpdate with (3 := hreachable) (2 := hmem); eauto.
   - unfold ValidMemUpdate in *. destruct_products.
-    eapply ReachableRWAddrDisjointUnchanged with (mem := mem0) (mem' := mem') (t:= xj); eauto.
+    eapply ReachableRWAddrDisjointUnchanged with (mem := mem) (mem' := mem') (t:= xj); eauto.
     eapply RWAddressesDisjointImpliesWriteReadDisjoint; eauto.
 Qed.
 
@@ -1231,18 +889,14 @@ Proof.
   cbv[ValidMemUpdate].
   intros * hmem hdisjointij hdisjointik hdisjointjk. destruct_products.
   intros a hcapi hcapj.
-  eapply ReachableRWAddrDisjointUnchanged with (mem := mem0) (mem' := mem') (t:= xj) in hcapj; eauto.
-  eapply ReachableRWAddrDisjointUnchanged with (mem := mem0) (mem' := mem') (t:= xi) in hcapi; eauto.
+  eapply ReachableRWAddrDisjointUnchanged with (mem := mem) (mem' := mem') (t:= xj) in hcapj; eauto.
+  eapply ReachableRWAddrDisjointUnchanged with (mem := mem) (mem' := mem') (t:= xi) in hcapi; eauto.
   all: rewrite RWAddressDisjointUpdate_symmetry in *;
        try solve[eapply RWAddressesDisjointImpliesWriteReadDisjoint; eauto].
 Qed.
 
 
 
-  Ltac rewrite_solve :=
-    match goal with
-    | [ H: _ |- _ ] => solve[rewrite H; try congruence; auto]
-    end.
 
 
       Lemma SameDomainStepOk:

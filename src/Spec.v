@@ -716,16 +716,16 @@ Section Machine.
               match callSentryInst uc ints with
               | Ok (pcc', rf', ints') =>
                    (((Build_UserThreadState rf' pcc', mem), (sts, ints')), Ev_Call pcc' rf' ints')
-              | Exn e => (exceptionState e)
+              | Exn e => exceptionState e
               end
           | Inst_Ret srcReg retSentryInst wf =>
               match retSentryInst uc with
               | Ok (pcc', ints') =>
                   (((Build_UserThreadState rf pcc', mem), (sts, ints')), Ev_Ret pcc' rf ints')
-              | Exn e => (exceptionState e)
+              | Exn e => exceptionState e
               end
           | Inst_Exn exnInst wf =>
-              (exceptionState (exnInst uc))
+              exceptionState (exnInst uc)
           end.
 
         Definition fetchAddrsInBounds := Subset (fetchAddrs mem pcc.(capCursor)) pcc.(capAddrs)
