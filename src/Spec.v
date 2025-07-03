@@ -925,7 +925,16 @@ Ltac option_simpl :=
   repeat match goal with
   | H : Some ?x = Some _ |- _ => apply Some_inj in H; simplify_eq
   | H : ?x = Some ?y, H1 : ?x = Some ?z |- _ => rewrite H in H1; apply Some_inj in H1; try subst y; try subst z
+  | H : None = Some _ |- _ => clear - H; discriminate
+  | H : Some _ = None  |- _ => clear - H; discriminate
   end.
+Lemma option_map_Some:
+  forall {A B} (f: A -> B) xs b,
+  option_map f xs = Some b ->
+  exists a, xs = Some a /\ f a = b.
+Proof.
+  cbv[option_map]. intros *. destruct xs; intuition option_simpl; eauto.
+Qed.
 
 Ltac simplify_Result :=
   repeat match goal with
@@ -1889,6 +1898,35 @@ Proof.
   apply RWDisjointImpliesWriteReadDisjoint.
   eapply hisolated; eauto; by (apply map_nth_error).
 Qed.
+Lemma RWAddressDisjointUpdate_symmetry:
+  forall mem xi xj,
+  RWAddressesDisjoint mem xi xj <->
+  RWAddressesDisjoint mem xj xi.
+Proof.
+  cbv[RWAddressesDisjoint].
+  intuition eauto.
+Qed.
+
+Lemma RWAddressDisjointUpdate:
+  forall mem mem' xi xi' xj,
+  ValidMemUpdate mem xi mem' ->
+  ReachableCaps mem xi xi' ->
+  RWAddressesDisjoint mem xi xj ->
+  RWAddressesDisjoint mem' xi' xj.
+Admitted.
+
+Lemma RWAddressDisjointUpdateUnchanged:
+  forall mem mem' xi xj xk,
+  ValidMemUpdate mem xk mem' ->
+  RWAddressesDisjoint mem xi xk ->
+  RWAddressesDisjoint mem xj xk ->
+  RWAddressesDisjoint mem' xi xj.
+Admitted.
+  Ltac rewrite_solve :=
+    match goal with
+    | [ H: _ |- _ ] => solve[rewrite H; try congruence; auto]
+    end.
+
 
       Lemma SameDomainStepOk:
         forall m m' ev,
@@ -1913,16 +1951,36 @@ Qed.
         { simplify_invariants. }
         cbn in hok. destruct_products.
 
-        (* assert (IsolatedThreads m') as hisolated'. *)
-        (* { cbv [IsolatedThreads]. *)
-        (*   admit. *)
-        (* } *)
         constructor; auto.
-        { admit. }
+        { cbv[IsolatedThreads Pairwise].
+          intros * neq capsi capsj.
+          rewrite nth_error_map in *;
+          repeat match goal with
+          | H: option_map _ _ = Some _ |- _ =>
+              apply option_map_Some in H; destruct_products; subst
+          end.
+          destruct (PeanoNat.Nat.eq_dec i (m'.(machine_curThreadId)));
+          destruct (PeanoNat.Nat.eq_dec j (m'.(machine_curThreadId)));
+            try lia; subst;
+            rewrite idleThreadsEq in * by lia;
+            rewrite threadIdEq in *; option_simpl.
+          - eapply RWAddressDisjointUpdate with (mem := machine_memory m); eauto.
+            eapply Inv_Isolation with (i := machine_curThreadId m) (j := j); try lia; auto;
+              erewrite map_nth_error; eauto; auto.
+          - apply RWAddressDisjointUpdate_symmetry.
+            eapply RWAddressDisjointUpdate with (mem := machine_memory m); eauto.
+            eapply Inv_Isolation with (i := machine_curThreadId m) (j := i); try lia; auto;
+              erewrite map_nth_error; eauto; auto.
+          - eapply RWAddressDisjointUpdateUnchanged; eauto.
+            eapply Inv_Isolation with (i := i) (j := machine_curThreadId m); try lia; auto;
+              erewrite map_nth_error; try reflexivity; auto.
+            eapply Inv_Isolation with (i := j) (j := machine_curThreadId m); try lia; auto;
+              erewrite map_nth_error; try reflexivity; auto.
+        }
         apply Forall2_nth_error1; auto.
         - apply GlobalInvariant_length. auto.
         - intros * hx hy.
-          destruct_with_eqn (Nat.eqb idx (m'.(machine_curThreadId))); simplify_nats; subst.
+          destruct (PeanoNat.Nat.eq_dec idx (m'.(machine_curThreadId))); subst.
           + rewrite threadIdEq in *.
             rewrite stepOkrr in *. option_simpl.
             assert (ThreadReachableCapSubset (machine_memory initialMachine) (machine_memory m)
@@ -1939,7 +1997,7 @@ Qed.
 
             eapply IsolatedImpliesWriteReadDisjoint with (m := m) (j := idx) (i := machine_curThreadId m);
               auto with invariants; lia.
-      Admitted.
+      Qed.
 
       Lemma InvariantStep (s: State) :
         forall t,
