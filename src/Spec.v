@@ -939,6 +939,17 @@ Tactic Notation "split_and" :=
   end.
 Tactic Notation "split_and" "?" := repeat split_and.
 Tactic Notation "split_and" "!" := hnf; split_and; split_and?.
+Lemma SubsetFilter1:
+  forall {A} (xs ys: list A) eqb,
+  (forall p q, eqb p q = true -> p = q) ->
+  Subset (filter (fun p => existsb (eqb p) xs) ys) xs.
+Proof.
+  cbv[Subset]. intros * eqb *.
+  rewrite filter_In, existsb_exists.
+  intros; destruct_products; eauto.
+  apply eqb in Hrr. subst; auto.
+Qed.
+
 Lemma Subset_app:
   forall {A} (xs ys: list A),
   Subset xs (xs ++ ys).
@@ -1071,7 +1082,6 @@ Proof.
       apply nth_error_Some in hsome. lia.
 Qed.
 Create HintDb invariants.
-Set Nested Proofs Allowed.
 Import ListNotations.
 
 Ltac consider X :=
@@ -1093,6 +1103,7 @@ Ltac assert_pre_and_specialize H :=
   match type of H with
   | ?x -> _ => let Hx := fresh in assert x as Hx; [ | specialize H with (1 := Hx); clear Hx]
   end.
+Set Nested Proofs Allowed.
 
 Module Configuration.
   Import Separation.
@@ -1101,43 +1112,296 @@ Module Configuration.
     Context [ISA: ISA_params].
     Context {Byte Key: Type}.
     Context {bytesToCapUnsafe: Bytes (Byte:=Byte) -> Spec.Cap (Key:=Key)}.
-
     Notation FullMemory := (@FullMemory Byte).
     Notation EXNInfo := (@EXNInfo Byte).
+    Notation Cap := (@Cap Key).
+    Notation CapOrBytes := (@CapOrBytes Byte Key).
+    Notation ReachableCaps := (ReachableCaps bytesToCapUnsafe).
+    Notation ReachableCap := (ReachableCap bytesToCapUnsafe).
+    Notation LoadCap := (LoadCap bytesToCapUnsafe).
+    Notation ValidMemCapUpdate := (ValidMemCapUpdate bytesToCapUnsafe).
+    Notation ValidMemTagRemoval := (ValidMemTagRemoval bytesToCapUnsafe).
+    Notation ValidMemDataUpdate := (ValidMemDataUpdate bytesToCapUnsafe).
+    Notation ValidMemUpdate := (@ValidMemUpdate ISA Byte Key bytesToCapUnsafe).
+    Notation ReachableAddr := (@ReachableAddr ISA Byte Key bytesToCapUnsafe).
+
+    Section Helpers.
+      (* TODO: decidable equality *)
+      Notation EqDecider f := (forall x y, BoolSpec (x = y) (x <> y) (f x y)).
+      Context {Cap_eqb: Cap -> Cap -> bool}.
+      Context {Cap_eq_dec: EqDecider Cap_eqb}.
+      Context {CapOrBytes_eqb: CapOrBytes -> CapOrBytes -> bool}.
+      Context {CapOrBytes_eq_dec: EqDecider CapOrBytes_eqb}.
+      Lemma ReachableCapIncrease:
+        forall mem caps capss caps',
+          ReachableCap mem caps caps' ->
+          Subset caps capss ->
+          ReachableCap mem capss caps'.
+      Proof.
+        cbv[Subset].
+        induction 1; intros hsubset.
+        - apply Refl; auto.
+        - eapply StepRestrict; eauto.
+        - eapply StepLoadCap; eauto.
+        - apply StepSeal with (x := x) (y := y); auto.
+        - apply StepUnseal with (x := x) (y := y); auto.
+      Qed.
+      Lemma ReachableCaps_app:
+        forall mem c1 c2 cs,
+          ReachableCaps mem c1 c2 ->
+          ReachableCaps mem (c1 ++ cs) (c2 ++ cs).
+      Proof.
+        cbv[ReachableCaps].
+        intros * Hin * Hin2.
+        apply in_app_or in Hin2.
+        destruct_or! Hin2.
+        - eapply ReachableCapIncrease; eauto. apply Subset_app.
+        - constructor. apply in_app_iff; auto.
+      Qed.
+
+      Lemma AttenuateRestrict:
+        forall (x y: Cap),
+          Restrict y (attenuate x y).
+      Proof.
+        cbv [attenuate Restrict].
+        intros.
+        case_match; constructor; cbn; cbv[SealEq isSealed]; cbn; repeat simpl_match; cbn.
+        all: repeat match goal with
+             | |- EqSet ?x ?x => cbv[EqSet]; reflexivity
+             | |- Subset (filter _ _) _ => apply SubsetFilter1
+             | |- _ => progress (simplify_Subset || auto)
+             end.
+        all: by (apply internal_Label_dec_bl || apply Perm.internal_t_dec_bl).
+      Qed.
+
+      Lemma LoadCapUpdate:
+        forall mem mem' x y z caps,
+        ReachableCap mem caps x ->
+        LoadCap mem' x y z ->
+        ValidMemCapUpdate mem caps mem' ->
+        ReachableCap mem caps z.
+      Proof.
+        cbv [ValidMemCapUpdate].
+        intros * hauth hload hupdate.
+        inv hload. destruct_products.
+        specialize (hupdate capa). rewrite loadFromAuth0r in *.
+        destruct (CapOrBytes_eq_dec (readCap bytesToCapUnsafe mem0 capa) (inl y) ) as [Heq | Hneq].
+        - eapply StepLoadCap with (y := y); eauto.
+          constructor; eauto.
+        - propositional.
+          specialize hupdate with (1 := Hneq) (2 := eq_refl).
+          destruct_products.
+          eapply StepRestrict; eauto.
+          eapply AttenuateRestrict; eauto.
+      Qed.
+
+      Lemma LoadCapUpdate'':
+        forall mem mem' x y z caps,
+        ReachableCap mem caps x ->
+        LoadCap mem' x y z ->
+        ValidMemUpdate mem caps mem' ->
+        ReachableCap mem caps z.
+      Proof.
+        cbv[ValidMemUpdate].
+        intros; eapply LoadCapUpdate; destruct_products; eauto.
+      Qed.
+
+      Lemma ReachableCap_ValidUpdate:
+        forall mem mem' caps caps' c,
+          ReachableCap mem' caps' c ->
+          ValidMemUpdate mem caps mem' ->
+          ReachableCaps mem caps caps' ->
+          ReachableCap mem caps c.
+      Proof.
+        cbv [ReachableCaps].
+        induction 1; intros * hupdate hcaps'; propositional.
+        - auto.
+        - eapply StepRestrict; eauto.
+        - eapply LoadCapUpdate''; eauto.
+        - eapply StepSeal with (3 := xyz); auto.
+        - eapply StepUnseal with (3 := xyz); auto.
+      Qed.
+
+      Lemma ReachableCaps_ValidUpdate:
+        forall mem mem' caps caps' cs,
+        ValidMemUpdate mem caps mem' ->
+        ReachableCaps mem caps caps' ->
+        ReachableCaps mem' caps' cs ->
+        ReachableCaps mem caps cs.
+      Proof.
+        cbv[ReachableCaps].
+        intros * hupdate hcaps hcaps' * hcaps0.
+        pose proof (hcaps' _ hcaps0) as hc'.
+        eapply ReachableCap_ValidUpdate; eauto.
+      Qed.
+      Definition ReachableReadAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
+        exists p cs cbs ,
+          ReachableAddr mem caps a 1 p cs cbs /\ (In Perm.Load p).
+      Definition ReachableWriteAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
+        exists p cs cbs ,
+          ReachableAddr mem caps a 1 p cs cbs /\ (In Perm.Store p).
+
+      Definition WriteReadDisjoint (mem: FullMemory) (c1 c2: list Cap) : Prop :=
+        forall a,
+          ReachableWriteAddr mem c1 a ->
+          ReachableReadAddr mem c2 a ->
+          False.
+      Lemma WriteReadDisjointImpliesFalse:
+        forall mem caps caps' x y a,
+        WriteReadDisjoint mem caps caps' ->
+        ReachableCap mem caps x ->
+        ReachableCap mem caps' y ->
+        capSealed x = None ->
+        capSealed y = None ->
+        In Perm.Store (capPerms x) ->
+        In Perm.Load (capPerms y) ->
+        In a (capAddrs x) ->
+        In a (capAddrs y) ->
+        False.
+      Proof.
+        cbv [WriteReadDisjoint ReachableWriteAddr ReachableReadAddr].
+        intros * hdisjoint hx hy hsealx hsealy hstorex hloady hax hay.
+        specialize (hdisjoint a).
+        apply hdisjoint;
+          repeat eexists; eauto;
+          unfold Subset; cbn; intuition; subst; auto.
+      Qed.
+
+      Lemma ISA_CAPSIZE_BYTES_NONZERO:
+        ISA_CAPSIZE_BYTES > 0.
+      Proof.
+        unfold ISA_CAPSIZE_BYTES.
+        pose proof (PeanoNat.Nat.pow_nonzero 2 ISA_LG_CAPSIZE_BYTES). lia.
+      Qed.
+
+      Lemma LoadCapUpdateDisjointUnchanged:
+        forall mem caps mem' x y z t,
+          ReachableCap mem' t x ->
+          LoadCap mem' x y z ->
+          ValidMemCapUpdate mem caps mem' ->
+          WriteReadDisjoint mem caps t ->
+          ReachableCap mem t x ->
+          LoadCap mem x y z.
+      Proof.
+        intros * hauth' hload hupdate hdisjoint hauth.
+        inv hload. destruct_products. constructor; eauto.
+        eexists; split; eauto.
+        unfold ValidMemCapUpdate in *.
+        specialize hupdate with (capa := capa) (stDataCap := y) (2 := loadFromAuth0r).
+        destruct (CapOrBytes_eq_dec (readCap bytesToCapUnsafe mem0 capa) (inl y) ) as [Heq | Hneq]; auto.
+        exfalso.
+        rewrite loadFromAuth0r in *. propositional.
+        destruct_products.
+        consider StPermForCap. consider StPermForAddr. destruct_products.
+        pose proof ISA_CAPSIZE_BYTES_NONZERO.
+        destruct ISA_CAPSIZE_BYTES eqn:?; [lia | ].
+        eapply WriteReadDisjointImpliesFalse with (x := stAddrCap) (y := x) (a := (fromCapAddr capa));eauto.
+        all: match goal with
+        | H: Subset _ ?x |- In _ ?x =>
+            eapply H
+        end; constructor; auto.
+      Qed.
+
+      Lemma ReachableCapDisjointUnchanged':
+        forall mem caps mem' t c,
+          ReachableCap mem' t c ->
+          ValidMemCapUpdate mem caps mem' ->
+          WriteReadDisjoint mem caps t ->
+          ReachableCap mem t c.
+      Proof.
+        induction 1; intros * hupdate hdisjoint; propositional.
+        - apply Refl; auto.
+        - eapply StepRestrict; eauto.
+        - eapply StepLoadCap; eauto.
+          eapply LoadCapUpdateDisjointUnchanged with (mem' := mem') (mem := mem0); eauto.
+        - eapply StepSeal with (3:= xyz); auto.
+        - eapply StepUnseal with (3:= xyz); auto.
+      Qed.
+      Definition ReachableRWAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
+        ReachableReadAddr mem caps a \/
+        ReachableWriteAddr mem caps a.
+
+      Definition RWAddressesDisjoint (mem: FullMemory) (c1 c2: list Cap) : Prop :=
+        forall a,
+          ReachableRWAddr mem c1 a ->
+          ReachableRWAddr mem c2 a ->
+          False.
+      Definition ReachableCapSubset (m_init m_cur: FullMemory) (caps_init caps_cur: list Cap) : Prop :=
+        forall caps,
+          ReachableCaps m_cur caps_cur caps ->
+          ReachableCaps m_init caps_init caps.
+      Lemma ReachableCapSubsetImpliesReachableCap:
+        forall mem mem1 cs cs1 c,
+        ReachableCapSubset mem mem1 cs cs1 ->
+        ReachableCap mem1 cs1 c ->
+        ReachableCap mem cs c.
+      Proof.
+        cbv[ReachableCapSubset].
+        intros. eapply H with (caps := [c]); cbv[ReachableCaps]; intuition eauto.
+        - repeat destruct H1; subst; auto.
+        - constructor; auto.
+      Qed.
+
+      Lemma ReachableCapSubsetDisjointUnchanged':
+        forall mem0 mem mem' t0 t caps,
+        ReachableCapSubset mem0 mem t0 t ->
+        ValidMemTagRemoval mem caps mem' ->
+        ValidMemCapUpdate mem caps mem' ->
+        WriteReadDisjoint mem caps t ->
+        ReachableCapSubset mem0 mem' t0 t.
+      Proof.
+        cbv[ReachableCapSubset ReachableCaps].
+        intros * hinit htag hupdate hdisjoint.
+        intros * hcapsIn * hin.
+        eapply ReachableCapSubsetImpliesReachableCap; eauto.
+        specialize hcapsIn with (1 := hin).
+        eapply ReachableCapDisjointUnchanged'; eauto.
+      Qed.
+      Lemma ReachableCapSubsetUpdateDisjointUnchanged:
+        forall mem0 mem mem' t0 t caps,
+        ReachableCapSubset mem0 mem t0 t ->
+        ValidMemUpdate mem caps mem' ->
+        WriteReadDisjoint mem caps t ->
+        ReachableCapSubset mem0 mem' t0 t.
+      Proof.
+        cbv[ValidMemUpdate].
+        intros; destruct_products; by (eapply ReachableCapSubsetDisjointUnchanged').
+      Qed.
+      Lemma RWDisjointImpliesWriteReadDisjoint:
+        forall m xi xj,
+        RWAddressesDisjoint m xi xj ->
+        WriteReadDisjoint m xi xj.
+      Proof.
+        cbv [RWAddressesDisjoint WriteReadDisjoint ReachableRWAddr].
+        intros. eapply H; eauto.
+      Qed.
+
+
+    End Helpers.
+    Definition ExportEntry : Type.
+    Proof using ISA Byte Key.
+    Admitted.
+
+    Definition ImportEntry : Type.
+    Proof using ISA Byte Key.
+    Admitted.
+
     Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
     Context {decode: list Byte -> Inst bytesToCapUnsafe}.
     Context {pccNotInBounds : EXNInfo}.
     Notation Machine := (@Machine Byte Key).
-    Notation Cap := (@Cap Key).
     Notation AddrOffset := nat (only parsing).
     Notation MachineStep := (MachineStep bytesToCapUnsafe fetchAddrs decode pccNotInBounds).
     Notation PCC := Cap (only parsing).
     Notation Thread := (@Thread Byte Key).
-    Notation ReachableCaps := (@ReachableCaps ISA Byte Key bytesToCapUnsafe).
-    Notation ReachableAddr := (@ReachableAddr ISA Byte Key bytesToCapUnsafe).
     Notation Trace := (@Trace Byte Key).
     Notation State := (Machine * Trace)%type.
     Notation Event := (@Event Byte Key).
     Notation SameThreadStep := (SameThreadStep bytesToCapUnsafe fetchAddrs decode pccNotInBounds).
-    Notation ValidMemUpdate := (@ValidMemUpdate ISA Byte Key bytesToCapUnsafe).
-    Notation ReachableCap := (ReachableCap bytesToCapUnsafe).
-    Notation ValidMemCapUpdate := (ValidMemCapUpdate bytesToCapUnsafe).
-    Notation ValidMemTagRemoval := (ValidMemTagRemoval bytesToCapUnsafe).
-    Notation ValidMemDataUpdate := (ValidMemDataUpdate bytesToCapUnsafe).
     Notation StPermForCap := (StPermForCap bytesToCapUnsafe).
     Notation StPermForAddr := (StPermForAddr bytesToCapUnsafe).
     Notation RegisterFile := (@RegisterFile Byte Key).
     Notation ThreadStep := (ThreadStep bytesToCapUnsafe fetchAddrs decode pccNotInBounds).
-    Notation LoadCap := (LoadCap bytesToCapUnsafe).
-    Notation CapOrBytes := (@CapOrBytes Byte Key).
-    (* TODO: decidable equality *)
-    Notation EqDecider f := (forall x y, BoolSpec (x = y) (x <> y) (f x y)).
-
-    Definition ExportEntry : Type.
-    Admitted.
-
-    Definition ImportEntry : Type.
-    Admitted.
 
     Record InitialThreadMetadata := {
         initThreadEntryPoint: Addr;
@@ -1250,32 +1514,6 @@ Module Configuration.
         inv hstep; destruct_products.
         rewrite threadIdEq. lia.
       Qed.
-      Lemma ReachableCapIncrease:
-        forall mem caps capss caps',
-          ReachableCap mem caps caps' ->
-          Subset caps capss ->
-          ReachableCap mem capss caps'.
-      Proof.
-        cbv[Subset].
-        induction 1; intros hsubset.
-        - apply Refl; auto.
-        - eapply StepRestrict; eauto.
-        - eapply StepLoadCap; eauto.
-        - apply StepSeal with (x := x) (y := y); auto.
-        - apply StepUnseal with (x := x) (y := y); auto.
-      Qed.
-      Lemma ReachableCaps_app:
-        forall mem c1 c2 cs,
-          ReachableCaps mem c1 c2 ->
-          ReachableCaps mem (c1 ++ cs) (c2 ++ cs).
-      Proof.
-        cbv[ReachableCaps].
-        intros * Hin * Hin2.
-        apply in_app_or in Hin2.
-        destruct_or! Hin2.
-        - eapply ReachableCapIncrease; eauto. apply Subset_app.
-        - constructor. apply in_app_iff; auto.
-      Qed.
       Lemma StPermForAddrSubset:
         forall mem caps caps' capa a size ,
           StPermForAddr mem caps capa a size ->
@@ -1350,31 +1588,7 @@ Module Configuration.
         intros *. case_match; try congruence.
         rewrite andb_true_iff in *. destruct_products; auto.
       Qed.
-Lemma SubsetFilter1:
-  forall {A} (xs ys: list A) eqb,
-  (forall p q, eqb p q = true -> p = q) ->
-  Subset (filter (fun p => existsb (eqb p) xs) ys) xs.
-Proof.
-  cbv[Subset]. intros * eqb *.
-  rewrite filter_In, existsb_exists.
-  intros; destruct_products; eauto.
-  apply eqb in Hrr. subst; auto.
-Qed.
 
-      Lemma AttenuateRestrict:
-        forall (x y: Cap),
-          Restrict y (attenuate x y).
-      Proof.
-        cbv [attenuate Restrict].
-        intros.
-        case_match; constructor; cbn; cbv[SealEq isSealed]; cbn; repeat simpl_match; cbn.
-        all: repeat match goal with
-             | |- EqSet ?x ?x => cbv[EqSet]; reflexivity
-             | |- Subset (filter _ _) _ => apply SubsetFilter1
-             | |- _ => progress (simplify_Subset || auto)
-             end.
-        all: by (apply internal_Label_dec_bl || apply Perm.internal_t_dec_bl).
-      Qed.
       Lemma generalInstOkCommon:
         forall userSt mem sysSt istatus userSt' mem' sysSt' istatus' generalInst,
           WfGeneralInst bytesToCapUnsafe generalInst ->
@@ -1509,45 +1723,8 @@ Qed.
         - eapply SameThreadStepOk; eauto.
       Qed.
 
-      Section Helpers.
-        Context {Cap_eqb: Cap -> Cap -> bool}.
-        Context {Cap_eq_dec: EqDecider Cap_eqb}.
-        Context {CapOrBytes_eqb: CapOrBytes -> CapOrBytes -> bool}.
-        Context {CapOrBytes_eq_dec: EqDecider CapOrBytes_eqb}.
-
-        Lemma LoadCapUpdate:
-          forall mem mem' x y z caps,
-          ReachableCap mem caps x ->
-          LoadCap mem' x y z ->
-          ValidMemCapUpdate mem caps mem' ->
-          ReachableCap mem caps z.
-        Proof.
-          cbv [ValidMemCapUpdate].
-          intros * hauth hload hupdate.
-          inv hload. destruct_products.
-          specialize (hupdate capa). rewrite loadFromAuth0r in *.
-          destruct (CapOrBytes_eq_dec (readCap bytesToCapUnsafe mem0 capa) (inl y) ) as [Heq | Hneq].
-          - eapply StepLoadCap with (y := y); eauto.
-            constructor; eauto.
-          - propositional.
-            specialize hupdate with (1 := Hneq) (2 := eq_refl).
-            destruct_products.
-            eapply StepRestrict; eauto.
-            eapply AttenuateRestrict; eauto.
-        Qed.
-        Lemma LoadCapUpdate':
-          forall mem mem' x y z caps,
-          ReachableCap mem caps x ->
-          LoadCap mem' x y z ->
-          ValidMemUpdate mem caps mem' ->
-          ReachableCap mem caps z.
-        Proof.
-          cbv[ValidMemUpdate].
-          intros; eapply LoadCapUpdate; destruct_products; eauto.
-        Qed.
-      End Helpers.
-
     End Proofs.
+
   End __.
   Hint Resolve Inv_curThread : invariants.
 End Configuration.
@@ -1579,10 +1756,10 @@ Module ThreadIsolatedMonotonicity.
     Notation Trace := (@Trace Byte Key).
     Notation State := (Machine * Trace)%type.
     Notation Event := (@Event Byte Key).
-    Notation Config := (@Config ISA Byte Key bytesToCapUnsafe fetchAddrs decode pccNotInBounds).
+    Notation Config := (@Config ISA Byte Key).
     Notation SameThreadStep := (SameThreadStep bytesToCapUnsafe fetchAddrs decode pccNotInBounds).
     Notation ValidMemUpdate := (@ValidMemUpdate ISA Byte Key bytesToCapUnsafe).
-    Notation ReachableCap := (ReachableCap bytesToCapUnsafe).
+    Notation ReachableCap := (@ReachableCap ISA Byte Key bytesToCapUnsafe).
     Notation ValidMemCapUpdate := (ValidMemCapUpdate bytesToCapUnsafe).
     Notation ValidMemTagRemoval := (ValidMemTagRemoval bytesToCapUnsafe).
     Notation ValidMemDataUpdate := (ValidMemDataUpdate bytesToCapUnsafe).
@@ -1590,6 +1767,10 @@ Module ThreadIsolatedMonotonicity.
     Notation StPermForAddr := (StPermForAddr bytesToCapUnsafe).
     Notation LoadCap := (LoadCap bytesToCapUnsafe).
     Notation CapOrBytes := (@CapOrBytes Byte Key).
+    Notation ReachableCapSubset := (@ReachableCapSubset ISA Byte Key bytesToCapUnsafe).
+    Notation RWAddressesDisjoint := (@RWAddressesDisjoint ISA Byte Key bytesToCapUnsafe).
+    Notation WriteReadDisjoint := (@WriteReadDisjoint ISA Byte Key bytesToCapUnsafe).
+
     (* TODO: decidable equality *)
     Notation EqDecider f := (forall x y, BoolSpec (x = y) (x <> y) (f x y)).
     Context {Cap_eqb: Cap -> Cap -> bool}.
@@ -1605,19 +1786,10 @@ Module ThreadIsolatedMonotonicity.
       end.
     Definition SameDomainTrace (tr: Trace) : Prop :=
       Forall SameDomainEvent tr.
-    Definition ReachableCapSubset (m_init m_cur: FullMemory) (t_init t_cur: Thread) : Prop :=
-      forall caps,
-        ReachableCaps m_cur (capsOfThread t_cur) caps ->
-        ReachableCaps m_init (capsOfThread t_init) caps.
 
-    Definition ReachableRWAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
-      exists p cs cbs ,
-        ReachableAddr mem caps a 1 p cs cbs /\ (In Perm.Store p \/ In Perm.Load p).
-    Definition RWAddressesDisjoint (mem: FullMemory) (c1 c2: list Cap) : Prop :=
-      forall a,
-        ReachableRWAddr mem c1 a ->
-        ReachableRWAddr mem c2 a ->
-        False.
+    Definition ThreadReachableCapSubset (m_init m_cur: FullMemory) (t_init t_cur: Thread) : Prop :=
+      ReachableCapSubset m_init m_cur (capsOfThread t_init) (capsOfThread t_cur).
+
 
     (* Threads only have read/write access to disjoint addresses. *)
     Definition IsolatedThreads (machine: Machine) : Prop :=
@@ -1635,13 +1807,13 @@ Module ThreadIsolatedMonotonicity.
       Definition PThreadIsolatedMonotonicity (st: State) : Prop :=
         let '(machine, tr) := st in
         SameDomainTrace tr ->
-        Forall2 (ReachableCapSubset initialMachine.(machine_memory) machine.(machine_memory))
+        Forall2 (ThreadReachableCapSubset initialMachine.(machine_memory) machine.(machine_memory))
                 initialMachine.(machine_threads) machine.(machine_threads).
       Record Invariant' machine : Prop :=
         {
           Inv_Isolation: IsolatedThreads machine;
           Inv_Monotonicity:
-           Forall2 (ReachableCapSubset initialMachine.(machine_memory) machine.(machine_memory))
+           Forall2 (ThreadReachableCapSubset initialMachine.(machine_memory) machine.(machine_memory))
              initialMachine.(machine_threads) machine.(machine_threads)
         }.
       Definition Invariant (st: State) :=
@@ -1658,7 +1830,7 @@ Module ThreadIsolatedMonotonicity.
           apply pfValidInitialMachine.
         - intros htr. constructor.
           + cbv [fst]. apply pfValidInitialMachine.
-          + cbv [SameDomainTrace ReachableCapSubset ValidInitialMachine].
+          + cbv [SameDomainTrace ThreadReachableCapSubset ReachableCapSubset ValidInitialMachine].
             apply Forall2_refl. auto.
       Qed.
       Lemma GlobalInvariant_length:
@@ -1680,58 +1852,43 @@ Ltac simplify_invariants :=
       eapply GlobalInvariantImpliesValidRf with (1 := H) (2 := H1)
   end.
 
-Lemma ReachableCap_ValidUpdate:
-  forall mem mem' caps caps' c,
-  ReachableCap mem' caps' c ->
-  ValidMemUpdate mem caps mem' ->
-  ReachableCaps mem caps caps' ->
-  ReachableCap mem caps c.
-Proof.
-  cbv [ReachableCaps].
-  induction 1; intros * hupdate hcaps'; propositional.
-  - auto.
-  - eapply StepRestrict; eauto.
-  - eapply LoadCapUpdate'; eauto.
-  - eapply StepSeal with (3 := xyz); auto.
-  - eapply StepUnseal with (3 := xyz); auto.
-Qed.
-
-      Lemma ReachableCaps_ValidUpdate:
-        forall mem mem' caps caps' cs,
-        ValidMemUpdate mem caps mem' ->
-        ReachableCaps mem caps caps' ->
-        ReachableCaps mem' caps' cs ->
-        ReachableCaps mem caps cs.
-      Proof.
-        cbv[ReachableCaps].
-        intros * hupdate hcaps hcaps' * hcaps0.
-        pose proof (hcaps' _ hcaps0) as hc'.
-        eapply ReachableCap_ValidUpdate; eauto.
-      Qed.
 
       Lemma ReachableCapSubset_ValidUpdate:
-        forall mem0 mem mem' thread0 thread thread',
-        ReachableCapSubset mem0 mem thread0 thread ->
-        ValidMemUpdate mem (capsOfThread thread) mem' ->
-        ReachableCaps mem (capsOfThread thread) (capsOfThread thread') ->
-        ReachableCapSubset mem0 mem' thread0 thread'.
+        forall mem0 mem mem' caps0 caps caps',
+        ReachableCapSubset mem0 mem caps0 caps ->
+        ValidMemUpdate mem caps mem' ->
+        ReachableCaps mem caps caps' ->
+        ReachableCapSubset mem0 mem' caps0 caps'.
       Proof.
         cbv[ReachableCapSubset].
         intros * hinit hmem hcaps.
         pose proof (hinit _ hcaps) as hcaps0'.
         intros * hcaps'.
-        specialize ReachableCaps_ValidUpdate with (1 := hmem) (2 := hcaps) (3 := hcaps'); auto.
+        specialize ReachableCaps_ValidUpdate with (1 := CapOrBytes_eq_dec) (2 := hmem) (3 := hcaps) (4 := hcaps'); auto.
       Qed.
 
-      Lemma InvariantImpliesReachableCapSubset:
+      Lemma InvariantImpliesThreadReachableCapSubset:
         forall m thread thread' id,
           Invariant' m ->
           nth_error (machine_threads initialMachine) id = Some thread ->
           nth_error (machine_threads m) id = Some thread' ->
-          ReachableCapSubset (machine_memory initialMachine) (machine_memory m) thread thread'.
+          ThreadReachableCapSubset (machine_memory initialMachine) (machine_memory m) thread thread'.
       Proof.
         intros. eapply Forall2_nth_error2 with (1 := Inv_Monotonicity _ H); eauto.
       Qed.
+Lemma IsolatedImpliesWriteReadDisjoint:
+  forall m i j x y,
+  IsolatedThreads m ->
+  i <> j ->
+  nth_error (machine_threads m) i = Some x ->
+  nth_error (machine_threads m) j = Some y ->
+  WriteReadDisjoint (machine_memory m) (capsOfThread x) (capsOfThread y).
+Proof.
+  cbv[IsolatedThreads Pairwise].
+  intros * hisolated hdiff hi hj.
+  apply RWDisjointImpliesWriteReadDisjoint.
+  eapply hisolated; eauto; by (apply map_nth_error).
+Qed.
 
       Lemma SameDomainStepOk:
         forall m m' ev,
@@ -1756,23 +1913,32 @@ Qed.
         { simplify_invariants. }
         cbn in hok. destruct_products.
 
-        assert (IsolatedThreads m') as hisolated'.
-        { cbv [IsolatedThreads].
-          admit.
-        }
+        (* assert (IsolatedThreads m') as hisolated'. *)
+        (* { cbv [IsolatedThreads]. *)
+        (*   admit. *)
+        (* } *)
         constructor; auto.
+        { admit. }
         apply Forall2_nth_error1; auto.
         - apply GlobalInvariant_length. auto.
         - intros * hx hy.
           destruct_with_eqn (Nat.eqb idx (m'.(machine_curThreadId))); simplify_nats; subst.
           + rewrite threadIdEq in *.
             rewrite stepOkrr in *. option_simpl.
-            assert (ReachableCapSubset (machine_memory initialMachine) (machine_memory m)
+            assert (ThreadReachableCapSubset (machine_memory initialMachine) (machine_memory m)
                                        x thread) as hsubset0.
-            { eapply InvariantImpliesReachableCapSubset; eauto. }
+            { eapply InvariantImpliesThreadReachableCapSubset; eauto. }
             eapply ReachableCapSubset_ValidUpdate with (mem := machine_memory m); cbv[capsOfThread]; eauto.
           + (* Separation *)
-            admit.
+            rewrite idleThreadsEq in hy by lia.
+            assert (ThreadReachableCapSubset (machine_memory initialMachine) (machine_memory m)
+                                       x y) as hsubset0.
+            { eapply InvariantImpliesThreadReachableCapSubset; eauto.
+            }
+            eapply ReachableCapSubsetUpdateDisjointUnchanged; eauto.
+
+            eapply IsolatedImpliesWriteReadDisjoint with (m := m) (j := idx) (i := machine_curThreadId m);
+              auto with invariants; lia.
       Admitted.
 
       Lemma InvariantStep (s: State) :
