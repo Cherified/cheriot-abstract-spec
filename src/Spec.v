@@ -1230,6 +1230,55 @@ Module Configuration.
         - eapply StepSeal with (3 := xyz); auto.
         - eapply StepUnseal with (3 := xyz); auto.
       Qed.
+      Lemma ReachableAddr_ValidUpdate:
+        forall mem mem' caps caps' a sz p cs cbs,
+          ReachableAddr mem' caps' a sz p cs cbs ->
+          ValidMemUpdate mem caps mem' ->
+          ReachableCaps mem caps caps' ->
+          ReachableAddr mem caps a sz p cs cbs.
+      Proof.
+        intros. inv H. constructor; eauto. eapply ReachableCap_ValidUpdate; eauto.
+      Qed.
+      Definition ReachableReadAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
+        exists p cs cbs ,
+          ReachableAddr mem caps a 1 p cs cbs /\ (In Perm.Load p).
+      Definition ReachableWriteAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
+        exists p cs cbs ,
+          ReachableAddr mem caps a 1 p cs cbs /\ (In Perm.Store p).
+      Definition ReachableRWAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
+        ReachableReadAddr mem caps a \/
+        ReachableWriteAddr mem caps a.
+
+      Lemma ReachableReadAddr_ValidUpdate:
+        forall mem mem' caps caps' a,
+          ReachableReadAddr mem' caps' a ->
+          ValidMemUpdate mem caps mem' ->
+          ReachableCaps mem caps caps' ->
+          ReachableReadAddr mem caps a .
+      Proof.
+        cbv[ReachableReadAddr]. intros; destruct_products.
+        do 3 eexists; split; eauto. by (eapply ReachableAddr_ValidUpdate).
+      Qed.
+      Lemma ReachableWriteAddr_ValidUpdate:
+        forall mem mem' caps caps' a,
+          ReachableWriteAddr mem' caps' a ->
+          ValidMemUpdate mem caps mem' ->
+          ReachableCaps mem caps caps' ->
+          ReachableWriteAddr mem caps a .
+      Proof.
+        cbv[ReachableWriteAddr]. intros; destruct_products.
+        do 3 eexists; split; eauto. by (eapply ReachableAddr_ValidUpdate).
+      Qed.
+      Lemma ReachableRWAddr_ValidUpdate:
+        forall mem mem' caps caps' a,
+          ReachableRWAddr mem' caps' a ->
+          ValidMemUpdate mem caps mem' ->
+          ReachableCaps mem caps caps' ->
+          ReachableRWAddr mem caps a .
+      Proof.
+        cbv[ReachableRWAddr]. intros; destruct_products.
+        destruct H; [ left; by (eapply ReachableReadAddr_ValidUpdate) | right; by (eapply ReachableWriteAddr_ValidUpdate) ].
+      Qed.
 
       Lemma ReachableCaps_ValidUpdate:
         forall mem mem' caps caps' cs,
@@ -1243,13 +1292,6 @@ Module Configuration.
         pose proof (hcaps' _ hcaps0) as hc'.
         eapply ReachableCap_ValidUpdate; eauto.
       Qed.
-      Definition ReachableReadAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
-        exists p cs cbs ,
-          ReachableAddr mem caps a 1 p cs cbs /\ (In Perm.Load p).
-      Definition ReachableWriteAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
-        exists p cs cbs ,
-          ReachableAddr mem caps a 1 p cs cbs /\ (In Perm.Store p).
-
       Definition WriteReadDisjoint (mem: FullMemory) (c1 c2: list Cap) : Prop :=
         forall a,
           ReachableWriteAddr mem c1 a ->
@@ -1326,9 +1368,56 @@ Module Configuration.
         - eapply StepSeal with (3:= xyz); auto.
         - eapply StepUnseal with (3:= xyz); auto.
       Qed.
-      Definition ReachableRWAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
-        ReachableReadAddr mem caps a \/
-        ReachableWriteAddr mem caps a.
+
+      Lemma ReachableAddrDisjointUnchanged:
+        forall mem caps mem' t a sz p cs cbs,
+          ReachableAddr mem' t a sz p cs cbs ->
+          ValidMemCapUpdate mem caps mem' ->
+          WriteReadDisjoint mem caps t ->
+          ReachableAddr mem t a sz p cs cbs.
+      Proof.
+        intros * haddr hupdate hdisjoint.
+        inv haddr. constructor; auto.
+        eapply ReachableCapDisjointUnchanged'; eauto.
+      Qed.
+
+      Lemma ReachableReadAddrDisjointUnchanged:
+        forall mem caps mem' t a,
+          ReachableReadAddr mem' t a  ->
+          ValidMemCapUpdate mem caps mem' ->
+          WriteReadDisjoint mem caps t ->
+          ReachableReadAddr mem t a.
+      Proof.
+        cbv[ReachableReadAddr].
+        intros. destruct_products. do 3 eexists; split; eauto.
+        eapply ReachableAddrDisjointUnchanged; eauto.
+      Qed.
+
+      Lemma ReachableWriteAddrDisjointUnchanged:
+        forall mem caps mem' t a,
+          ReachableWriteAddr mem' t a  ->
+          ValidMemCapUpdate mem caps mem' ->
+          WriteReadDisjoint mem caps t ->
+          ReachableWriteAddr mem t a.
+      Proof.
+        cbv[ReachableWriteAddr].
+        intros. destruct_products. do 3 eexists; split; eauto.
+        eapply ReachableAddrDisjointUnchanged; eauto.
+      Qed.
+
+      Lemma ReachableRWAddrDisjointUnchanged:
+        forall mem caps mem' t a,
+          ReachableRWAddr mem' t a  ->
+          ValidMemCapUpdate mem caps mem' ->
+          WriteReadDisjoint mem caps t ->
+          ReachableRWAddr mem t a.
+      Proof.
+        cbv[ReachableRWAddr].
+        intros * haddr hupdate hdisjoint.
+        destruct haddr.
+        - left. eapply ReachableReadAddrDisjointUnchanged; eauto.
+        - right. eapply ReachableWriteAddrDisjointUnchanged; eauto.
+      Qed.
 
       Definition RWAddressesDisjoint (mem: FullMemory) (c1 c2: list Cap) : Prop :=
         forall a,
@@ -1906,6 +1995,14 @@ Proof.
   cbv[RWAddressesDisjoint].
   intuition eauto.
 Qed.
+Lemma RWAddressesDisjointImpliesWriteReadDisjoint:
+  forall mem xi xj,
+  RWAddressesDisjoint mem xi xj ->
+  WriteReadDisjoint mem xi xj.
+Proof.
+  cbv[RWAddressesDisjoint WriteReadDisjoint ReachableRWAddr].
+  intros. eapply H; eauto.
+Qed.
 
 Lemma RWAddressDisjointUpdate:
   forall mem mem' xi xi' xj,
@@ -1913,15 +2010,37 @@ Lemma RWAddressDisjointUpdate:
   ReachableCaps mem xi xi' ->
   RWAddressesDisjoint mem xi xj ->
   RWAddressesDisjoint mem' xi' xj.
-Admitted.
+Proof.
+  intros * hmem hreachable hdisjoint.
+  destruct_products.
+  cbv[RWAddressesDisjoint].
+  intros * hcapi hcapj.
+  eapply hdisjoint.
+  - eapply ReachableRWAddr_ValidUpdate with (4 := hreachable) (3 := hmem); eauto.
+  - unfold ValidMemUpdate in *. destruct_products.
+    eapply ReachableRWAddrDisjointUnchanged with (mem := mem0) (mem' := mem') (t:= xj); eauto.
+    eapply RWAddressesDisjointImpliesWriteReadDisjoint; eauto.
+Qed.
 
 Lemma RWAddressDisjointUpdateUnchanged:
   forall mem mem' xi xj xk,
   ValidMemUpdate mem xk mem' ->
+  RWAddressesDisjoint mem xi xj ->
   RWAddressesDisjoint mem xi xk ->
   RWAddressesDisjoint mem xj xk ->
   RWAddressesDisjoint mem' xi xj.
-Admitted.
+Proof.
+  cbv[ValidMemUpdate].
+  intros * hmem hdisjointij hdisjointik hdisjointjk. destruct_products.
+  intros a hcapi hcapj.
+  eapply ReachableRWAddrDisjointUnchanged with (mem := mem0) (mem' := mem') (t:= xj) in hcapj; eauto.
+  eapply ReachableRWAddrDisjointUnchanged with (mem := mem0) (mem' := mem') (t:= xi) in hcapi; eauto.
+  all: rewrite RWAddressDisjointUpdate_symmetry in *;
+       try solve[eapply RWAddressesDisjointImpliesWriteReadDisjoint; eauto].
+Qed.
+
+
+
   Ltac rewrite_solve :=
     match goal with
     | [ H: _ |- _ ] => solve[rewrite H; try congruence; auto]
@@ -1972,6 +2091,8 @@ Admitted.
             eapply Inv_Isolation with (i := machine_curThreadId m) (j := i); try lia; auto;
               erewrite map_nth_error; eauto; auto.
           - eapply RWAddressDisjointUpdateUnchanged; eauto.
+            eapply Inv_Isolation with (i := i) (j := j); try lia; auto;
+              erewrite map_nth_error; eauto; auto.
             eapply Inv_Isolation with (i := i) (j := machine_curThreadId m); try lia; auto;
               erewrite map_nth_error; try reflexivity; auto.
             eapply Inv_Isolation with (i := j) (j := machine_curThreadId m); try lia; auto;
