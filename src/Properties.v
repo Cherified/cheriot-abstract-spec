@@ -1,6 +1,6 @@
 From Stdlib Require Import List Lia Bool Nat NArith.
 Set Primitive Projections.
-From cheriot Require Import Spec.
+From cheriot Require Import Spec Utils Tactics.
 
 Create HintDb invariants.
 Import ListNotations.
@@ -399,9 +399,12 @@ Module Configuration.
         compartment.(compartmentReadOnly) ++ compartment.(compartmentGlobals).
     Definition stackFootprint (t: InitialThreadMetadata) : list Addr :=
         seq t.(initThreadStackAddr) t.(initThreadStackSize).
-    Record WFCompartment (compartment: Compartment) := {
+
+    Definition WFCompartment (compartment: Compartment) := True.
+
+    (* Record WFCompartment (compartment: Compartment) := { *)
         (* WFCompartment_addrs: Disjoint compartment.(compartmentReadOnly) compartment.(compartmentGlobals); *)
-    }.
+    (* }. *)
 
     Definition WFSwitcher (c: Compartment) : Prop := True.
 
@@ -985,7 +988,7 @@ Qed.
         assert (GlobalInvariant config m0) as hglobal' by (eapply GlobalInvariantStep; eauto).
         split; auto.
         intros htr.
-        inv hstep; simplify_Forall; propositional.
+        inv hstep; inv htr; propositional.
         - constructor.
           + pose proof (Inv_Isolation _ hinvr) as hisolation. auto.
           + cbv [setMachineThread machine_threads].
