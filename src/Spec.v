@@ -206,6 +206,7 @@ Section Machine.
     Definition AttenuatePermsIfNotSealed (sealed: bool) (perms1 perms2: list Perm.t) :=
       if sealed then perms2
       else PermIntersect perms1 perms2.
+
     Definition AttenuateLabelsIfNotSealed (sealed: bool) (labels1 labels2: list Label) :=
       if sealed then labels2
       else LabelIntersect labels1 labels2.
@@ -215,13 +216,15 @@ Section Machine.
       {| capSealed          := loaded.(capSealed);
          capPerms           := AttenuatePermsIfNotSealed  sealed loadAuthCap.(capKeepPerms) loaded.(capPerms);
          capCanStore        := AttenuateLabelsIfNotSealed sealed loadAuthCap.(capKeepCanStore) loaded.(capCanStore);
-         capCanBeStored     := AttenuateLabelsIfNotSealed sealed loadAuthCap.(capKeepCanBeStored) loaded.(capCanBeStored);
+         (* This is also a quirk of CHERIoT as in the case of restricting caps.
+            Ideally, no attenuation (implicit or explicit) must happen under a seal.
+          *)
+         capCanBeStored     := LabelIntersect loadAuthCap.(capKeepCanBeStored) loaded.(capCanBeStored);
          capSealingKeys     := loaded.(capSealingKeys);
          capUnsealingKeys   := loaded.(capUnsealingKeys);
          capAddrs           := loaded.(capAddrs);
          capKeepPerms       := AttenuatePermsIfNotSealed  sealed loadAuthCap.(capKeepPerms) loaded.(capKeepPerms);
          capKeepCanStore    := AttenuateLabelsIfNotSealed sealed loadAuthCap.(capKeepCanStore) loaded.(capKeepCanStore);
-         (* TODO: Double check this does not attenuate if sealed *)
          capKeepCanBeStored := AttenuateLabelsIfNotSealed sealed loadAuthCap.(capKeepCanBeStored) loaded.(capKeepCanBeStored);
          capCursor          := loaded.(capCursor)
       |}.
@@ -732,10 +735,8 @@ Section Machine.
                                          /\ In pcc.(capCursor) pcc.(capAddrs).
 
         Inductive ThreadStep : ((UserContext * SystemContext) * SameThreadEvent) -> Prop :=
-        | GoodUserThreadStep (inBounds: fetchAddrsInBounds) :
-          ThreadStep threadStepFunction
-        | BadUserFetch (notInBounds: ~ fetchAddrsInBounds) :
-            ThreadStep (exceptionState pccNotInBounds).
+        | GoodUserThreadStep (inBounds: fetchAddrsInBounds) : ThreadStep threadStepFunction
+        | BadUserFetch (notInBounds: ~ fetchAddrsInBounds) : ThreadStep (exceptionState pccNotInBounds).
       End WithContext.
 
       Definition setMachineThread (m: Machine) (tid: nat): Machine :=
