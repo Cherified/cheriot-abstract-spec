@@ -762,14 +762,15 @@ Section Machine.
                               ((userSt', m2.(machine_memory)), (sysSt', m2.(machine_interruptStatus)), ev) /\
                    nth_error m2.(machine_threads) m2.(machine_curThreadId) = Some (Build_Thread userSt' sysSt')),
           SameThreadStep m1 m2 (Ev_SameThread m2.(machine_curThreadId) ev).
+
       Inductive MachineStep : Machine * Trace -> Machine * Trace -> Prop :=
       | Step_SwitchThreads m tr tid'
           (iEnabled: m.(machine_interruptStatus) = InterruptsEnabled)
           (tidOk: tid' < List.length m.(machine_threads)):
-        MachineStep (m, tr) ((setMachineThread m tid'),(tr ++ [Ev_SwitchThreads tid']))
+        MachineStep (m, tr) ((setMachineThread m tid'),((Ev_SwitchThreads tid')::tr))
       | Step_SameThread m1 m2 tr ev
           (stepOk:SameThreadStep m1 m2 ev):
-        MachineStep (m1, tr) (m2, tr ++ [ev]) .
+        MachineStep (m1, tr) (m2, ev::tr) .
 
     End FetchDecodeExecute.
   End Machine.
