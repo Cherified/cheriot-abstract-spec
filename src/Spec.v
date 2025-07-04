@@ -219,7 +219,7 @@ Section Machine.
          (* This is also a quirk of CHERIoT as in the case of restricting caps.
             Ideally, no attenuation (implicit or explicit) must happen under a seal.
           *)
-         capCanBeStored     := AttenuateLabels sealed loadAuthCap.(capKeepCanBeStored) loaded.(capCanBeStored);
+         capCanBeStored     := LabelIntersect loadAuthCap.(capKeepCanBeStored) loaded.(capCanBeStored);
          capSealingKeys     := loaded.(capSealingKeys);
          capUnsealingKeys   := loaded.(capUnsealingKeys);
          capAddrs           := loaded.(capAddrs);
