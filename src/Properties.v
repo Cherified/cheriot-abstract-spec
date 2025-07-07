@@ -1,3 +1,5 @@
+(*! Properties about the spec based on the initial configuration. *)
+
 From Stdlib Require Import List Lia Bool Nat NArith.
 Set Primitive Projections.
 From cheriot Require Import Spec Utils Tactics SpecLemmas.
@@ -7,6 +9,7 @@ Import ListNotations.
 
 Set Nested Proofs Allowed.
 
+(* Defining the valid initial states of a machine in terms of compartments and thread initialization. *)
 Module Configuration.
   Import Separation.
   Section __.
@@ -177,6 +180,7 @@ Module Configuration.
           + eapply ThreadStep_ThreadInv; eauto.
           + rewrite idleThreadsEq with (1 := n) in *. option_simpl. auto.
       Qed.
+
       Lemma SameThreadStepOk :
         forall config s s' ev,
         GlobalInvariant config s ->
@@ -190,6 +194,7 @@ Module Configuration.
         - eapply SameThreadStep_ThreadInv; eauto.
       Qed.
 
+      (* Machine step preserves the inductive invariant. *)
       Lemma GlobalInvariantStep :
         forall config s tr s' tr',
         GlobalInvariant config s ->
@@ -212,7 +217,7 @@ End Configuration.
 
 (* From any valid initial state where threads are isolated (their reachable
    read/write caps are disjoint), for any sequence of same-domain (Ev_General)
-   steps, the reachable caps in each thread do not increase.  *)
+   steps, the reachable caps in each thread do not increase. *)
 Module ThreadIsolatedMonotonicity.
   Import ListNotations.
   Import Configuration.
@@ -259,7 +264,6 @@ Module ThreadIsolatedMonotonicity.
       Pairwise (RWAddressesDisjoint machine.(machine_memory))
                (map capsOfThread machine.(machine_threads)).
 
-    (* TODO: write in terms of restrictions on the initial configuration. *)
     Definition ValidInitialMachine (config: Config) (st: Machine) : Prop :=
       ValidInitialState config st /\
       IsolatedThreads st.
@@ -453,6 +457,13 @@ Module ThreadIsolatedMonotonicity.
       Qed.
     End WithConfig.
 
+    (* For any well-formed configuration `config` and initial_machine
+       configured with `config` such that the reachable addresses with
+       read/write permissions in each thread are isolated, after any
+       sequence of same-domain steps, the reachable caps from each
+       thread are a subset of the caps reachable from the initial
+       state.
+     *)
     Theorem ThreadIsolatedMonotonicity :
       forall config initial_machine,
       WFConfig config ->
