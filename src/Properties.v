@@ -12,7 +12,7 @@ Set Nested Proofs Allowed.
 (* Defining the valid initial states of a machine in terms of compartments and thread initialization. *)
 Module Configuration.
   Import Separation.
-  Section __.
+  Section WithContext. 
     Context [ISA: ISA_params].
     Context {Byte Key: Type}.
     Context {capEncodeDecode: @CapEncodeDecode Byte Key}.
@@ -76,7 +76,9 @@ Module Configuration.
         seq t.(initThreadStackAddr) t.(initThreadStackSize).
 
     (* TODO *)
-    Definition WFCompartment (compartment: Compartment) := True.
+    Record WFCompartment (c: Compartment) := {
+        WFCompartment_DisjointCodeAndData: Disjoint c.(compartmentReadOnly) c.(compartmentGlobals)
+    }.
 
     Definition WFSwitcher (c: Compartment) : Prop := True.
 
@@ -112,24 +114,101 @@ Module Configuration.
 
     Section Proofs.
 
+      (* TODO: add MMIO and shared objects *)
       Inductive AddressProvenance :=
       | Provenance_Stack (tid: nat)
-      | Provenance_CompartmentReadOnly (cid: nat)
-      | Provenance_CompartmentData (cid: nat).
+      | Provenance_Compartment (cid: nat).
      
       Inductive AddrHasProvenance : Config -> Addr -> AddressProvenance -> Prop :=
       | StackProvenance : forall config addr tid metaThread,
           nth_error config.(configThreads) tid = Some metaThread ->
-          In addr (seq metaThread.(initThreadStackAddr) metaThread.(initThreadStackSize)) ->
+          In addr (stackFootprint metaThread) ->
           AddrHasProvenance config addr (Provenance_Stack tid)
       | CompartmentCodeProvenance: forall config addr cid compartment,
           nth_error config.(configCompartments) cid = Some compartment ->
-          In addr compartment.(compartmentReadOnly) ->
-          AddrHasProvenance config addr (Provenance_CompartmentReadOnly cid)
-      | CompartmentDataProvenance: forall config addr cid compartment,
-          nth_error config.(configCompartments) cid = Some compartment ->
-          In addr compartment.(compartmentGlobals) ->
-          AddrHasProvenance config addr (Provenance_CompartmentData cid).
+          In addr (compartmentFootprint compartment) ->
+          AddrHasProvenance config addr (Provenance_Compartment cid).
+
+Ltac simplify_nat :=
+  repeat match goal with
+  | H: _ <? _ = true |- _ => rewrite PeanoNat.Nat.ltb_lt in H
+  | H: _ <? _ = false |- _ => rewrite PeanoNat.Nat.ltb_nlt in H
+  | _ => lia                                                                       
+  end.
+Tactic Notation "learn_hyp" constr(p) "as" ident(H') :=
+  let P := type of p in
+  match goal with
+  | H : P |- _ => fail 1
+  | _ => pose proof p as H'
+  end.
+Tactic Notation "learn_hyp" constr(p) :=
+  let H := fresh in learn_hyp p as H.
+
+      Lemma threadInConfigFootprint:
+        forall config metaThread tid addr,
+          nth_error (configThreads config) tid = Some metaThread ->
+          In addr (stackFootprint metaThread) ->
+          nth_error (ConfigFootprints config) (length config.(configCompartments) + tid) = Some (stackFootprint metaThread).
+      Proof.
+        intros * hthread haddr.
+        unfold ConfigFootprints.
+        rewrite nth_error_app. rewrite length_map.
+        case_match; simplify_nat.
+        rewrite nth_error_map.
+        replace (length (configCompartments config) + tid - length (configCompartments config)) with tid by lia.
+        rewrite hthread. cbn. eexists; split; eauto.
+      Qed.
+
+Ltac simplify_Separated :=
+  repeat match goal with
+  | H: Separated ?xs,
+    H1: nth_error ?xs ?t1 = Some ?s1,
+    H2: nth_error ?xs ?t2 = Some ?s2,
+    H3: In ?addr ?s1,
+    H4: In ?addr ?s2 |- _ =>
+      let Heq := fresh in   
+      assert (t1 = t2) as Heq;
+      [ destruct (PeanoNat.Nat.eq_dec t1 t2); auto; 
+        exfalso; eapply H with (2 := H1) (3 := H2) (4 := H3) (5 := H4); by auto | ];
+      rewrite Heq in *
+  | _ => progress (option_simpl; try lia)
+  end.
+      Lemma compartmentInConfigFootprint:
+        forall config compartment cid addr,
+          nth_error (configCompartments config) cid = Some compartment ->
+          In addr (compartmentFootprint compartment) ->
+          nth_error (ConfigFootprints config) cid = Some (compartmentFootprint compartment).
+      Proof.
+        intros * hthread haddr.
+        unfold ConfigFootprints.
+        rewrite nth_error_app. rewrite length_map. repeat rewrite nth_error_map.
+        rewrite hthread.
+        case_match; simplify_nat; auto.
+        exfalso. apply H. apply nth_error_Some. rewrite_solve.
+      Qed.
+
+      Lemma uniqueInitialProvenance:
+        forall config addr prov1 prov2,
+          WFConfig config ->
+          AddrHasProvenance config addr prov1 ->
+          AddrHasProvenance config addr prov2 ->
+          prov1 = prov2.
+      Proof.
+        intros * WFConfig hprov1 hprov2.
+        destruct WFConfig.
+        inv hprov1; inv hprov2; auto.
+        all: repeat match goal with
+        | H: nth_error (configThreads _) _ = Some ?thread,
+          H1: In ?addr (stackFootprint ?thread) |- _ =>
+            learn_hyp (threadInConfigFootprint _ _ _ _ H H1)
+        | H: nth_error (configCompartments _) _ = Some ?comp,
+          H1: In ?addr (compartmentFootprint ?comp) |- _ =>
+            learn_hyp (compartmentInConfigFootprint _ _ _ _ H H1)
+        | |- ?x _ = ?x _ => f_equal                        
+        end.                                                                    
+        all: destruct_products; simplify_Separated.
+
+
 
       Lemma InvariantInitial :
         forall config m,
@@ -235,7 +314,7 @@ Module Configuration.
 
     End Proofs.
 
-  End __.
+  End WithContext. 
   Hint Resolve Inv_curThread : invariants.
 End Configuration.
 
@@ -246,7 +325,7 @@ Module ThreadIsolatedMonotonicity.
   Import ListNotations.
   Import Configuration.
   Import Separation.
-  Section __.
+  Section WithContext. 
     Context [ISA: ISA_params].
     Context {Byte Key: Type}.
     Context {capEncodeDecode: @CapEncodeDecode Byte Key}.
@@ -500,7 +579,7 @@ Module ThreadIsolatedMonotonicity.
       - eapply InvariantStep; eauto.
       - eapply InvariantUse; eauto.
     Qed.
-  End __.
+  End WithContext. 
 End ThreadIsolatedMonotonicity.
 
 
