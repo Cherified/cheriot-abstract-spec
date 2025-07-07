@@ -20,14 +20,18 @@ Module Configuration.
     Notation CapOrBytes := (@CapOrBytes Byte Key).
     Notation FullMemory := (@FullMemory Byte).
 
-    (* TODO *)
-    Definition ExportEntry : Type.
-    Proof using ISA Byte Key.
-    Admitted.
+    Record ExportEntry : Type := {
+        exportEntryAddr: nat; (* TODO: check bounds *)
+        exportEntryStackSize: nat;
+        exportEntryNumArgs: nat;
+        exportEntryInterruptStatus: InterruptStatus
+    }.
 
-    Definition ImportEntry : Type.
-    Proof using ISA Byte Key.
-    Admitted.
+    Inductive ImportEntry :=
+    | ImportEntry_SealedCapToExportEntry (c: Cap)
+    | ImportEntry_SentryToLibraryFunction (c: Cap).
+    (* | ImportEntry_MMIOCap (c: Cap) *)
+    (* | ImportEntry_SharedObject (c: Cap). *)
 
     Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
     Context {decode: list Byte -> @Inst _ _ _ capEncodeDecode}.
@@ -107,6 +111,26 @@ Module Configuration.
     Hint Resolve Inv_validRf: invariants.
 
     Section Proofs.
+
+      Inductive AddressProvenance :=
+      | Provenance_Stack (tid: nat)
+      | Provenance_CompartmentReadOnly (cid: nat)
+      | Provenance_CompartmentData (cid: nat).
+     
+      Inductive AddrHasProvenance : Config -> Addr -> AddressProvenance -> Prop :=
+      | StackProvenance : forall config addr tid metaThread,
+          nth_error config.(configThreads) tid = Some metaThread ->
+          In addr (seq metaThread.(initThreadStackAddr) metaThread.(initThreadStackSize)) ->
+          AddrHasProvenance config addr (Provenance_Stack tid)
+      | CompartmentCodeProvenance: forall config addr cid compartment,
+          nth_error config.(configCompartments) cid = Some compartment ->
+          In addr compartment.(compartmentReadOnly) ->
+          AddrHasProvenance config addr (Provenance_CompartmentReadOnly cid)
+      | CompartmentDataProvenance: forall config addr cid compartment,
+          nth_error config.(configCompartments) cid = Some compartment ->
+          In addr compartment.(compartmentGlobals) ->
+          AddrHasProvenance config addr (Provenance_CompartmentData cid).
+
       Lemma InvariantInitial :
         forall config m,
           ValidInitialState config m ->
@@ -241,7 +265,7 @@ Module ThreadIsolatedMonotonicity.
     Notation Trace := (@Trace Byte Key).
     Notation State := (Machine * Trace)%type.
     Notation Event := (@Event Byte Key).
-    Notation Config := (@Config ISA Byte Key).
+    Notation Config := (@Config Byte Key).
     Notation SameThreadStep := (SameThreadStep fetchAddrs decode pccNotInBounds).
     Notation ReachableCapSubset := (@ReachableCapSubset ISA Byte Key).
     Notation RWAddressesDisjoint := (@RWAddressesDisjoint ISA Byte Key).
@@ -478,3 +502,21 @@ Module ThreadIsolatedMonotonicity.
     Qed.
   End __.
 End ThreadIsolatedMonotonicity.
+
+
+(* Isolated compartment:
+   - if a compartment has no export entries, and its import entries
+     only consist of sentries to libraries, then no other compartment
+     can access the isolated compartment's caps.
+ *)
+   
+
+
+(* Invariant: if a (isolated) compartment always sanitizes its caps such that
+   - as a caller, all arguments have LG unset
+   - as a callee, it never passes caps that have access to its globals in the return argument
+     --> how to enforce this?
+   then other compartments should only have temporary access to its caps
+   -> that is, the only caps a thread in a different compartment should have access to belonging to 
+ *)
+                                                                              
