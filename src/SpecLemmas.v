@@ -41,10 +41,21 @@ Section WithContext.
       exists p cs cbs ,
         ReachableAddr mem caps a 1 p cs cbs /\ (In Perm.Store p).
 
+    (* Addresses reachable with execute permission. *)
+    Definition ReachableExecAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
+      exists p cs cbs ,
+        ReachableAddr mem caps a 1 p cs cbs /\ (In Perm.Exec p).
+
     (* Addresses reachable with read or write permission. *)
     Definition ReachableRWAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
       ReachableReadAddr mem caps a \/
-      ReachableWriteAddr mem caps a.
+        ReachableWriteAddr mem caps a.
+
+    (* Addresses reachable with read, write, or execute permission. *)
+    Definition ReachableRWXAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
+      ReachableReadAddr mem caps a \/
+      ReachableWriteAddr mem caps a \/
+      ReachableExecAddr mem caps a.
 
     Definition RWAddressesDisjoint (mem: FullMemory) (c1 c2: list Cap) : Prop :=
       forall a,

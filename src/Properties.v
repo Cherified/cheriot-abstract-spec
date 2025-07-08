@@ -141,32 +141,33 @@ Module Configuration.
           nth_error config.(configLibraries) lid = Some library ->
           In addr (libraryFootprint library) ->
           AddrHasProvenance config addr (Provenance_Library lid).
-Ltac finish_Separated :=
-  match goal with
-  | H: Separated ?xs,
-    H1: nth_error ?xs ?t1 = Some ?s1,
-    H2: nth_error ?xs ?t2 = Some ?s2,
-    H3: In ?addr ?s1,
-    H4: In ?addr ?s2,
-    H5: ?t1 <> ?t2 |- _ =>
-      exfalso; eapply H with (2 := H1) (3 := H2) (4 := H3) (5 := H4);
-      solve[option_simpl; auto; lia]
-  | _ => progress(option_simpl; lia)
-  end.
 
-Ltac prepare_Separated :=
-    try match goal with
-      H1: nth_error ?xs ?t1 = Some ?s1,
-      H2: nth_error ?xs ?t2 = Some ?s2,
-      H3: In ?addr ?s1,
-      H4: In ?addr ?s2 |- _ =>
-      let Heq := fresh in   
-      assert (t1 = t2) as Heq;
-      [ destruct (PeanoNat.Nat.eq_dec t1 t2); [ by auto | ]  | subst ]
-    end.
-
-Ltac simplify_Separated :=
-  prepare_Separated; try solve[finish_Separated].
+      Ltac finish_Separated :=
+        match goal with
+        | H: Separated ?xs,
+          H1: nth_error ?xs ?t1 = Some ?s1,
+          H2: nth_error ?xs ?t2 = Some ?s2,
+          H3: In ?addr ?s1,
+          H4: In ?addr ?s2,
+          H5: ?t1 <> ?t2 |- _ =>
+            exfalso; eapply H with (2 := H1) (3 := H2) (4 := H3) (5 := H4);
+            solve[option_simpl; auto; lia]
+        | _ => progress(option_simpl; lia)
+        end.
+      
+      Ltac prepare_Separated :=
+        try match goal with
+            H1: nth_error ?xs ?t1 = Some ?s1,
+              H2: nth_error ?xs ?t2 = Some ?s2,
+                H3: In ?addr ?s1,
+                  H4: In ?addr ?s2 |- _ =>
+              let Heq := fresh in   
+              assert (t1 = t2) as Heq;
+              [ destruct (PeanoNat.Nat.eq_dec t1 t2); [ by auto | ]  | subst ]
+          end.
+      
+      Ltac simplify_Separated :=
+        prepare_Separated; try solve[finish_Separated].
 
       Lemma threadInConfigFootprint:
         forall config metaThread tid addr,
@@ -354,6 +355,91 @@ Ltac simplify_Separated :=
   End WithContext. 
   Hint Resolve Inv_curThread : invariants.
 End Configuration.
+
+(* If a (malicious) compartment is not transitively-reachable from a
+   protected compartment, then it should never have access to the
+   protected compartment's memory regions.
+ *)
+Module CompartmentIsolation.
+  Import ListNotations.
+  Import Configuration.
+  Import Separation.
+  Section WithContext.
+    Context [ISA: ISA_params].
+    Context {Byte Key: Type}.
+    Context {capEncodeDecode: @CapEncodeDecode Byte Key}.
+    Notation FullMemory := (@FullMemory Byte).
+    Notation EXNInfo := (@EXNInfo Byte).
+    Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
+    Context {decode: list Byte -> @Inst _ _ _ capEncodeDecode}.
+    Context {pccNotInBounds : EXNInfo}.
+    Notation Machine := (@Machine Byte Key).
+    Notation Cap := (@Cap Key).
+    Notation CapOrBytes := (@CapOrBytes Byte Key).
+    Notation AddrOffset := nat (only parsing).
+    Notation MachineStep := (MachineStep fetchAddrs decode pccNotInBounds).
+    Notation PCC := Cap (only parsing).
+    Notation Thread := (@Thread Byte Key).
+    Notation Trace := (@Trace Byte Key).
+    Notation State := (Machine * Trace)%type.
+    Notation Event := (@Event Byte Key).
+    Notation Config := (@Config Byte Key).
+    Notation SameThreadStep := (SameThreadStep fetchAddrs decode pccNotInBounds).
+    Notation ValidInitialState := (@ValidInitialState _ Byte Key).
+
+    (* idx1 can call into idx2 *)
+    Definition ReachableCompartment (config: Config) (idx1 idx2: nat) : Prop.
+    Admitted.
+
+    (* NB: there is (not-needed-here) nuance with library calls.
+     * TODO: we might need to special case the switcher.
+     * TODO: is this safe?
+     *)
+    Definition ThreadInCompartment (config: Config) (t: Thread) (cid: nat) : Prop :=
+      exists frame,
+        hd_error t.(thread_systemState).(thread_trustedStack).(trustedStack_frames) = Some frame /\
+        AddrHasProvenance config frame.(trustedStackFrame_calleeExportTable).(capCursor) (Provenance_Compartment cid).
+
+    Definition AddrInCompartment (config: Config) (cid: nat) (addr: Addr): Prop :=
+      exists compartment,
+        nth_error config.(configCompartments) cid = Some compartment /\
+        In addr (compartmentFootprint compartment).
+
+    Definition MutuallyIsolatedCompartment (config: Config) (idx1 idx2: nat) : Prop :=
+      (ReachableCompartment config idx1 idx2 -> False) /\
+      (ReachableCompartment config idx2 idx1 -> False).
+
+    Section WithConfig.
+      Variable config: Config.
+      (* Variable initialMachine: Machine. *)
+
+      (* If compartment idx1 is isolated from compartment idx2, then
+         any address belonging to compartment idx1 should not be
+         reachable by any thread running in compartment idx2.
+       *)
+      Definition PCompartmentIsolation (st: State):=
+        let '(machine, tr) := st in 
+        forall idx1 idx2,
+          idx1 <> idx2 ->
+          MutuallyIsolatedCompartment config idx1 idx2 ->
+          forall thread,
+          In thread machine.(machine_threads) ->
+          ThreadInCompartment config thread idx2 ->
+          (forall addr,
+             AddrInCompartment config idx1 addr ->
+             ReachableRWXAddr machine.(machine_memory) (capsOfThread thread) addr ->
+             False).
+    End WithConfig.
+
+    Theorem CompartmentIsolation :
+      forall config initial_machine,
+        WFConfig config ->
+        ValidInitialState config initial_machine ->
+        Combinators.always MachineStep (PCompartmentIsolation config) (initial_machine, []).
+    Admitted.
+
+  End WithContext.
+End CompartmentIsolation.
 
 (* From any valid initial state where threads are isolated (their reachable
    read/write caps are disjoint), for any sequence of same-domain (Ev_General)
@@ -624,6 +710,7 @@ End ThreadIsolatedMonotonicity.
    - if a compartment has no export entries, and its import entries
      only consist of sentries to libraries, then no other compartment
      can access the isolated compartment's caps.
+   - intermediate lemma: on a compartment call, we
  *)
    
 
