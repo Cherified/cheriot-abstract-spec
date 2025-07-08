@@ -429,6 +429,27 @@ Module CompartmentIsolation.
              AddrInCompartment config idx1 addr ->
              ReachableRWXAddr machine.(machine_memory) (capsOfThread thread) addr ->
              False).
+
+      Definition Invariant (st: State) : Prop.
+      Admitted.
+
+      Lemma InvariantStep (s: State) :
+        forall t,
+        Invariant s ->
+        MachineStep s t ->
+        Invariant t.
+      Admitted.
+
+      Lemma InvariantUse (s: State) :
+        Invariant s ->
+        PCompartmentIsolation s.
+      Admitted.
+
+      Lemma InvariantInitial :
+        forall initial_machine,
+        ValidInitialState config initial_machine ->
+        Invariant (initial_machine, []).
+      Admitted.
     End WithConfig.
 
     Theorem CompartmentIsolation :
@@ -436,7 +457,13 @@ Module CompartmentIsolation.
         WFConfig config ->
         ValidInitialState config initial_machine ->
         Combinators.always MachineStep (PCompartmentIsolation config) (initial_machine, []).
-    Admitted.
+    Proof.
+      intros * hwf_config hinit_ok.
+      econstructor.
+      - eapply InvariantInitial; eauto.
+      - eapply InvariantStep; eauto.
+      - eapply InvariantUse; eauto.
+    Qed.
 
   End WithContext.
 End CompartmentIsolation.
