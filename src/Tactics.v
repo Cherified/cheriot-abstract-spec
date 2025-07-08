@@ -1,5 +1,15 @@
 From Stdlib Require Import List Lia Bool Nat NArith.
 
+
+Tactic Notation "learn_hyp" constr(p) "as" ident(H') :=
+  let P := type of p in
+  match goal with
+  | H : P |- _ => fail 1
+  | _ => pose proof p as H'
+  end.
+Tactic Notation "learn_hyp" constr(p) :=
+  let H := fresh in learn_hyp p as H.
+
 Lemma simple_tuple_inversion:
   forall {A} {B} (a: A) (b: B) x y,
   (a,b) = (x,y) ->

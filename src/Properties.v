@@ -54,17 +54,23 @@ Module Configuration.
 
     Record Compartment := {
         compartmentReadOnly: list Addr; (* Code and read-only data, including import entries *)
-        compartmentGlobals: list Addr;
+        compartmentGlobals: list Addr; 
         compartmentExports: list ExportEntry;
         compartmentImports: list ImportEntry
-    }.
+      }.
 
-    (* The initial state of a machine is defined in terms of its compartments,
-       the trusted switcher, the initial state of the threads, and the initial
-       memory. *)
+    (* TODO: imports? *)
+    Record Library :=
+      { libraryReadOnly: list Addr
+      }.                              
+
+    (* The initial state of a machine is defined in terms of its
+       compartments, libraries, the trusted switcher, the initial
+       state of the threads, and the initial memory. *)
     Record Config := {
         configCompartments: list Compartment;
-        configSwitcher: nat; (* Index of the switcher compartment *)
+        configLibraries: list Library;
+        configSwitcher: nat; (* Index of the switcher library *)
         configThreads : list InitialThreadMetadata;
         configInitMemory: FullMemory
         (* configMMIOAddrs: list Addr; *)
@@ -74,23 +80,25 @@ Module Configuration.
         compartment.(compartmentReadOnly) ++ compartment.(compartmentGlobals).
     Definition stackFootprint (t: InitialThreadMetadata) : list Addr :=
         seq t.(initThreadStackAddr) t.(initThreadStackSize).
-
+    Definition libraryFootprint (l: Library) : list Addr :=
+      l.(libraryReadOnly).
     (* TODO *)
     Record WFCompartment (c: Compartment) := {
         WFCompartment_DisjointCodeAndData: Disjoint c.(compartmentReadOnly) c.(compartmentGlobals)
     }.
 
-    Definition WFSwitcher (c: Compartment) : Prop := True.
+    Definition WFSwitcher (c: Library) : Prop := True.
 
     Definition ConfigFootprints (config: Config) :=
         (* (configMMIOAddrs config) :: *)
           (map compartmentFootprint config.(configCompartments))
-           ++ (map stackFootprint config.(configThreads)).
+            ++ (map stackFootprint config.(configThreads))
+            ++ (map libraryFootprint config.(configLibraries)).
 
     Record WFConfig (config: Config) := {
         WFConfig_footprintDisjoint: Separated (ConfigFootprints config);
         WFConfig_compartments: forall c, In c config.(configCompartments) -> WFCompartment c;
-        WFConfig_switcher: exists c, nth_error config.(configCompartments) config.(configSwitcher) = Some c /\
+        WFConfig_switcher: exists c, nth_error config.(configLibraries) config.(configSwitcher) = Some c /\
                                 WFSwitcher c
         (* WFConfig_importEntriesOk: ImportEntriesOk config *)
     }.
@@ -117,7 +125,8 @@ Module Configuration.
       (* TODO: add MMIO and shared objects *)
       Inductive AddressProvenance :=
       | Provenance_Stack (tid: nat)
-      | Provenance_Compartment (cid: nat).
+      | Provenance_Compartment (cid: nat)
+      | Provenance_Library (lid: nat).                                 
      
       Inductive AddrHasProvenance : Config -> Addr -> AddressProvenance -> Prop :=
       | StackProvenance : forall config addr tid metaThread,
@@ -127,22 +136,37 @@ Module Configuration.
       | CompartmentCodeProvenance: forall config addr cid compartment,
           nth_error config.(configCompartments) cid = Some compartment ->
           In addr (compartmentFootprint compartment) ->
-          AddrHasProvenance config addr (Provenance_Compartment cid).
-
-Ltac simplify_nat :=
-  repeat match goal with
-  | H: _ <? _ = true |- _ => rewrite PeanoNat.Nat.ltb_lt in H
-  | H: _ <? _ = false |- _ => rewrite PeanoNat.Nat.ltb_nlt in H
-  | _ => lia                                                                       
-  end.
-Tactic Notation "learn_hyp" constr(p) "as" ident(H') :=
-  let P := type of p in
+          AddrHasProvenance config addr (Provenance_Compartment cid)
+      | LibraryCodeProvenance: forall config addr lid library,
+          nth_error config.(configLibraries) lid = Some library ->
+          In addr (libraryFootprint library) ->
+          AddrHasProvenance config addr (Provenance_Library lid).
+Ltac finish_Separated :=
   match goal with
-  | H : P |- _ => fail 1
-  | _ => pose proof p as H'
+  | H: Separated ?xs,
+    H1: nth_error ?xs ?t1 = Some ?s1,
+    H2: nth_error ?xs ?t2 = Some ?s2,
+    H3: In ?addr ?s1,
+    H4: In ?addr ?s2,
+    H5: ?t1 <> ?t2 |- _ =>
+      exfalso; eapply H with (2 := H1) (3 := H2) (4 := H3) (5 := H4);
+      solve[option_simpl; auto; lia]
+  | _ => progress(option_simpl; lia)
   end.
-Tactic Notation "learn_hyp" constr(p) :=
-  let H := fresh in learn_hyp p as H.
+
+Ltac prepare_Separated :=
+    try match goal with
+      H1: nth_error ?xs ?t1 = Some ?s1,
+      H2: nth_error ?xs ?t2 = Some ?s2,
+      H3: In ?addr ?s1,
+      H4: In ?addr ?s2 |- _ =>
+      let Heq := fresh in   
+      assert (t1 = t2) as Heq;
+      [ destruct (PeanoNat.Nat.eq_dec t1 t2); [ by auto | ]  | subst ]
+    end.
+
+Ltac simplify_Separated :=
+  prepare_Separated; try solve[finish_Separated].
 
       Lemma threadInConfigFootprint:
         forall config metaThread tid addr,
@@ -154,25 +178,14 @@ Tactic Notation "learn_hyp" constr(p) :=
         unfold ConfigFootprints.
         rewrite nth_error_app. rewrite length_map.
         case_match; simplify_nat.
+        saturate_list.
+        rewrite nth_error_app. rewrite length_map.
+        case_match; simplify_nat.
         rewrite nth_error_map.
         replace (length (configCompartments config) + tid - length (configCompartments config)) with tid by lia.
         rewrite hthread. cbn. eexists; split; eauto.
       Qed.
 
-Ltac simplify_Separated :=
-  repeat match goal with
-  | H: Separated ?xs,
-    H1: nth_error ?xs ?t1 = Some ?s1,
-    H2: nth_error ?xs ?t2 = Some ?s2,
-    H3: In ?addr ?s1,
-    H4: In ?addr ?s2 |- _ =>
-      let Heq := fresh in   
-      assert (t1 = t2) as Heq;
-      [ destruct (PeanoNat.Nat.eq_dec t1 t2); auto; 
-        exfalso; eapply H with (2 := H1) (3 := H2) (4 := H3) (5 := H4); by auto | ];
-      rewrite Heq in *
-  | _ => progress (option_simpl; try lia)
-  end.
       Lemma compartmentInConfigFootprint:
         forall config compartment cid addr,
           nth_error (configCompartments config) cid = Some compartment ->
@@ -185,6 +198,25 @@ Ltac simplify_Separated :=
         rewrite hthread.
         case_match; simplify_nat; auto.
         exfalso. apply H. apply nth_error_Some. rewrite_solve.
+      Qed.
+
+      Lemma libraryInConfigFootprint:
+        forall config library lid addr,
+          nth_error (configLibraries config) lid = Some library ->
+          In addr (libraryFootprint library) ->
+          nth_error (ConfigFootprints config) (length config.(configCompartments) + length config.(configThreads) + lid) = Some (libraryFootprint library).
+      Proof.
+        intros * hlib haddr.
+        unfold ConfigFootprints.
+        repeat rewrite nth_error_app. repeat rewrite length_map.
+        saturate_list.
+        case_match; simplify_nat.
+        case_match; simplify_nat.
+        rewrite nth_error_map.
+        match goal with
+        | |- context[nth_error _ ?x] => replace x with lid by lia
+        end.
+        rewrite_solve.
       Qed.
 
       Lemma uniqueInitialProvenance:
@@ -204,11 +236,16 @@ Ltac simplify_Separated :=
         | H: nth_error (configCompartments _) _ = Some ?comp,
           H1: In ?addr (compartmentFootprint ?comp) |- _ =>
             learn_hyp (compartmentInConfigFootprint _ _ _ _ H H1)
-        | |- ?x _ = ?x _ => f_equal                        
+        | H: nth_error (configLibraries _) _ = Some ?comp,
+          H1: In ?addr (libraryFootprint ?comp) |- _ =>
+            learn_hyp (libraryInConfigFootprint _ _ _ _ H H1)
+        | |- ?x _ = ?x _ => f_equal
+        | |- Provenance_Stack _ = Provenance_Compartment _ => exfalso
+        | |- Provenance_Compartment _ = Provenance_Stack _ => exfalso
+        | |- Provenance_Stack _ = Provenance_Library _ => exfalso
         end.                                                                    
-        all: destruct_products; simplify_Separated.
-
-
+        all: destruct_products; simplify_Separated; saturate_list; try lia.
+      Qed.
 
       Lemma InvariantInitial :
         forall config m,
