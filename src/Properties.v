@@ -387,10 +387,31 @@ Module CompartmentIsolation.
     Notation SameThreadStep := (SameThreadStep fetchAddrs decode pccNotInBounds).
     Notation ValidInitialState := (@ValidInitialState _ Byte Key).
 
-    (* idx1 can call into idx2 *)
-    Definition ReachableCompartment (config: Config) (idx1 idx2: nat) : Prop.
-    Admitted.
-
+    (* Compartments are connected on the callgraph *)
+    (* TODO: double check *)
+    Inductive ReachableCompartment : Config -> nat -> nat -> Prop :=
+    | ReachableSelf:
+        forall config idx,
+          WFConfig config ->
+          idx < length config.(configCompartments) ->
+          ReachableCompartment config idx idx
+    | ReachableCaller:
+        forall config idx1 idx2 c2 idx3 cap,
+          WFConfig config ->
+          ReachableCompartment config idx1 idx2 ->
+          nth_error config.(configCompartments) idx2 = Some c2 ->
+          In (ImportEntry_SealedCapToExportEntry cap) c2.(compartmentImports) ->
+          AddrHasProvenance config cap.(capCursor) (Provenance_Compartment idx3) ->
+          ReachableCompartment config idx1 idx3
+     | ReachableCallee:
+        forall config idx1 idx2 c3 idx3 cap,
+          WFConfig config ->
+          ReachableCompartment config idx1 idx2 ->
+          nth_error config.(configCompartments) idx3 = Some c3 ->
+          In (ImportEntry_SealedCapToExportEntry cap) c3.(compartmentImports) ->
+          AddrHasProvenance config cap.(capCursor) (Provenance_Compartment idx2) ->
+          ReachableCompartment config idx1 idx3.
+             
     (* NB: there is (not-needed-here) nuance with library calls.
      * TODO: we might need to special case the switcher.
      * TODO: is this safe?
@@ -406,8 +427,7 @@ Module CompartmentIsolation.
         In addr (compartmentFootprint compartment).
 
     Definition MutuallyIsolatedCompartment (config: Config) (idx1 idx2: nat) : Prop :=
-      (ReachableCompartment config idx1 idx2 -> False) /\
-      (ReachableCompartment config idx2 idx1 -> False).
+      (ReachableCompartment config idx1 idx2 -> False).
 
     Section WithConfig.
       Variable config: Config.
