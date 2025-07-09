@@ -1,6 +1,6 @@
 (*! Properties about the spec based on the initial configuration. *)
 
-From Stdlib Require Import List Lia Bool Nat NArith.
+From Stdlib Require Import String List Lia Bool Nat NArith.
 Set Primitive Projections.
 From cheriot Require Import Spec Utils Tactics SpecLemmas.
 
@@ -19,6 +19,7 @@ Module Configuration.
     Notation Cap := (@Cap Key).
     Notation CapOrBytes := (@CapOrBytes Byte Key).
     Notation FullMemory := (@FullMemory Byte).
+    Notation TrustedStackFrame := (@TrustedStackFrame Key).
 
     Record ExportEntry : Type := {
         exportEntryAddr: nat; (* TODO: check bounds *)
@@ -48,13 +49,14 @@ Module Configuration.
     Record InitialThreadMetadata := {
         initThreadEntryPoint: Addr;
         initThreadRf : RegisterFile;
-        initThreadStackSize: nat;
-        initThreadStackAddr: Addr
+        initThreadCSP: Cap;
+        initThreadCompartment: nat
     }.
 
+    (* TODO: sealing keys *)
     Record Compartment := {
-        compartmentReadOnly: list Addr; (* Code and read-only data, including import entries *)
-        compartmentGlobals: list Addr; 
+        compartmentPCC: Cap; (* Code and read-only data, including import entries *)
+        compartmentCGP: Cap; 
         compartmentExports: list ExportEntry;
         compartmentImports: list ImportEntry
       }.
@@ -77,15 +79,41 @@ Module Configuration.
     }.
 
     Definition compartmentFootprint (compartment: Compartment) : list Addr :=
-        compartment.(compartmentReadOnly) ++ compartment.(compartmentGlobals).
+        compartment.(compartmentPCC).(capAddrs) ++ compartment.(compartmentCGP).(capAddrs).
     Definition stackFootprint (t: InitialThreadMetadata) : list Addr :=
-        seq t.(initThreadStackAddr) t.(initThreadStackSize).
+        t.(initThreadCSP).(capAddrs).
     Definition libraryFootprint (l: Library) : list Addr :=
       l.(libraryReadOnly).
+
+    Definition capsOfImportEntry (ie: ImportEntry) :=
+      match ie with
+      | ImportEntry_SealedCapToExportEntry c => c
+      | ImportEntry_SentryToLibraryFunction c => c
+      end.                                                    
+
+    Definition capsOfCompartment (c: Compartment) :=
+      c.(compartmentPCC)::c.(compartmentCGP)::(map capsOfImportEntry c.(compartmentImports)).
+    Definition AddrInCompartment (config: Config) (cid: nat) (addr: Addr): Prop :=
+      exists compartment,
+        nth_error config.(configCompartments) cid = Some compartment /\
+        In addr (compartmentFootprint compartment).
+
+    (* TODO: Not sufficient; need to include sealed caps. *)
+    (* The addresses reachable from each compartment are all
+       reachable from PCC, CGP, or import table.
+     *)
+    Definition InitialCompartmentAddressesOk (mem: FullMemory) (compartment: Compartment) : Prop :=
+      forall a, ReachableRWXAddr mem (capsOfCompartment compartment) a ->
+                In a (compartmentFootprint compartment).
+                
     (* TODO *)
-    Record WFCompartment (c: Compartment) := {
-        WFCompartment_DisjointCodeAndData: Disjoint c.(compartmentReadOnly) c.(compartmentGlobals)
-    }.
+    Definition ValidUnsealedCap (c: Cap) : Prop :=
+      In c.(capCursor) c.(capAddrs) /\ c.(capSealed) = None.
+
+    Record WFCompartment (mem: FullMemory) (c: Compartment) :=
+      { WFCompartment_ReachableRWXAddr: InitialCompartmentAddressesOk mem c
+      ; WFCompartment_PCC: c.(compartmentPCC).(capSealed) = None
+      }.                                                                       
 
     Definition WFSwitcher (c: Library) : Prop := True.
 
@@ -97,78 +125,69 @@ Module Configuration.
 
     Record WFConfig (config: Config) := {
         WFConfig_footprintDisjoint: Separated (ConfigFootprints config);
-        WFConfig_compartments: forall c, In c config.(configCompartments) -> WFCompartment c;
+        WFConfig_compartmentMemory:
+          Forall (WFCompartment config.(configInitMemory)) config.(configCompartments);
         WFConfig_switcher: exists c, nth_error config.(configLibraries) config.(configSwitcher) = Some c /\
                                 WFSwitcher c
         (* WFConfig_importEntriesOk: ImportEntriesOk config *)
     }.
 
-    Record ThreadInv (t: InitialThreadMetadata) (t: Thread) : Prop :=
+    Record ThreadInv (meta: InitialThreadMetadata) (t: Thread) : Prop :=
     { Inv_validRf : ValidRf t.(thread_userState).(thread_rf)
     }.
+
+    Inductive AddressProvenance :=
+    | Provenance_Stack (tid: nat)
+    | Provenance_Compartment (cid: nat)
+    | Provenance_Library (lid: nat).                                 
+     
+    Inductive AddrHasProvenance : Config -> Addr -> AddressProvenance -> Prop :=
+    | StackProvenance : forall config addr tid metaThread,
+        nth_error config.(configThreads) tid = Some metaThread ->
+        In addr (stackFootprint metaThread) ->
+        AddrHasProvenance config addr (Provenance_Stack tid)
+    | CompartmentCodeProvenance: forall config addr cid compartment,
+        nth_error config.(configCompartments) cid = Some compartment ->
+        In addr (compartmentFootprint compartment) ->
+        AddrHasProvenance config addr (Provenance_Compartment cid)
+    | LibraryCodeProvenance: forall config addr lid library,
+        nth_error config.(configLibraries) lid = Some library ->
+        In addr (libraryFootprint library) ->
+        AddrHasProvenance config addr (Provenance_Library lid).
 
     Record GlobalInvariant (config: Config) (m: Machine) : Prop :=
     { Inv_curThread: m.(machine_curThreadId) < length m.(machine_threads)
     ; Inv_threads : Forall2 ThreadInv config.(configThreads) m.(machine_threads)
     }.
 
+    
+    Definition ValidTrustedStackFrame (frame: TrustedStackFrame) (meta: InitialThreadMetadata) (c: Compartment): Prop :=
+      Restrict c.(compartmentPCC) frame.(trustedStackFrame_calleeExportTable) /\
+      Restrict meta.(initThreadCSP) frame.(trustedStackFrame_CSP) /\
+      ValidUnsealedCap frame.(trustedStackFrame_calleeExportTable).
+
+    Record ValidInitialThread (config: Config) (meta: InitialThreadMetadata) (t: Thread) : Prop :=
+      { ValidInitialThread_addrs:
+        exists compartment,
+        nth_error config.(configCompartments) meta.(initThreadCompartment) = Some compartment /\
+          forall a, ReachableRWXAddr config.(configInitMemory) (capsOfThread t) a ->
+                    In a (stackFootprint meta) \/
+                    In a (compartmentFootprint compartment)
+      ; ValidInitialThread_trustedStack:
+        exists compartment
+,
+        nth_error config.(configCompartments) meta.(initThreadCompartment) = Some compartment /\
+        exists frame, t.(thread_systemState).(thread_trustedStack).(trustedStack_frames) = [frame] /\ ValidTrustedStackFrame frame meta compartment
+      }.                         
+                    
     Record ValidInitialState (config: Config) (m: Machine) : Prop :=
       { ValidInit_memory: m.(machine_memory) = config.(configInitMemory)
+      ; ValidInit_threads: Forall2 (ValidInitialThread config) config.(configThreads) m.(machine_threads) 
       ; ValidInit_invariant: GlobalInvariant config m
       }.
 
     Hint Resolve Inv_curThread : invariants.
     Hint Resolve Inv_validRf: invariants.
-
-    Section Proofs.
-
-      (* TODO: add MMIO and shared objects *)
-      Inductive AddressProvenance :=
-      | Provenance_Stack (tid: nat)
-      | Provenance_Compartment (cid: nat)
-      | Provenance_Library (lid: nat).                                 
-     
-      Inductive AddrHasProvenance : Config -> Addr -> AddressProvenance -> Prop :=
-      | StackProvenance : forall config addr tid metaThread,
-          nth_error config.(configThreads) tid = Some metaThread ->
-          In addr (stackFootprint metaThread) ->
-          AddrHasProvenance config addr (Provenance_Stack tid)
-      | CompartmentCodeProvenance: forall config addr cid compartment,
-          nth_error config.(configCompartments) cid = Some compartment ->
-          In addr (compartmentFootprint compartment) ->
-          AddrHasProvenance config addr (Provenance_Compartment cid)
-      | LibraryCodeProvenance: forall config addr lid library,
-          nth_error config.(configLibraries) lid = Some library ->
-          In addr (libraryFootprint library) ->
-          AddrHasProvenance config addr (Provenance_Library lid).
-
-      Ltac finish_Separated :=
-        match goal with
-        | H: Separated ?xs,
-          H1: nth_error ?xs ?t1 = Some ?s1,
-          H2: nth_error ?xs ?t2 = Some ?s2,
-          H3: In ?addr ?s1,
-          H4: In ?addr ?s2,
-          H5: ?t1 <> ?t2 |- _ =>
-            exfalso; eapply H with (2 := H1) (3 := H2) (4 := H3) (5 := H4);
-            solve[option_simpl; auto; lia]
-        | _ => progress(option_simpl; lia)
-        end.
-      
-      Ltac prepare_Separated :=
-        try match goal with
-            H1: nth_error ?xs ?t1 = Some ?s1,
-              H2: nth_error ?xs ?t2 = Some ?s2,
-                H3: In ?addr ?s1,
-                  H4: In ?addr ?s2 |- _ =>
-              let Heq := fresh in   
-              assert (t1 = t2) as Heq;
-              [ destruct (PeanoNat.Nat.eq_dec t1 t2); [ by auto | ]  | subst ]
-          end.
-      
-      Ltac simplify_Separated :=
-        prepare_Separated; try solve[finish_Separated].
-
       Lemma threadInConfigFootprint:
         forall config metaThread tid addr,
           nth_error (configThreads config) tid = Some metaThread ->
@@ -219,6 +238,52 @@ Module Configuration.
         end.
         rewrite_solve.
       Qed.
+Ltac saturate_footprints := 
+ repeat match goal with
+        | H: nth_error (configThreads _) _ = Some ?thread,
+          H1: In ?addr (stackFootprint ?thread) |- _ =>
+            let H' := fresh H1 "footprint" in 
+            learn_hyp (threadInConfigFootprint _ _ _ _ H H1) as H'
+        | H: nth_error (configCompartments _) _ = Some ?comp,
+        H1: In ?addr (compartmentFootprint ?comp) |- _ =>
+            let H' := fresh H1 "footprint" in 
+            learn_hyp (compartmentInConfigFootprint _ _ _ _ H H1) as H'
+        | H: nth_error (configLibraries _) _ = Some ?comp,
+        H1: In ?addr (libraryFootprint ?comp) |- _ =>
+            let H' := fresh H1 "footprint" in 
+            learn_hyp (libraryInConfigFootprint _ _ _ _ H H1) as H'
+  end.     
+
+    Section Proofs.
+
+      (* TODO: add MMIO and shared objects *)
+      Ltac finish_Separated :=
+        match goal with
+        | H: Separated ?xs,
+          H1: nth_error ?xs ?t1 = Some ?s1,
+          H2: nth_error ?xs ?t2 = Some ?s2,
+          H3: In ?addr ?s1,
+          H4: In ?addr ?s2,
+          H5: ?t1 <> ?t2 |- _ =>
+            exfalso; eapply H with (2 := H1) (3 := H2) (4 := H3) (5 := H4);
+            solve[option_simpl; auto; lia]
+        | _ => progress(option_simpl; lia)
+        end.
+      
+      Ltac prepare_Separated :=
+        try match goal with
+            H1: nth_error ?xs ?t1 = Some ?s1,
+              H2: nth_error ?xs ?t2 = Some ?s2,
+                H3: In ?addr ?s1,
+                  H4: In ?addr ?s2 |- _ =>
+              let Heq := fresh in   
+              assert (t1 = t2) as Heq;
+              [ destruct (PeanoNat.Nat.eq_dec t1 t2); [ by auto | ]  | subst ]
+          end.
+      
+      Ltac simplify_Separated :=
+        prepare_Separated; try solve[finish_Separated].
+
 
       Lemma uniqueInitialProvenance:
         forall config addr prov1 prov2,
@@ -229,17 +294,8 @@ Module Configuration.
       Proof.
         intros * WFConfig hprov1 hprov2.
         destruct WFConfig.
-        inv hprov1; inv hprov2; auto.
-        all: repeat match goal with
-        | H: nth_error (configThreads _) _ = Some ?thread,
-          H1: In ?addr (stackFootprint ?thread) |- _ =>
-            learn_hyp (threadInConfigFootprint _ _ _ _ H H1)
-        | H: nth_error (configCompartments _) _ = Some ?comp,
-          H1: In ?addr (compartmentFootprint ?comp) |- _ =>
-            learn_hyp (compartmentInConfigFootprint _ _ _ _ H H1)
-        | H: nth_error (configLibraries _) _ = Some ?comp,
-          H1: In ?addr (libraryFootprint ?comp) |- _ =>
-            learn_hyp (libraryInConfigFootprint _ _ _ _ H H1)
+        inv hprov1; inv hprov2; auto; saturate_footprints;
+        repeat match goal with
         | |- ?x _ = ?x _ => f_equal
         | |- Provenance_Stack _ = Provenance_Compartment _ => exfalso
         | |- Provenance_Compartment _ = Provenance_Stack _ => exfalso
@@ -386,7 +442,7 @@ Module CompartmentIsolation.
     Notation Config := (@Config Byte Key).
     Notation SameThreadStep := (SameThreadStep fetchAddrs decode pccNotInBounds).
     Notation ValidInitialState := (@ValidInitialState _ Byte Key).
-
+    Notation ValidTrustedStackFrame := (@ValidTrustedStackFrame Byte Key).
     (* Compartments are connected on the callgraph *)
     (* TODO: double check *)
     Inductive ReachableCompartment : Config -> nat -> nat -> Prop :=
@@ -421,16 +477,13 @@ Module CompartmentIsolation.
         hd_error t.(thread_systemState).(thread_trustedStack).(trustedStack_frames) = Some frame /\
         AddrHasProvenance config frame.(trustedStackFrame_calleeExportTable).(capCursor) (Provenance_Compartment cid).
 
-    Definition AddrInCompartment (config: Config) (cid: nat) (addr: Addr): Prop :=
-      exists compartment,
-        nth_error config.(configCompartments) cid = Some compartment /\
-        In addr (compartmentFootprint compartment).
 
     Definition MutuallyIsolatedCompartment (config: Config) (idx1 idx2: nat) : Prop :=
       (ReachableCompartment config idx1 idx2 -> False).
 
     Section WithConfig.
       Variable config: Config.
+      Variable (pf_wf_config: WFConfig config).
       (* Variable initialMachine: Machine. *)
 
       (* If compartment idx1 is isolated from compartment idx2, then
@@ -450,8 +503,13 @@ Module CompartmentIsolation.
              ReachableRWXAddr machine.(machine_memory) (capsOfThread thread) addr ->
              False).
 
-      Definition Invariant (st: State) : Prop.
-      Admitted.
+      Record Invariant' (st: State) : Prop :=
+        { Inv_CompartmentIsolation: PCompartmentIsolation st 
+        }.                                                           
+      
+      Definition Invariant (st: State) : Prop :=
+        GlobalInvariant config (fst st) /\
+        Invariant' st.
 
       Lemma InvariantStep (s: State) :
         forall t,
@@ -463,13 +521,138 @@ Module CompartmentIsolation.
       Lemma InvariantUse (s: State) :
         Invariant s ->
         PCompartmentIsolation s.
-      Admitted.
+      Proof.
+        cbv[Invariant].
+        intros * [hginv hinv].
+        by (eapply Inv_CompartmentIsolation).
+      Qed.
+Ltac saturate_list:=
+  repeat match goal with
+  | H: nth_error ?xs ?idx = Some _ |- _ =>
+      let H' := fresh H "len" in 
+      learn_hyp (nth_error_Some' _ _ _ H) as H'
+  | H: nth_error ?xs ?idx = Some _ |- _ =>
+      let H' := fresh H "In" in 
+      learn_hyp (nth_error_In _ _ H) as H'
+  | H: Forall2 _ _ _ |- _ =>
+      let H' := fresh H "len" in 
+      learn_hyp (Forall2_length H) as H'
+    end.
+
+(* TODO: duplicated *)
+Ltac saturate_footprints := 
+ repeat match goal with
+        | H: nth_error (configThreads _) _ = Some ?thread,
+          H1: In ?addr (stackFootprint ?thread) |- _ =>
+            let H' := fresh H1 "footprint" in 
+            learn_hyp (threadInConfigFootprint _ _ _ _ H H1) as H'
+        | H: nth_error (configCompartments _) _ = Some ?comp,
+        H1: In ?addr (compartmentFootprint ?comp) |- _ =>
+            let H' := fresh H1 "footprint" in 
+            learn_hyp (compartmentInConfigFootprint _ _ _ _ H H1) as H'
+        | H: nth_error (configLibraries _) _ = Some ?comp,
+        H1: In ?addr (libraryFootprint ?comp) |- _ =>
+            let H' := fresh H1 "footprint" in 
+            learn_hyp (libraryInConfigFootprint _ _ _ _ H H1) as H'
+   end.
+      Ltac finish_Separated :=
+        match goal with
+        | H: Separated ?xs,
+          H1: nth_error ?xs ?t1 = Some ?s1,
+          H2: nth_error ?xs ?t2 = Some ?s2,
+          H3: In ?addr ?s1,
+          H4: In ?addr ?s2,
+          H5: ?t1 <> ?t2 |- _ =>
+            exfalso; eapply H with (2 := H1) (3 := H2) (4 := H3) (5 := H4);
+            solve[option_simpl; auto; lia]
+        | _ => progress(option_simpl; lia)
+        end.
+      
+      Ltac prepare_Separated :=
+        try match goal with
+            H1: nth_error ?xs ?t1 = Some ?s1,
+              H2: nth_error ?xs ?t2 = Some ?s2,
+                H3: In ?addr ?s1,
+                  H4: In ?addr ?s2 |- _ =>
+              let Heq := fresh in   
+              assert (t1 = t2) as Heq;
+              [ destruct (PeanoNat.Nat.eq_dec t1 t2); [ by auto | ]  | subst ]
+          end.
+      
+      Ltac simplify_Separated :=
+        prepare_Separated; try solve[finish_Separated].
+Create HintDb lists.
+Hint Resolve nth_error_In : lists.
+
+Inductive MARK : string -> Type :=
+| MkMark : forall s, MARK s.
+Tactic Notation "mark" constr(p) :=
+  let H := fresh "Mark" in
+  learn_hyp p as H.
+      Lemma ValidTrustedStackFrameCapCursor:
+        forall frame meta compartment,
+        compartment.(compartmentPCC).(capSealed) = None ->
+        ValidTrustedStackFrame frame meta compartment ->
+        In (capCursor (trustedStackFrame_calleeExportTable frame))
+          (compartmentFootprint compartment).
+      Proof.
+        cbv [ValidTrustedStackFrame ValidUnsealedCap compartmentFootprint Restrict].
+        intros; destruct_products; rewrite in_app_iff.
+        left. simpl_match.
+        eapply restrictUnsealedAddrsSubset; eauto.
+      Qed.
+
+      Lemma PCompartmentIsolation_Init:
+        forall initial_machine,
+        ValidInitialState config initial_machine ->
+        PCompartmentIsolation (initial_machine, []).
+      Proof.
+        cbv[PCompartmentIsolation].
+        intros * hvalid * hneq hisolated * hthread hcompartment * haddr * hreachable.
+        consider @AddrInCompartment. consider ThreadInCompartment. consider hd_error.
+        repeat match goal with
+        | _ => progress destruct_products
+        | _ => progress saturate_list
+        | _ => progress simpl_match
+        | _ => progress option_simpl
+        | H: WFConfig _ |- _ => mark (MkMark "WFConfig"); destruct H
+        | H: ValidInitialState _ _ |-_ => mark (MkMark "ValidInitialState"); destruct H 
+        | H: Forall2 (ValidInitialThread _) _ ?xs,
+          H1: In _ ?xs |- _ =>
+            mark (MkMark "Forall2_ValidInitialThread");
+            let n := fresh "n" in let rest := fresh in 
+            apply In_nth_error in H1; destruct H1 as (n & rest);
+            eapply Forall2_nth_error2' with (idx := n) in H; eauto; try lia
+        | H: ValidInitialThread _ _ _ |- _ => mark (MkMark "ValidInitialThread"); destruct H
+                                                                                                    | H: AddrHasProvenance _ _ (Provenance_Compartment _) |- _ => inv H
+               end; try lia.
+        rewrite ValidInit_memory0 in *.
+        specialize ValidInitialThread_addrs0r with (1 := hreachable).
+        destruct ValidInitialThread_addrs0r.
+        { saturate_footprints. simplify_Separated. }
+        { assert (In (capCursor (trustedStackFrame_calleeExportTable frame))
+                    (compartmentFootprint compartment0)).
+          { eapply ValidTrustedStackFrameCapCursor; eauto.
+            eapply WFCompartment_PCC.
+            eapply Forall_forall.
+            eapply WFConfig_compartmentMemory; eauto.
+            eauto with lists.
+          }
+          saturate_footprints. simplify_Separated.
+        }
+      Qed.
 
       Lemma InvariantInitial :
         forall initial_machine,
         ValidInitialState config initial_machine ->
         Invariant (initial_machine, []).
-      Admitted.
+      Proof.
+        intros * hvalid.
+        constructor.
+        - apply hvalid.
+        - constructor.
+          by (apply PCompartmentIsolation_Init). 
+      Qed.
     End WithConfig.
 
     Theorem CompartmentIsolation :
@@ -572,7 +755,7 @@ Module ThreadIsolatedMonotonicity.
       Proof.
         intros * .
         constructor.
-        - apply Configuration.InvariantInitial.
+        - eapply Configuration.InvariantInitial.
           apply pfValidInitialMachine.
         - intros htr. constructor.
           + cbv [fst]. apply pfValidInitialMachine.
