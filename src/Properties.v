@@ -516,14 +516,78 @@ Module CompartmentIsolation.
       
       Definition Invariant (st: State) : Prop :=
         GlobalInvariant config (fst st) /\
-        Invariant' st.
+          Invariant' st.
+      Lemma ExceptionStepOk :
+        forall m tr m' thread exn,
+          GlobalInvariant config m ->
+          Invariant' (m, tr) ->
+          GlobalInvariant config m' ->
+          (forall n : nat,
+              n <> machine_curThreadId m ->
+              nth_error (machine_threads m') n = nth_error (machine_threads m) n) ->
+          nth_error (machine_threads m) (machine_curThreadId m) = Some thread ->
+          nth_error (machine_threads m') (machine_curThreadId m) =
+            Some (Build_Thread
+                    (Build_UserThreadState
+                       (thread_rf (thread_userState thread))
+                       (thread_mepcc (thread_systemState thread)))
+                    (Build_SystemThreadState
+                       (thread_pcc (thread_userState thread))
+                       exn 
+                       (thread_trustedStack (thread_systemState thread)))) ->
+          machine_memory m = machine_memory m' ->
+          Invariant (m',(Ev_SameThread (machine_curThreadId m) Ev_Exception::tr)).
+      Admitted.
 
+      Lemma SameThreadStepOk:
+        forall m tr m' ev,
+          GlobalInvariant config m ->
+          Invariant' (m, tr) ->
+          GlobalInvariant config m' ->
+          SameThreadStep m m' ev ->
+          Invariant' (m', ev::tr).
+      Proof.
+        intros * hginv hinv hginv' hstep.
+        pose proof hstep as hstep'.
+        inv hstep. destruct_products.
+        inv stepOkrl.
+        - rename H0 into hstep. revert hstep.
+          cbv [threadStepFunction exceptionState uc sc fst snd mem ints rf mepcc pcc sts].
+          repeat (case_match; intros; simplify_eq); rewrite threadIdEq in *.
+          + admit. (* generalInstOk *)
+          + (* generalInstExn *)
+            eapply ExceptionStepOk with (m := m); eauto.
+          + admit. (* callSentryOk *)
+          + (* callSentryExn *)
+            eapply ExceptionStepOk with (m := m); eauto.
+          + admit. (* retSentryOk *)
+          + (* retSentryExn *)
+            eapply ExceptionStepOk with (m := m); eauto.
+          + (* Inst Exn *)
+            eapply ExceptionStepOk with (m := m); eauto.
+        - (* Fetch Exception *)
+          cbv [threadStepFunction exceptionState uc sc fst snd mem ints rf mepcc pcc sts] in *.
+          rewrite threadIdEq in *.
+          eapply ExceptionStepOk with (m := m); eauto.
+      Admitted.
+      
       Lemma InvariantStep (s: State) :
         forall t,
         Invariant s ->
         MachineStep s t ->
         Invariant t.
-      Admitted.
+      Proof.
+        cbv[Invariant].
+        intros * hinv hstep. destruct s. destruct t.
+        cbv [fst snd] in *.
+        destruct_products.
+        assert (GlobalInvariant config m0) as hglobal' by (eapply GlobalInvariantStep; eauto).
+        split; auto.
+        inv hstep.
+        - constructor.
+          + pose proof (Inv_CompartmentIsolation _ hinvr) as hisolation. auto.
+        - eapply SameThreadStepOk with (m := m); eauto.
+      Qed.
 
       Lemma InvariantUse (s: State) :
         Invariant s ->
