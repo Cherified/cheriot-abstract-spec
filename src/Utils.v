@@ -251,8 +251,15 @@ Qed.
 Ltac saturate_list:=
   repeat match goal with
   | H: nth_error ?xs ?idx = Some _ |- _ =>
-      learn_hyp (nth_error_Some' _ _ _ H)
-  end.                 
+      let H' := fresh H "len" in 
+      learn_hyp (nth_error_Some' _ _ _ H) as H'
+  | H: nth_error ?xs ?idx = Some _ |- _ =>
+      let H' := fresh H "In" in 
+      learn_hyp (nth_error_In _ _ H) as H'
+  | H: Forall2 _ _ _ |- _ =>
+      let H' := fresh H "len" in 
+      learn_hyp (Forall2_length H) as H'
+    end.
 
 
 Fixpoint listSumToInl [A B: Type] (l: list (A+B)) : list A :=

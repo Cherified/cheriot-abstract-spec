@@ -6,12 +6,47 @@ From cheriot Require Import Spec Utils Tactics SpecLemmas.
 
 Create HintDb invariants.
 Import ListNotations.
+Create HintDb lists.
+Hint Resolve nth_error_In : lists.
+
+Inductive MARK : string -> Type :=
+| MkMark : forall s, MARK s.
+Tactic Notation "mark" constr(p) :=
+  let H := fresh "Mark" in
+  learn_hyp p as H.
 
 Set Nested Proofs Allowed.
 
+Import Separation.
+Ltac finish_Separated :=
+  match goal with
+  | H: Separated ?xs,
+    H1: nth_error ?xs ?t1 = Some ?s1,
+    H2: nth_error ?xs ?t2 = Some ?s2,
+    H3: In ?addr ?s1,
+    H4: In ?addr ?s2,
+    H5: ?t1 <> ?t2 |- _ =>
+      exfalso; eapply H with (2 := H1) (3 := H2) (4 := H3) (5 := H4);
+      solve[option_simpl; auto; lia]
+  | _ => progress(option_simpl; lia)
+  end.
+
+Ltac prepare_Separated :=
+  try match goal with
+      H1: nth_error ?xs ?t1 = Some ?s1,
+        H2: nth_error ?xs ?t2 = Some ?s2,
+          H3: In ?addr ?s1,
+            H4: In ?addr ?s2 |- _ =>
+        let Heq := fresh in   
+        assert (t1 = t2) as Heq;
+        [ destruct (PeanoNat.Nat.eq_dec t1 t2); [ by auto | ]  | subst ]
+    end.
+
+Ltac simplify_Separated :=
+  prepare_Separated; try solve[finish_Separated].
+
 (* Defining the valid initial states of a machine in terms of compartments and thread initialization. *)
 Module Configuration.
-  Import Separation.
   Section WithContext. 
     Context [ISA: ISA_params].
     Context {Byte Key: Type}.
@@ -238,53 +273,25 @@ Module Configuration.
         end.
         rewrite_solve.
       Qed.
-Ltac saturate_footprints := 
- repeat match goal with
-        | H: nth_error (configThreads _) _ = Some ?thread,
-          H1: In ?addr (stackFootprint ?thread) |- _ =>
-            let H' := fresh H1 "footprint" in 
-            learn_hyp (threadInConfigFootprint _ _ _ _ H H1) as H'
-        | H: nth_error (configCompartments _) _ = Some ?comp,
-        H1: In ?addr (compartmentFootprint ?comp) |- _ =>
-            let H' := fresh H1 "footprint" in 
-            learn_hyp (compartmentInConfigFootprint _ _ _ _ H H1) as H'
-        | H: nth_error (configLibraries _) _ = Some ?comp,
-        H1: In ?addr (libraryFootprint ?comp) |- _ =>
-            let H' := fresh H1 "footprint" in 
-            learn_hyp (libraryInConfigFootprint _ _ _ _ H H1) as H'
-  end.     
-
     Section Proofs.
+      Ltac saturate_footprints := 
+        repeat match goal with
+          | H: nth_error (configThreads _) _ = Some ?thread,
+              H1: In ?addr (stackFootprint ?thread) |- _ =>
+              let H' := fresh H1 "footprint" in 
+              learn_hyp (threadInConfigFootprint _ _ _ _ H H1) as H'
+          | H: nth_error (configCompartments _) _ = Some ?comp,
+              H1: In ?addr (compartmentFootprint ?comp) |- _ =>
+              let H' := fresh H1 "footprint" in 
+              learn_hyp (compartmentInConfigFootprint _ _ _ _ H H1) as H'
+          | H: nth_error (configLibraries _) _ = Some ?comp,
+              H1: In ?addr (libraryFootprint ?comp) |- _ =>
+              let H' := fresh H1 "footprint" in 
+              learn_hyp (libraryInConfigFootprint _ _ _ _ H H1) as H'
+          end.     
+
 
       (* TODO: add MMIO and shared objects *)
-      Ltac finish_Separated :=
-        match goal with
-        | H: Separated ?xs,
-          H1: nth_error ?xs ?t1 = Some ?s1,
-          H2: nth_error ?xs ?t2 = Some ?s2,
-          H3: In ?addr ?s1,
-          H4: In ?addr ?s2,
-          H5: ?t1 <> ?t2 |- _ =>
-            exfalso; eapply H with (2 := H1) (3 := H2) (4 := H3) (5 := H4);
-            solve[option_simpl; auto; lia]
-        | _ => progress(option_simpl; lia)
-        end.
-      
-      Ltac prepare_Separated :=
-        try match goal with
-            H1: nth_error ?xs ?t1 = Some ?s1,
-              H2: nth_error ?xs ?t2 = Some ?s2,
-                H3: In ?addr ?s1,
-                  H4: In ?addr ?s2 |- _ =>
-              let Heq := fresh in   
-              assert (t1 = t2) as Heq;
-              [ destruct (PeanoNat.Nat.eq_dec t1 t2); [ by auto | ]  | subst ]
-          end.
-      
-      Ltac simplify_Separated :=
-        prepare_Separated; try solve[finish_Separated].
-
-
       Lemma uniqueInitialProvenance:
         forall config addr prov1 prov2,
           WFConfig config ->
@@ -526,18 +533,6 @@ Module CompartmentIsolation.
         intros * [hginv hinv].
         by (eapply Inv_CompartmentIsolation).
       Qed.
-Ltac saturate_list:=
-  repeat match goal with
-  | H: nth_error ?xs ?idx = Some _ |- _ =>
-      let H' := fresh H "len" in 
-      learn_hyp (nth_error_Some' _ _ _ H) as H'
-  | H: nth_error ?xs ?idx = Some _ |- _ =>
-      let H' := fresh H "In" in 
-      learn_hyp (nth_error_In _ _ H) as H'
-  | H: Forall2 _ _ _ |- _ =>
-      let H' := fresh H "len" in 
-      learn_hyp (Forall2_length H) as H'
-    end.
 
 (* TODO: duplicated *)
 Ltac saturate_footprints := 
@@ -555,40 +550,6 @@ Ltac saturate_footprints :=
             let H' := fresh H1 "footprint" in 
             learn_hyp (libraryInConfigFootprint _ _ _ _ H H1) as H'
    end.
-      Ltac finish_Separated :=
-        match goal with
-        | H: Separated ?xs,
-          H1: nth_error ?xs ?t1 = Some ?s1,
-          H2: nth_error ?xs ?t2 = Some ?s2,
-          H3: In ?addr ?s1,
-          H4: In ?addr ?s2,
-          H5: ?t1 <> ?t2 |- _ =>
-            exfalso; eapply H with (2 := H1) (3 := H2) (4 := H3) (5 := H4);
-            solve[option_simpl; auto; lia]
-        | _ => progress(option_simpl; lia)
-        end.
-      
-      Ltac prepare_Separated :=
-        try match goal with
-            H1: nth_error ?xs ?t1 = Some ?s1,
-              H2: nth_error ?xs ?t2 = Some ?s2,
-                H3: In ?addr ?s1,
-                  H4: In ?addr ?s2 |- _ =>
-              let Heq := fresh in   
-              assert (t1 = t2) as Heq;
-              [ destruct (PeanoNat.Nat.eq_dec t1 t2); [ by auto | ]  | subst ]
-          end.
-      
-      Ltac simplify_Separated :=
-        prepare_Separated; try solve[finish_Separated].
-Create HintDb lists.
-Hint Resolve nth_error_In : lists.
-
-Inductive MARK : string -> Type :=
-| MkMark : forall s, MARK s.
-Tactic Notation "mark" constr(p) :=
-  let H := fresh "Mark" in
-  learn_hyp p as H.
       Lemma ValidTrustedStackFrameCapCursor:
         forall frame meta compartment,
         compartment.(compartmentPCC).(capSealed) = None ->
