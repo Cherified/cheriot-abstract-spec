@@ -450,8 +450,8 @@ Module CompartmentIsolation.
     Notation SameThreadStep := (SameThreadStep fetchAddrs decode pccNotInBounds).
     Notation ValidInitialState := (@ValidInitialState _ Byte Key).
     Notation ValidTrustedStackFrame := (@ValidTrustedStackFrame Byte Key).
+
     (* Compartments are connected on the callgraph *)
-    (* TODO: double check *)
     Inductive ReachableCompartment : Config -> nat -> nat -> Prop :=
     | ReachableSelf:
         forall config idx,
@@ -459,20 +459,24 @@ Module CompartmentIsolation.
           idx < length config.(configCompartments) ->
           ReachableCompartment config idx idx
     | ReachableCaller:
-        forall config idx1 idx2 c2 idx3 cap,
+        forall config idx1 idx2 c1 cap,
           WFConfig config ->
-          ReachableCompartment config idx1 idx2 ->
-          nth_error config.(configCompartments) idx2 = Some c2 ->
-          In (ImportEntry_SealedCapToExportEntry cap) c2.(compartmentImports) ->
-          AddrHasProvenance config cap.(capCursor) (Provenance_Compartment idx3) ->
-          ReachableCompartment config idx1 idx3
-     | ReachableCallee:
-        forall config idx1 idx2 c3 idx3 cap,
-          WFConfig config ->
-          ReachableCompartment config idx1 idx2 ->
-          nth_error config.(configCompartments) idx3 = Some c3 ->
-          In (ImportEntry_SealedCapToExportEntry cap) c3.(compartmentImports) ->
+          nth_error config.(configCompartments) idx1 = Some c1 ->
+          In (ImportEntry_SealedCapToExportEntry cap) c1.(compartmentImports) ->
           AddrHasProvenance config cap.(capCursor) (Provenance_Compartment idx2) ->
+          ReachableCompartment config idx1 idx2
+    | ReachableCallee:
+        forall config idx1 idx2 c1 cap,
+          WFConfig config ->
+          nth_error config.(configCompartments) idx1 = Some c1 ->
+          In (ImportEntry_SealedCapToExportEntry cap) c1.(compartmentImports) ->
+          AddrHasProvenance config cap.(capCursor) (Provenance_Compartment idx2) ->
+          ReachableCompartment config idx2 idx1
+    | ReachableTrans:
+        forall config idx1 idx2 idx3,
+          WFConfig config ->
+          ReachableCompartment config idx1 idx2 ->
+          ReachableCompartment config idx2 idx3 ->
           ReachableCompartment config idx1 idx3.
              
     (* NB: there is (not-needed-here) nuance with library calls.
@@ -516,7 +520,73 @@ Module CompartmentIsolation.
       
       Definition Invariant (st: State) : Prop :=
         GlobalInvariant config (fst st) /\
-          Invariant' st.
+        Invariant' st.
+      Ltac simplify_invariants :=
+        repeat match goal with
+          | H: GlobalInvariant _ ?m,
+              H1: nth_error (machine_threads ?m) _ = Some ?thread
+            |- ValidRf (thread_rf (thread_userState ?thread)) =>
+              eapply GlobalInvariantImpliesValidRf with (1 := H) (2 := H1)
+          end.
+
+      Lemma ReachableCompartmentSym':
+        forall idx1 idx2,
+        ReachableCompartment config idx1 idx2 ->
+        ReachableCompartment config idx2 idx1.
+      Proof.
+        induction 1; propositional.
+        - apply ReachableSelf; eauto.
+        - eapply ReachableCallee; eauto.
+        - eapply ReachableCaller; eauto.
+        - eapply ReachableTrans; eauto.
+      Qed.
+
+      Lemma ReachableCompartmentSym:
+        forall idx1 idx2,
+        ReachableCompartment config idx1 idx2 <->
+        ReachableCompartment config idx2 idx1.
+      Proof.
+        intros. split; apply ReachableCompartmentSym'.
+      Qed.
+
+      Lemma GeneralStepOk :
+        forall m tr m' thread generalInst userSt' sysSt',
+          GlobalInvariant config m ->
+          Invariant' (m, tr) ->
+          GlobalInvariant config m' ->
+          (forall n : nat,
+              n <> machine_curThreadId m ->
+              nth_error (machine_threads m') n = nth_error (machine_threads m) n) ->
+          nth_error (machine_threads m) (machine_curThreadId m) = Some thread ->
+          WfGeneralInst generalInst ->
+          generalInst (thread_userState thread, machine_memory m)
+                      (thread_systemState thread, machine_interruptStatus m) =
+            Ok (userSt', machine_memory m', (sysSt', machine_interruptStatus m')) ->
+          nth_error (machine_threads m') (machine_curThreadId m) =
+            Some {| thread_userState := userSt'; thread_systemState := sysSt' |} ->
+          Invariant' (m',(Ev_SameThread (machine_curThreadId m) Ev_General::tr)).
+      Proof.
+        intros * hginv hinv hginv' hsame hthread hwf hinst hupdate.
+        constructor.
+        cbv[PCompartmentIsolation].
+        intros * hneq hisolated * hcurThread hcurCompartment * haddr hreachable.
+        match goal with
+        | H: WfGeneralInst ?generalInst,
+          H1: generalInst _ _ = Ok _ |- _=>
+            let Hok := fresh "HgeneralOk" in
+            mark (MkMark "generalInstOkCommon");
+            specialize generalInstOkCommon with (1 := H) (2 := H1) as Hok;
+            assert_pre_and_specialize Hok; [simplify_invariants | ];
+            cbn in Hok; destruct_products
+        end.
+        apply In_nth_error in hcurThread. destruct_products.
+        destruct (PeanoNat.Nat.eq_dec (machine_curThreadId m) n); subst.
+        { admit. }
+        { rewrite hsame in * by lia.
+          admit. }
+      Admitted.
+
+
       Lemma ExceptionStepOk :
         forall m tr m' thread exn,
           GlobalInvariant config m ->
@@ -536,7 +606,46 @@ Module CompartmentIsolation.
                        exn 
                        (thread_trustedStack (thread_systemState thread)))) ->
           machine_memory m = machine_memory m' ->
-          Invariant (m',(Ev_SameThread (machine_curThreadId m) Ev_Exception::tr)).
+          Invariant' (m',(Ev_SameThread (machine_curThreadId m) Ev_Exception::tr)).
+      Admitted.
+
+
+      Lemma CallSentryStepOk :
+        forall m tr m' thread callSentryInst srcReg optLink pcc' rf', 
+          GlobalInvariant config m ->
+          Invariant' (m, tr) ->
+          GlobalInvariant config m' ->
+          (forall n : nat,
+              n <> machine_curThreadId m ->
+              nth_error (machine_threads m') n = nth_error (machine_threads m) n) ->
+          nth_error (machine_threads m) (machine_curThreadId m) = Some thread ->
+          WfCallSentryInst callSentryInst srcReg optLink ->
+          callSentryInst (thread_userState thread, machine_memory m)
+                         (machine_interruptStatus m) =
+            Ok (pcc', rf', machine_interruptStatus m') ->
+          nth_error (machine_threads m') (machine_curThreadId m) =
+            Some {| thread_userState := {| thread_rf := rf'; thread_pcc := pcc' |};
+                    thread_systemState := thread_systemState thread |} ->
+          Invariant' (m',(Ev_SameThread (machine_curThreadId m) (Ev_Call pcc' rf' (machine_interruptStatus m'))::tr)).
+      Admitted.
+
+      Lemma RetSentryStepOk:
+        forall m tr m' thread retSentryInst srcReg pcc',  
+          GlobalInvariant config m ->
+          Invariant' (m, tr) ->
+          GlobalInvariant config m' ->
+          (forall n : nat,
+              n <> machine_curThreadId m ->
+              nth_error (machine_threads m') n = nth_error (machine_threads m) n) ->
+          nth_error (machine_threads m) (machine_curThreadId m) = Some thread ->
+          WfRetSentryInst retSentryInst srcReg ->
+          retSentryInst (thread_userState thread, machine_memory m) =
+            Ok (pcc', machine_interruptStatus m') ->
+          nth_error (machine_threads m') (machine_curThreadId m) =
+            Some {| thread_userState := {| thread_rf := thread_rf (thread_userState thread);
+                                           thread_pcc := pcc' |};
+                    thread_systemState := thread_systemState thread |} ->
+          Invariant' (m',(Ev_SameThread (machine_curThreadId m) (Ev_Ret pcc' (thread_rf (thread_userState thread)) (machine_interruptStatus m'))::tr)).
       Admitted.
 
       Lemma SameThreadStepOk:
@@ -554,13 +663,16 @@ Module CompartmentIsolation.
         - rename H0 into hstep. revert hstep.
           cbv [threadStepFunction exceptionState uc sc fst snd mem ints rf mepcc pcc sts].
           repeat (case_match; intros; simplify_eq); rewrite threadIdEq in *.
-          + admit. (* generalInstOk *)
+          + (* generalInstOk *)
+            eapply GeneralStepOk with (m := m); eauto.
           + (* generalInstExn *)
             eapply ExceptionStepOk with (m := m); eauto.
-          + admit. (* callSentryOk *)
+          + (* callSentryOk *)
+            eapply CallSentryStepOk with (m := m); eauto.
           + (* callSentryExn *)
             eapply ExceptionStepOk with (m := m); eauto.
-          + admit. (* retSentryOk *)
+          + (* retSentryOk *)
+            eapply RetSentryStepOk with (m := m); eauto.
           + (* retSentryExn *)
             eapply ExceptionStepOk with (m := m); eauto.
           + (* Inst Exn *)
@@ -569,7 +681,7 @@ Module CompartmentIsolation.
           cbv [threadStepFunction exceptionState uc sc fst snd mem ints rf mepcc pcc sts] in *.
           rewrite threadIdEq in *.
           eapply ExceptionStepOk with (m := m); eauto.
-      Admitted.
+      Qed.
       
       Lemma InvariantStep (s: State) :
         forall t,
