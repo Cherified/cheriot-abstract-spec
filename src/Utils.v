@@ -260,6 +260,17 @@ Ltac saturate_list:=
       let H' := fresh H "len" in 
       learn_hyp (Forall2_length H) as H'
     end.
+Ltac unsafe_saturate_list :=
+  saturate_list;
+  repeat match goal with
+  | H: In ?xs ?x |- _ =>
+      lazymatch goal with
+      | H': nth_error xs _ = Some x |- _ => fail 1
+      | |- _ =>
+          let H' := fresh H "nth_error" in
+          learn_hyp (In_nth_error _ _ H) as H'
+      end
+  end.
 
 
 Fixpoint listSumToInl [A B: Type] (l: list (A+B)) : list A :=

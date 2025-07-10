@@ -33,10 +33,11 @@ Ltac finish_Separated :=
 
 Ltac prepare_Separated :=
   try match goal with
-      H1: nth_error ?xs ?t1 = Some ?s1,
+      | H1: nth_error ?xs ?t1 = Some ?s1,
         H2: nth_error ?xs ?t2 = Some ?s2,
-          H3: In ?addr ?s1,
-            H4: In ?addr ?s2 |- _ =>
+        H3: In ?addr ?s1,
+        H4: In ?addr ?s2
+        |- _ =>
         let Heq := fresh in   
         assert (t1 = t2) as Heq;
         [ destruct (PeanoNat.Nat.eq_dec t1 t2); [ by auto | ]  | subst ]
@@ -109,7 +110,8 @@ Module Configuration.
         configLibraries: list Library;
         configSwitcher: nat; (* Index of the switcher library *)
         configThreads : list InitialThreadMetadata;
-        configInitMemory: FullMemory
+        configInitMemory: FullMemory;
+        configSwitcherKey: Key
         (* configMMIOAddrs: list Addr; *)
     }.
 
@@ -125,6 +127,8 @@ Module Configuration.
       | ImportEntry_SealedCapToExportEntry c => c
       | ImportEntry_SentryToLibraryFunction c => c
       end.                                                    
+    Definition baseCapsOfCompartment (c: Compartment) :=
+      [c.(compartmentPCC);c.(compartmentCGP)]. 
 
     Definition capsOfCompartment (c: Compartment) :=
       c.(compartmentPCC)::c.(compartmentCGP)::(map capsOfImportEntry c.(compartmentImports)).
@@ -138,16 +142,44 @@ Module Configuration.
        reachable from PCC, CGP, or import table.
      *)
     Definition InitialCompartmentAddressesOk (mem: FullMemory) (compartment: Compartment) : Prop :=
-      forall a, ReachableRWXAddr mem (capsOfCompartment compartment) a ->
+      forall a, ReachableRWXAddr mem (baseCapsOfCompartment compartment) a ->
                 In a (compartmentFootprint compartment).
                 
     (* TODO *)
     Definition ValidUnsealedCap (c: Cap) : Prop :=
       In c.(capCursor) c.(capAddrs) /\ c.(capSealed) = None.
 
-    Record WFCompartment (mem: FullMemory) (c: Compartment) :=
-      { WFCompartment_ReachableRWXAddr: InitialCompartmentAddressesOk mem c
+    Definition SentriesOnlyFromImportTables (mem: FullMemory) (compartment: Compartment) : Prop :=
+      forall cap,
+        ReachableCap mem (baseCapsOfCompartment compartment) cap ->
+        isSentry cap = true ->
+        In (ImportEntry_SentryToLibraryFunction cap) compartment.(compartmentImports).
+
+     Definition SealedDataCapsOnlyFromImportTables (mem: FullMemory) (compartment: Compartment) : Prop :=
+      forall cap,
+        ReachableCap mem (baseCapsOfCompartment compartment) cap ->
+        isSealedDataCap cap = true ->
+        In (ImportEntry_SealedCapToExportEntry cap) compartment.(compartmentImports).
+
+     Definition InLibraryFootprint (config: Config) addr :=
+       exists library, In library config.(configLibraries) /\
+                       In addr (libraryFootprint library).
+     
+     Definition WFImportEntry (config: Config) (importEntry: ImportEntry) :=
+         ( forall cap, importEntry = ImportEntry_SentryToLibraryFunction cap ->
+           isSentry cap = true /\
+           (forall addr, In addr cap.(capAddrs) ->
+                         InLibraryFootprint config addr)) /\
+         (forall cap, importEntry = ImportEntry_SealedCapToExportEntry cap ->
+                      cap.(capSealed) = Some (inr config.(configSwitcherKey))).
+   
+    Record WFCompartment (config: Config) (c: Compartment) :=
+      { WFCompartment_ReachableRWXAddr:
+        InitialCompartmentAddressesOk config.(configInitMemory) c
       ; WFCompartment_PCC: c.(compartmentPCC).(capSealed) = None
+      ; WFCompartment_Sentries: SentriesOnlyFromImportTables config.(configInitMemory) c
+      ; WFCompartment_SealedDataCap: SealedDataCapsOnlyFromImportTables config.(configInitMemory) c
+      ; WFCompartment_ImportEntries: forall entry, In entry c.(compartmentImports) -> WFImportEntry config entry
       }.                                                                       
 
     Definition WFSwitcher (c: Library) : Prop := True.
@@ -161,7 +193,7 @@ Module Configuration.
     Record WFConfig (config: Config) := {
         WFConfig_footprintDisjoint: Separated (ConfigFootprints config);
         WFConfig_compartmentMemory:
-          Forall (WFCompartment config.(configInitMemory)) config.(configCompartments);
+          Forall (WFCompartment config) config.(configCompartments);
         WFConfig_switcher: exists c, nth_error config.(configLibraries) config.(configSwitcher) = Some c /\
                                 WFSwitcher c
         (* WFConfig_importEntriesOk: ImportEntriesOk config *)
@@ -459,18 +491,20 @@ Module CompartmentIsolation.
           idx < length config.(configCompartments) ->
           ReachableCompartment config idx idx
     | ReachableCaller:
-        forall config idx1 idx2 c1 cap,
+        forall config idx1 idx2 c1 cap addr,
           WFConfig config ->
           nth_error config.(configCompartments) idx1 = Some c1 ->
           In (ImportEntry_SealedCapToExportEntry cap) c1.(compartmentImports) ->
-          AddrHasProvenance config cap.(capCursor) (Provenance_Compartment idx2) ->
+          In addr cap.(capAddrs) ->
+          AddrHasProvenance config addr (Provenance_Compartment idx2) ->
           ReachableCompartment config idx1 idx2
     | ReachableCallee:
-        forall config idx1 idx2 c1 cap,
+        forall config idx1 idx2 c1 cap addr,
           WFConfig config ->
           nth_error config.(configCompartments) idx1 = Some c1 ->
           In (ImportEntry_SealedCapToExportEntry cap) c1.(compartmentImports) ->
-          AddrHasProvenance config cap.(capCursor) (Provenance_Compartment idx2) ->
+          In addr cap.(capAddrs) ->
+          AddrHasProvenance config addr (Provenance_Compartment idx2) ->
           ReachableCompartment config idx2 idx1
     | ReachableTrans:
         forall config idx1 idx2 idx3,
@@ -479,48 +513,100 @@ Module CompartmentIsolation.
           ReachableCompartment config idx2 idx3 ->
           ReachableCompartment config idx1 idx3.
              
-    (* NB: there is (not-needed-here) nuance with library calls.
-     * TODO: we might need to special case the switcher.
-     * TODO: is this safe?
-     *)
-    Definition ThreadInCompartment (config: Config) (t: Thread) (cid: nat) : Prop :=
-      exists frame,
+    Definition ThreadHasSystemPerm (t: Thread) : Prop :=
+      In Perm.System t.(thread_userState).(thread_pcc).(capPerms).
+
+    Definition ThreadInUserCompartment (config: Config) (t: Thread) (cid: nat) : Prop :=
+      (~ ThreadHasSystemPerm t) /\
+      exists frame addr,
         hd_error t.(thread_systemState).(thread_trustedStack).(trustedStack_frames) = Some frame /\
-        AddrHasProvenance config frame.(trustedStackFrame_calleeExportTable).(capCursor) (Provenance_Compartment cid).
+        In addr (frame.(trustedStackFrame_calleeExportTable).(capAddrs)) /\
+        AddrHasProvenance config addr (Provenance_Compartment cid).
 
 
     Definition MutuallyIsolatedCompartment (config: Config) (idx1 idx2: nat) : Prop :=
+      exists c1 c2,
+        nth_error config.(configCompartments) idx1 = Some c1 /\
+        nth_error config.(configCompartments) idx2 = Some c2 /\
       (ReachableCompartment config idx1 idx2 -> False).
 
     Section WithConfig.
       Variable config: Config.
       Variable (pf_wf_config: WFConfig config).
-      (* Variable initialMachine: Machine. *)
 
-      (* If compartment idx1 is isolated from compartment idx2, then
-         any address belonging to compartment idx1 should not be
-         reachable by any thread running in compartment idx2.
+      (* Properties that imply isolation:
+         - Mutually isolated compartments at the start of the world
+           should remain mutually isolated.
+           - The addresses (and therefore caps) reachable from the PCC
+             and CGP of mutually isolated compartments should be isolated.
+           - The sentries reachable from PCC and CGP of mutually
+             isolated compartments should be isolated
+           - The "sealedCapToExportEntries"  reachable from PCC/CGP should be isolated
+         - The caps reachable from user-mode threads in a compartment should follow the above restrictions
+         Extra invariants:
+         - Only the switcher should have the unsealing key to sealedCapToExportEntries
        *)
-      Definition PCompartmentIsolation (st: State):=
-        let '(machine, tr) := st in 
-        forall idx1 idx2,
+      Definition AddrsIsolatedFromCompartment
+        (mem: FullMemory) (srcCaps: list Cap) (cid: nat): Prop :=
+        (forall addr,
+           ReachableRWXAddr mem srcCaps addr ->
+           AddrInCompartment config cid addr ->
+           False).
+      Definition SentriesIsolatedFromCompartment
+        (mem: FullMemory) (srcCaps: list Cap) (cid: nat): Prop :=
+        (forall cap addr,
+            ReachableCap mem srcCaps cap ->
+            isSentry cap = true ->
+            In addr cap.(capAddrs) ->
+            AddrHasProvenance config addr (Provenance_Compartment cid) ->
+            False).
+      Definition SealedDataCapsIsolatedFromCompartment
+        (mem: FullMemory) (srcCaps: list Cap) (cid: nat): Prop :=
+        (forall cap addr,
+            ReachableCap mem srcCaps cap ->
+            cap.(capSealed) = Some (inr config.(configSwitcherKey)) ->
+            In addr cap.(capAddrs) ->
+            AddrHasProvenance config addr (Provenance_Compartment cid) ->
+            False).
+
+      Definition IsolatedFromCompartment
+        (mem: FullMemory) (srcCaps: list Cap) (cid: nat) : Prop :=
+        AddrsIsolatedFromCompartment mem srcCaps cid /\
+        SentriesIsolatedFromCompartment mem srcCaps cid /\
+        SealedDataCapsIsolatedFromCompartment mem srcCaps cid.
+
+      Definition CompartmentIsolation (m: Machine) : Prop :=
+        forall idx1 idx2 c1 c2,
           idx1 <> idx2 ->
           MutuallyIsolatedCompartment config idx1 idx2 ->
-          forall thread,
-          In thread machine.(machine_threads) ->
-          ThreadInCompartment config thread idx2 ->
-          (forall addr,
-             AddrInCompartment config idx1 addr ->
-             ReachableRWXAddr machine.(machine_memory) (capsOfThread thread) addr ->
-             False).
+          nth_error config.(configCompartments) idx1 = Some c1 ->  
+          nth_error config.(configCompartments) idx2 = Some c2 ->
+          IsolatedFromCompartment m.(machine_memory)
+                                  (baseCapsOfCompartment c1) idx2.                                       
+
+      Definition CompartmentIsolatedThreads (m: Machine) : Prop :=
+        forall idx1 idx2,
+        idx1 <> idx2 ->
+        MutuallyIsolatedCompartment config idx1 idx2 ->
+        forall thread,
+        In thread m.(machine_threads) ->
+        ThreadInUserCompartment config thread idx1 ->
+        IsolatedFromCompartment m.(machine_memory)
+                                (capsOfUserTS thread.(thread_userState))
+                                idx2.
+
+      Definition PIsolation (st: State) : Prop :=
+        CompartmentIsolatedThreads (fst st).
 
       Record Invariant' (st: State) : Prop :=
-        { Inv_CompartmentIsolation: PCompartmentIsolation st 
+        { Inv_CompartmentIsolation: CompartmentIsolation (fst st)
+        ; Inv_IsolatedThreads: CompartmentIsolatedThreads (fst st)  
         }.                                                           
       
       Definition Invariant (st: State) : Prop :=
         GlobalInvariant config (fst st) /\
-        Invariant' st.
+          Invariant' st.
+
       Ltac simplify_invariants :=
         repeat match goal with
           | H: GlobalInvariant _ ?m,
@@ -549,6 +635,22 @@ Module CompartmentIsolation.
         intros. split; apply ReachableCompartmentSym'.
       Qed.
 
+      Ltac init_invariant_proof :=
+        repeat match goal with
+        | H: WfGeneralInst ?generalInst,
+          H1: ?generalInst _ _ = Ok _ |- _=>
+            let Hok := fresh "HgeneralOk" in
+            mark (MkMark "generalInstOkCommon");
+            specialize generalInstOkCommon with (1 := H) (2 := H1) as Hok;
+            assert_pre_and_specialize Hok; [simplify_invariants | ];
+            cbn in Hok; destruct_products
+        | H : Invariant' _ |- _ =>
+            mark (MkMark "InvCompartmentIsolation");
+            let H' := fresh "HCompartmentIsolation" in 
+            pose proof (Inv_CompartmentIsolation _ H) as H';
+            cbv [CompartmentIsolation] in H'
+        end.
+
       Lemma GeneralStepOk :
         forall m tr m' thread generalInst userSt' sysSt',
           GlobalInvariant config m ->
@@ -568,24 +670,23 @@ Module CompartmentIsolation.
       Proof.
         intros * hginv hinv hginv' hsame hthread hwf hinst hupdate.
         constructor.
-        cbv[PCompartmentIsolation].
-        intros * hneq hisolated * hcurThread hcurCompartment * haddr hreachable.
-        match goal with
-        | H: WfGeneralInst ?generalInst,
-          H1: generalInst _ _ = Ok _ |- _=>
-            let Hok := fresh "HgeneralOk" in
-            mark (MkMark "generalInstOkCommon");
-            specialize generalInstOkCommon with (1 := H) (2 := H1) as Hok;
-            assert_pre_and_specialize Hok; [simplify_invariants | ];
-            cbn in Hok; destruct_products
-        end.
-        apply In_nth_error in hcurThread. destruct_products.
-        destruct (PeanoNat.Nat.eq_dec (machine_curThreadId m) n); subst.
-        { admit. }
-        { rewrite hsame in * by lia.
-          admit. }
+        (* cbv[PCompartmentIsolation]. *)
+        (* intros * hneq hisolated * hcurThread hcurCompartment * haddr hreachable. *)
+        (* init_invariant_proof. *)
+        (* saturate_list; unsafe_saturate_list; destruct_products. *)
+        (* destruct (PeanoNat.Nat.eq_dec (machine_curThreadId m) n); subst. *)
+        (* { admit. } *)
+        (* { rewrite hsame in * by lia. saturate_list. destruct_products. *)
+        (*   (* Thread0 is in compartment idx2, which is isolated from idx1 *) *)
+        (*   (* Addr is reachable from mem' from thread0 *) *)
+        (*   (* But addr is in compartment idx1 *) *)
+        (*   pose proof HCompartmentIsolation as Hiso'. *)
+        (*   specialize Hiso' with (1 := hneq) (thread := thread0) (addr := addr). *)
+        (*   propositional. *)
+        (*   (* apply Hiso'. *) *)
+        (*   admit. *)
+        (* } *)
       Admitted.
-
 
       Lemma ExceptionStepOk :
         forall m tr m' thread exn,
@@ -607,6 +708,12 @@ Module CompartmentIsolation.
                        (thread_trustedStack (thread_systemState thread)))) ->
           machine_memory m = machine_memory m' ->
           Invariant' (m',(Ev_SameThread (machine_curThreadId m) Ev_Exception::tr)).
+      Proof.
+        (* intros * hginv hinv hginv' hsame hthread hupdate hMemEq. *)
+        (* constructor. cbv[PCompartmentIsolation]. *)
+        (* intros * hneq hisolated * hcurThread hcurCompartment * haddr hreachable. *)
+        (* init_invariant_proof. *)
+        
       Admitted.
 
 
@@ -698,16 +805,17 @@ Module CompartmentIsolation.
         inv hstep.
         - constructor.
           + pose proof (Inv_CompartmentIsolation _ hinvr) as hisolation. auto.
+          + pose proof (Inv_IsolatedThreads _ hinvr) as hisolation. auto.
         - eapply SameThreadStepOk with (m := m); eauto.
       Qed.
 
       Lemma InvariantUse (s: State) :
         Invariant s ->
-        PCompartmentIsolation s.
+        PIsolation s.
       Proof.
         cbv[Invariant].
         intros * [hginv hinv].
-        by (eapply Inv_CompartmentIsolation).
+        by (eapply Inv_IsolatedThreads).
       Qed.
 
 (* TODO: duplicated *)
@@ -739,46 +847,148 @@ Ltac saturate_footprints :=
         eapply restrictUnsealedAddrsSubset; eauto.
       Qed.
 
-      Lemma PCompartmentIsolation_Init:
-        forall initial_machine,
-        ValidInitialState config initial_machine ->
-        PCompartmentIsolation (initial_machine, []).
+      (* Lemma PCompartmentIsolation_Init: *)
+      (*   forall initial_machine, *)
+      (*   ValidInitialState config initial_machine -> *)
+      (*   PCompartmentIsolation (initial_machine, []). *)
+      (* Proof. *)
+      (*   cbv[PCompartmentIsolation]. *)
+      (*   intros * hvalid * hneq hisolated * hthread hcompartment * haddr * hreachable. *)
+      (*   consider @AddrInCompartment. consider ThreadInUserCompartment. consider hd_error. *)
+      (*   destruct_products. *)
+      (*   repeat match goal with *)
+      (*   | _ => progress destruct_products *)
+      (*   | _ => progress saturate_list *)
+      (*   | _ => progress simpl_match *)
+      (*   | _ => progress option_simpl *)
+      (*   | H: WFConfig _ |- _ => mark (MkMark "WFConfig"); destruct H *)
+      (*   | H: ValidInitialState _ _ |-_ => mark (MkMark "ValidInitialState"); destruct H  *)
+      (*   | H: Forall2 (ValidInitialThread _) _ ?xs, *)
+      (*     H1: In _ ?xs |- _ => *)
+      (*       mark (MkMark "Forall2_ValidInitialThread"); *)
+      (*       let n := fresh "n" in let rest := fresh in  *)
+      (*       apply In_nth_error in H1; destruct H1 as (n & rest); *)
+      (*       eapply Forall2_nth_error2' with (idx := n) in H; eauto; try lia *)
+      (*   | H: ValidInitialThread _ _ _ |- _ => mark (MkMark "ValidInitialThread"); destruct H *)
+      (*                                                                                               | H: AddrHasProvenance _ _ (Provenance_Compartment _) |- _ => inv H *)
+      (*          end; try lia; destruct_products. *)
+      (*   rewrite ValidInit_memory0 in *. *)
+      (*   assert (ReachableRWXAddr (configInitMemory config) (capsOfThread thread) addr) *)
+      (*     as hreachable'. *)
+      (*   { admit. } *)
+      (*   specialize ValidInitialThread_addrs0r with (1 := hreachable'). *)
+      (*   destruct ValidInitialThread_addrs0r. *)
+      (*   { saturate_footprints. simplify_Separated. } *)
+      (*   { assert (In (capCursor (trustedStackFrame_calleeExportTable frame)) *)
+      (*               (compartmentFootprint compartment0)). *)
+      (*     { eapply ValidTrustedStackFrameCapCursor; eauto. *)
+      (*       eapply WFCompartment_PCC. *)
+      (*       eapply Forall_forall. *)
+      (*       eapply WFConfig_compartmentMemory; eauto. *)
+      (*       eauto with lists. *)
+      (*     } *)
+      (*     saturate_footprints. simplify_Separated. *)
+      (*   } *)
+      (* Qed. *)
+Ltac destruct_and_save H :=
+  let H' := fresh H in
+  pose proof H as H';
+  destruct H'.
+
+            
+Ltac saturate_invariants :=
+  repeat match goal with
+  | H: WFConfig _ |- _ =>
+      mark (MkMark "WFConfig");
+      destruct_and_save H
+  | H: ValidInitialState _ _ |- _ =>
+      mark (MkMark "ValidInitialState");
+      destruct_and_save H
+  | H: Forall _ _ |- _ => rewrite Forall_forall in H
+  | H: forall x, In x _ -> _,
+    H1: In _ _ |- _ =>
+      learn_hyp (H _ H1)
+  | H : machine_memory _ = configInitMemory _ |- _ =>
+      rewrite H in *
+  | _ => progress (saturate_list; repeat simpl_match)
+  end; auto.
+
+      Lemma AddressesInitiallyIsolated:
+        forall idx1 idx2 initial_machine c1 c2,
+          ValidInitialState config initial_machine ->
+          idx1 <> idx2 ->
+          nth_error (configCompartments config) idx1 = Some c1 ->
+          nth_error (configCompartments config) idx2 = Some c2 ->
+          AddrsIsolatedFromCompartment (machine_memory initial_machine)
+            (baseCapsOfCompartment c1) idx2.
       Proof.
-        cbv[PCompartmentIsolation].
-        intros * hvalid * hneq hisolated * hthread hcompartment * haddr * hreachable.
-        consider @AddrInCompartment. consider ThreadInCompartment. consider hd_error.
-        repeat match goal with
-        | _ => progress destruct_products
-        | _ => progress saturate_list
-        | _ => progress simpl_match
-        | _ => progress option_simpl
-        | H: WFConfig _ |- _ => mark (MkMark "WFConfig"); destruct H
-        | H: ValidInitialState _ _ |-_ => mark (MkMark "ValidInitialState"); destruct H 
-        | H: Forall2 (ValidInitialThread _) _ ?xs,
-          H1: In _ ?xs |- _ =>
-            mark (MkMark "Forall2_ValidInitialThread");
-            let n := fresh "n" in let rest := fresh in 
-            apply In_nth_error in H1; destruct H1 as (n & rest);
-            eapply Forall2_nth_error2' with (idx := n) in H; eauto; try lia
-        | H: ValidInitialThread _ _ _ |- _ => mark (MkMark "ValidInitialThread"); destruct H
-                                                                                                    | H: AddrHasProvenance _ _ (Provenance_Compartment _) |- _ => inv H
-               end; try lia.
-        rewrite ValidInit_memory0 in *.
-        specialize ValidInitialThread_addrs0r with (1 := hreachable).
-        destruct ValidInitialThread_addrs0r.
-        { saturate_footprints. simplify_Separated. }
-        { assert (In (capCursor (trustedStackFrame_calleeExportTable frame))
-                    (compartmentFootprint compartment0)).
-          { eapply ValidTrustedStackFrameCapCursor; eauto.
-            eapply WFCompartment_PCC.
-            eapply Forall_forall.
-            eapply WFConfig_compartmentMemory; eauto.
-            eauto with lists.
-          }
-          saturate_footprints. simplify_Separated.
-        }
+        cbv[AddrsIsolatedFromCompartment AddrInCompartment].
+        intros * hinit hneq hc1 hc2 * hrwx haddr. destruct_products; option_simpl.
+        saturate_invariants.
+        assert (In addr (compartmentFootprint c1)).
+        { eapply WFCompartment_ReachableRWXAddr; eauto. }
+        saturate_footprints.
+        simplify_Separated.
       Qed.
 
+      Lemma SentriesInitiallyIsolated:
+        forall idx1 idx2 initial_machine c1 cap addr,
+          ValidInitialState config initial_machine ->
+          idx1 <> idx2 ->
+          nth_error (configCompartments config) idx1 = Some c1 ->
+          ReachableCap initial_machine.(machine_memory) (baseCapsOfCompartment c1) cap ->
+          isSentry cap = true ->
+          In addr cap.(capAddrs) ->
+          AddrHasProvenance config addr (Provenance_Compartment idx2) ->
+          False.
+      Proof.
+        intros * hinit hneq hc1 hreachable hsentr haddr hprovenance.
+        saturate_invariants.
+        assert (InLibraryFootprint config addr).
+        { eapply WFCompartment_ImportEntries; eauto.
+          eapply WFCompartment_Sentries; eauto.
+        }
+        inv hprovenance.
+        cbv [InLibraryFootprint] in *. destruct_products.
+        unsafe_saturate_list. destruct_products; option_simpl.
+        saturate_footprints.
+        simplify_Separated.
+      Qed.
+
+      Lemma PCompartmentIsolation_InitCompartments:
+        forall initial_machine,
+          ValidInitialState config initial_machine ->
+          CompartmentIsolation initial_machine.
+      Proof.
+        cbv[CompartmentIsolation IsolatedFromCompartment].
+        intros * hvalid * hneq hisolated * hc1 hc2.
+        repeat split_and.
+        - eapply AddressesInitiallyIsolated with (3 := hc1) (4 := hc2); eauto.
+        - cbv[SentriesIsolatedFromCompartment]. intros.
+          eapply SentriesInitiallyIsolated with (3 := hc1); eauto.
+        - consider MutuallyIsolatedCompartment.
+          cbv[SealedDataCapsIsolatedFromCompartment].
+          intros. destruct_products; option_simpl. eapply hisolatedrr; eauto.
+          eapply ReachableCaller; eauto.
+          eapply WFCompartment_SealedDataCap with (config := config); cbv[isSealedDataCap];
+            saturate_invariants.
+      Qed.
+
+      Lemma PCompartmentIsolation_InitThreads:
+        forall initial_machine,
+          ValidInitialState config initial_machine ->
+          CompartmentIsolation initial_machine ->
+          CompartmentIsolatedThreads initial_machine.
+      Proof.
+        cbv[CompartmentIsolation CompartmentIsolatedThreads ThreadInUserCompartment].
+        intros * init hiso * hneq hisolated * hthread hcthread.
+        destruct_products.
+        specialize hiso with (1 := hneq) (2 := hisolated).
+        cbv[MutuallyIsolatedCompartment] in *. destruct_products.
+        specialize hiso with (1 := hisolatedl) (2 := hisolatedrl).
+        admit.
+      Admitted.
+        
       Lemma InvariantInitial :
         forall initial_machine,
         ValidInitialState config initial_machine ->
@@ -787,16 +997,17 @@ Ltac saturate_footprints :=
         intros * hvalid.
         constructor.
         - apply hvalid.
-        - constructor.
-          by (apply PCompartmentIsolation_Init). 
+        - pose proof (PCompartmentIsolation_InitCompartments _ hvalid) as hiso.
+          pose proof (PCompartmentIsolation_InitThreads _ hvalid hiso) as hthread.
+          constructor; auto.
       Qed.
     End WithConfig.
 
-    Theorem CompartmentIsolation :
+    Theorem MutuallyIsolatedCompartments :
       forall config initial_machine,
         WFConfig config ->
         ValidInitialState config initial_machine ->
-        Combinators.always MachineStep (PCompartmentIsolation config) (initial_machine, []).
+        Combinators.always MachineStep (PIsolation config) (initial_machine, []).
     Proof.
       intros * hwf_config hinit_ok.
       econstructor.
