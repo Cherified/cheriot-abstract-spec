@@ -294,11 +294,13 @@ Section Machine.
       (* Cap z is the sealed version of cap y using a key in x *)
       Definition Seal : Prop :=
         exists k, In k x.(capSealingKeys) /\
+             x.(capSealed) = None /\
              y.(capSealed) = None /\
              z = setCapSealed y (Some (inr k)).
 
       Definition Unseal : Prop :=
-        exists k, In k x.(capSealingKeys) /\
+        exists k, In k x.(capUnsealingKeys) /\
+             x.(capSealed) = None /\
              y.(capSealed) = Some (inr k) /\
              z = setCapSealed y None.
     End CapStep.
