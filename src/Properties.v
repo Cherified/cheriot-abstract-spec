@@ -130,6 +130,7 @@ Module Configuration.
     Definition baseCapsOfCompartment (c: Compartment) :=
       [c.(compartmentPCC);c.(compartmentCGP)]. 
 
+    (* TODO: sealing keys *)
     Definition capsOfCompartment (c: Compartment) :=
       c.(compartmentPCC)::c.(compartmentCGP)::(map capsOfImportEntry c.(compartmentImports)).
     Definition AddrInCompartment (config: Config) (cid: nat) (addr: Addr): Prop :=
@@ -973,6 +974,108 @@ Ltac saturate_invariants :=
           eapply WFCompartment_SealedDataCap with (config := config); cbv[isSealedDataCap];
             saturate_invariants.
       Qed.
+Lemma SubsetCapsOfUserTS:
+  forall (thread: Thread), 
+    Subset (capsOfUserTS (thread_userState thread)) (capsOfThread thread).
+Proof.
+  cbv[Subset capsOfThread].
+  intros. rewrite in_app_iff. auto. 
+Qed.          
+Ltac split_ands := repeat split_and.
+Lemma ReachableAddrSubset:
+  forall caps' mem addr sz p cs cbs caps,
+  ReachableAddr mem caps' addr sz p cs cbs ->
+  Subset caps' caps ->
+  ReachableAddr mem caps addr sz p cs cbs.
+Proof.
+  cbv[Subset].
+  intros. inv H.
+  constructor; auto.
+  eapply ReachableCapIncrease; eauto.
+Qed.
+
+Definition invalidate_tags (mem: FullMemory) : FullMemory :=
+  (fst mem, fun _ => false).
+
+       (* Lemma initialThreadCaps: *)
+       (*   forall x y cap caps thread compartment, *)
+       (*     ValidInitialThread config x y -> *)
+       (*     ReachableCap config.(configInitMemory) (capsOfThread thread) -> *)
+       (*     ReachableCap (x.(initThreadCSP)::capsOfCompartment compartment). *)
+
+      Lemma IsolatedFromCompartmentInitialThread:
+        forall c1 idx2 x y,
+        IsolatedFromCompartment (configInitMemory config) (baseCapsOfCompartment c1) idx2 ->
+        ValidInitialThread config x y ->
+        IsolatedFromCompartment (configInitMemory config) (capsOfThread y) idx2.
+      Proof.
+        cbv[IsolatedFromCompartment].
+        intros * (haddr & hsentries & hdata) hinit.
+        split_ands.
+        - cbv[AddrsIsolatedFromCompartment]. intros.
+          eapply haddr; eauto.
+          admit.
+        - cbv[SentriesIsolatedFromCompartment]. intros.
+          eapply hsentries; eauto.
+          admit.
+        - cbv[SealedDataCapsIsolatedFromCompartment]. intros.
+          eapply hdata; eauto.
+          admit.
+      Admitted.
+
+      Lemma ReachableRWXAddrSubset:
+        forall mem caps addr caps',
+          ReachableRWXAddr mem caps' addr ->
+          Subset caps' caps ->
+          ReachableRWXAddr mem caps addr.
+      Proof.
+        cbv[ReachableRWXAddr ReachableReadAddr ReachableWriteAddr ReachableExecAddr]. 
+        intros.
+        destruct_or!; destruct_products; [left | right; left | right; right];
+          do 3 eexists; split; eauto;
+          eapply ReachableAddrSubset; eauto.
+      Qed.
+
+      Lemma AddrsIsolatedFromCompartmentSubset:
+        forall mem caps idx caps',
+        AddrsIsolatedFromCompartment mem caps idx ->
+        Subset caps' caps ->
+        AddrsIsolatedFromCompartment mem caps' idx.
+      Proof.
+        cbv[AddrsIsolatedFromCompartment].
+        intros. eapply H; eauto. eapply ReachableRWXAddrSubset; eauto.
+      Qed.
+
+      Lemma SentriesIsolatedFromCompartmentSubset:
+        forall mem caps idx caps',
+        SentriesIsolatedFromCompartment mem caps idx ->
+        Subset caps' caps ->
+        SentriesIsolatedFromCompartment mem caps' idx.
+      Proof.
+        cbv[SentriesIsolatedFromCompartment].
+        intros. eapply H; eauto. eapply ReachableCapIncrease; eauto.
+      Qed.
+      Lemma SealedDataCapsIsolatedFromCompartmentSubset:
+        forall mem caps idx caps',
+        SealedDataCapsIsolatedFromCompartment mem caps idx ->
+        Subset caps' caps ->
+        SealedDataCapsIsolatedFromCompartment mem caps' idx.
+      Proof.
+        cbv[SealedDataCapsIsolatedFromCompartment].
+        intros. eapply H; eauto. eapply ReachableCapIncrease; eauto.
+      Qed.
+
+      Lemma IsolatedFromCompartmentSubset:
+        forall mem caps caps' idx,
+          IsolatedFromCompartment mem caps idx ->
+          Subset caps' caps ->
+          IsolatedFromCompartment mem caps' idx.
+      Proof.
+        cbv[IsolatedFromCompartment]. intros. destruct_products. split_ands.
+        - eapply AddrsIsolatedFromCompartmentSubset; eauto.
+        - eapply SentriesIsolatedFromCompartmentSubset; eauto.
+        - eapply SealedDataCapsIsolatedFromCompartmentSubset; eauto.
+      Qed.
 
       Lemma PCompartmentIsolation_InitThreads:
         forall initial_machine,
@@ -986,7 +1089,21 @@ Ltac saturate_invariants :=
         specialize hiso with (1 := hneq) (2 := hisolated).
         cbv[MutuallyIsolatedCompartment] in *. destruct_products.
         specialize hiso with (1 := hisolatedl) (2 := hisolatedrl).
-        admit.
+        saturate_invariants. 
+        match goal with
+        | H: Forall2 (ValidInitialThread _) _ ?xs,
+            H1: In _ ?xs |- _ =>
+            let H' := fresh H in pose proof H as H';
+            mark (MkMark "Forall2_ValidInitialThread");
+            let n := fresh "n" in let rest := fresh in
+            apply In_nth_error in H1; destruct H1 as (n & rest);
+            eapply Forall2_nth_error2' with (idx := n) in H; eauto; saturate_list; try lia
+        end.
+        destruct_products; option_simpl.
+        eapply IsolatedFromCompartmentSubset with (caps := capsOfThread y).
+        { admit. (* eapply IsolatedFromCompartmentInitialThread; eauto. *)
+        }
+        { eapply SubsetCapsOfUserTS. }
       Admitted.
         
       Lemma InvariantInitial :
