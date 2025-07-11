@@ -53,9 +53,8 @@ Section WithContext.
 
     (* Addresses reachable with read, write, or execute permission. *)
     Definition ReachableRWXAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
-      ReachableReadAddr mem caps a \/
-      ReachableWriteAddr mem caps a \/
-      ReachableExecAddr mem caps a.
+      exists p cs cbs,
+        ReachableAddr mem caps a 1 p cs cbs /\ (In Perm.Load p \/ In Perm.Store p \/ In Perm.Exec p).
 
     Definition RWAddressesDisjoint (mem: FullMemory) (c1 c2: list Cap) : Prop :=
       forall a,

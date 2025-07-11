@@ -46,7 +46,8 @@ Ltac prepare_Separated :=
 Ltac simplify_Separated :=
   prepare_Separated; try solve[finish_Separated].
 
-(* Defining the valid initial states of a machine in terms of compartments and thread initialization. *)
+(* Defining the valid initial states of a machine in terms of
+   compartments and thread initialization. *)
 Module Configuration.
   Section WithContext. 
     Context [ISA: ISA_params].
@@ -58,17 +59,23 @@ Module Configuration.
     Notation TrustedStackFrame := (@TrustedStackFrame Key).
 
     Record ExportEntry : Type := {
-        exportEntryAddr: nat; (* TODO: check bounds *)
+        exportEntryOffset: nat; 
         exportEntryStackSize: nat;
         exportEntryNumArgs: nat;
         exportEntryInterruptStatus: InterruptStatus
     }.
 
+    Record ExportTable := {
+        exportTablePCC: Cap;
+        exportTableCGP: Cap;
+        exportTableErrorHandlerOffsets: list nat; 
+        exportTableEntries: list ExportEntry
+    }.
+    
+    (* Simplifying, for now, and eliding MMIO and shared objects. *)
     Inductive ImportEntry :=
     | ImportEntry_SealedCapToExportEntry (c: Cap)
     | ImportEntry_SentryToLibraryFunction (c: Cap).
-    (* | ImportEntry_MMIOCap (c: Cap) *)
-    (* | ImportEntry_SharedObject (c: Cap). *)
 
     Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
     Context {decode: list Byte -> @Inst _ _ _ capEncodeDecode}.
@@ -83,8 +90,8 @@ Module Configuration.
     Notation Thread := (@Thread Byte Key).
 
     Record InitialThreadMetadata := {
-        initThreadEntryPoint: Addr;
-        initThreadRf : RegisterFile;
+        (* initThreadEntryPoint: Addr; *)
+        (* initThreadRf : RegisterFile; *)
         initThreadCSP: Cap;
         initThreadCompartment: nat
     }.
@@ -97,10 +104,10 @@ Module Configuration.
         compartmentImports: list ImportEntry
       }.
 
-    (* TODO: imports? *)
     Record Library :=
       { libraryReadOnly: list Addr
-      }.                              
+      ; libraryImports: list ImportEntry
+      }.                            
 
     (* The initial state of a machine is defined in terms of its
        compartments, libraries, the trusted switcher, the initial
@@ -112,7 +119,6 @@ Module Configuration.
         configThreads : list InitialThreadMetadata;
         configInitMemory: FullMemory;
         configSwitcherKey: Key
-        (* configMMIOAddrs: list Addr; *)
     }.
 
     Definition compartmentFootprint (compartment: Compartment) : list Addr :=
@@ -130,7 +136,9 @@ Module Configuration.
     Definition baseCapsOfCompartment (c: Compartment) :=
       [c.(compartmentPCC);c.(compartmentCGP)]. 
 
-    (* TODO: sealing keys *)
+    (* The set of capabilities a compartment initially has access to.
+       TODO: sealing keys 
+     *)
     Definition capsOfCompartment (c: Compartment) :=
       c.(compartmentPCC)::c.(compartmentCGP)::(map capsOfImportEntry c.(compartmentImports)).
     Definition AddrInCompartment (config: Config) (cid: nat) (addr: Addr): Prop :=
@@ -138,12 +146,20 @@ Module Configuration.
         nth_error config.(configCompartments) cid = Some compartment /\
         In addr (compartmentFootprint compartment).
 
+    (* The total set of capabilities reachable from a compartment are
+       the PCC+CGP+imports. *)
+    Definition AllReachableCaps (mem: FullMemory) (caps: list Cap) :=
+      forall cap,
+        ReachableCap mem caps cap ->
+        forall mem',
+        ReachableCap (mem', fun _ => false) caps cap.
+    
     (* TODO: Not sufficient; need to include sealed caps. *)
     (* The addresses reachable from each compartment are all
-       reachable from PCC, CGP, or import table.
+       reachable from PCC or CGP.
      *)
     Definition InitialCompartmentAddressesOk (mem: FullMemory) (compartment: Compartment) : Prop :=
-      forall a, ReachableRWXAddr mem (baseCapsOfCompartment compartment) a ->
+      forall a, ReachableRWXAddr mem (capsOfCompartment compartment) a ->
                 In a (compartmentFootprint compartment).
                 
     (* TODO *)
@@ -152,13 +168,13 @@ Module Configuration.
 
     Definition SentriesOnlyFromImportTables (mem: FullMemory) (compartment: Compartment) : Prop :=
       forall cap,
-        ReachableCap mem (baseCapsOfCompartment compartment) cap ->
+        ReachableCap mem (capsOfCompartment compartment) cap ->
         isSentry cap = true ->
         In (ImportEntry_SentryToLibraryFunction cap) compartment.(compartmentImports).
 
      Definition SealedDataCapsOnlyFromImportTables (mem: FullMemory) (compartment: Compartment) : Prop :=
       forall cap,
-        ReachableCap mem (baseCapsOfCompartment compartment) cap ->
+        ReachableCap mem (capsOfCompartment compartment) cap ->
         isSealedDataCap cap = true ->
         In (ImportEntry_SealedCapToExportEntry cap) compartment.(compartmentImports).
 
@@ -176,7 +192,9 @@ Module Configuration.
    
     Record WFCompartment (config: Config) (c: Compartment) :=
       { WFCompartment_ReachableRWXAddr:
-        InitialCompartmentAddressesOk config.(configInitMemory) c
+          InitialCompartmentAddressesOk config.(configInitMemory) c
+      ; WFCompartment_InitialCaps:
+          AllReachableCaps config.(configInitMemory) (capsOfCompartment c)
       ; WFCompartment_PCC: c.(compartmentPCC).(capSealed) = None
       ; WFCompartment_Sentries: SentriesOnlyFromImportTables config.(configInitMemory) c
       ; WFCompartment_SealedDataCap: SealedDataCapsOnlyFromImportTables config.(configInitMemory) c
@@ -193,8 +211,7 @@ Module Configuration.
 
     Record WFConfig (config: Config) := {
         WFConfig_footprintDisjoint: Separated (ConfigFootprints config);
-        WFConfig_compartmentMemory:
-          Forall (WFCompartment config) config.(configCompartments);
+        WFConfig_compartmentMemory: Forall (WFCompartment config) config.(configCompartments);
         WFConfig_switcher: exists c, nth_error config.(configLibraries) config.(configSwitcher) = Some c /\
                                 WFSwitcher c
         (* WFConfig_importEntriesOk: ImportEntriesOk config *)
@@ -228,24 +245,42 @@ Module Configuration.
     ; Inv_threads : Forall2 ThreadInv config.(configThreads) m.(machine_threads)
     }.
 
-    
-    Definition ValidTrustedStackFrame (frame: TrustedStackFrame) (meta: InitialThreadMetadata) (c: Compartment): Prop :=
-      Restrict c.(compartmentPCC) frame.(trustedStackFrame_calleeExportTable) /\
-      Restrict meta.(initThreadCSP) frame.(trustedStackFrame_CSP) /\
-      ValidUnsealedCap frame.(trustedStackFrame_calleeExportTable).
+    (* TODO *)
+    Context {LookupExportTableCompartment: Config -> Cap -> FullMemory -> option nat}.
 
+    Record ValidTrustedStackFrame
+      (config: Config)
+      (mem: FullMemory) (frame: TrustedStackFrame) (meta: InitialThreadMetadata)
+      (cid: nat): Prop :=
+      { ValidTrustedStackFrame_calleeCap:
+        LookupExportTableCompartment config
+          frame.(trustedStackFrame_calleeExportTable)
+          mem = Some cid
+      ; ValidTrustedStackFrame_CSP :
+          Restrict meta.(initThreadCSP) frame.(trustedStackFrame_CSP)
+      }.                                                                                 
+
+    Definition ValidCSP (csp: Cap) :=
+      csp.(capSealingKeys) = [] /\
+      csp.(capUnsealingKeys ) = [] /\
+      csp.(capSealed) = None.
     Record ValidInitialThread (config: Config) (meta: InitialThreadMetadata) (t: Thread) : Prop :=
-      { ValidInitialThread_addrs:
+      { ValidInitialThread_caps:
         exists compartment,
-        nth_error config.(configCompartments) meta.(initThreadCompartment) = Some compartment /\
-          forall a, ReachableRWXAddr config.(configInitMemory) (capsOfThread t) a ->
-                    In a (stackFootprint meta) \/
-                    In a (compartmentFootprint compartment)
+          nth_error config.(configCompartments) meta.(initThreadCompartment) = Some compartment /\
+            forall c,
+              ReachableCap config.(configInitMemory) (capsOfUserTS (thread_userState t)) c ->
+              ReachableCap config.(configInitMemory)
+                           (meta.(initThreadCSP)::capsOfCompartment compartment)
+                           c
       ; ValidInitialThread_trustedStack:
-        exists compartment
-,
-        nth_error config.(configCompartments) meta.(initThreadCompartment) = Some compartment /\
-        exists frame, t.(thread_systemState).(thread_trustedStack).(trustedStack_frames) = [frame] /\ ValidTrustedStackFrame frame meta compartment
+          exists frame, t.(thread_systemState).(thread_trustedStack).(trustedStack_frames) =
+                          [frame] /\
+                          ValidTrustedStackFrame config config.(configInitMemory) frame meta meta.(initThreadCompartment)
+      ; ValidInitialThread_stackUntagged: (* No caps in initial stack --> TODO: fix spec*)
+        forall capa, Subset (seq (fromCapAddr capa) ISA_CAPSIZE_BYTES) (stackFootprint meta) ->
+                     readTag config.(configInitMemory) capa = false
+      ; ValidInitialCSP: ValidCSP meta.(initThreadCSP)
       }.                         
                     
     Record ValidInitialState (config: Config) (m: Machine) : Prop :=
@@ -256,6 +291,10 @@ Module Configuration.
 
     Hint Resolve Inv_curThread : invariants.
     Hint Resolve Inv_validRf: invariants.
+
+    Definition dummy_memory (mem: Memory_t) : FullMemory :=
+      (mem, fun _ => false).
+
       Lemma threadInConfigFootprint:
         forall config metaThread tid addr,
           nth_error (configThreads config) tid = Some metaThread ->
@@ -480,9 +519,10 @@ Module CompartmentIsolation.
     Notation State := (Machine * Trace)%type.
     Notation Event := (@Event Byte Key).
     Notation Config := (@Config Byte Key).
+    Context {LookupExportTableCompartment: Config -> Cap -> FullMemory -> option nat}.
     Notation SameThreadStep := (SameThreadStep fetchAddrs decode pccNotInBounds).
-    Notation ValidInitialState := (@ValidInitialState _ Byte Key).
-    Notation ValidTrustedStackFrame := (@ValidTrustedStackFrame Byte Key).
+    Notation ValidInitialState := (@ValidInitialState _ Byte Key _ LookupExportTableCompartment).
+    Notation ValidInitialThread := (@ValidInitialThread _ Byte Key _ LookupExportTableCompartment). 
 
     (* Compartments are connected on the callgraph *)
     Inductive ReachableCompartment : Config -> nat -> nat -> Prop :=
@@ -517,13 +557,12 @@ Module CompartmentIsolation.
     Definition ThreadHasSystemPerm (t: Thread) : Prop :=
       In Perm.System t.(thread_userState).(thread_pcc).(capPerms).
 
-    Definition ThreadInUserCompartment (config: Config) (t: Thread) (cid: nat) : Prop :=
-      (~ ThreadHasSystemPerm t) /\
-      exists frame addr,
-        hd_error t.(thread_systemState).(thread_trustedStack).(trustedStack_frames) = Some frame /\
-        In addr (frame.(trustedStackFrame_calleeExportTable).(capAddrs)) /\
-        AddrHasProvenance config addr (Provenance_Compartment cid).
 
+    Definition ThreadInUserCompartment (config: Config) (mem: FullMemory) (t: Thread) (cid: nat) : Prop :=
+      (~ ThreadHasSystemPerm t) /\
+      exists frame ,
+        hd_error t.(thread_systemState).(thread_trustedStack).(trustedStack_frames) = Some frame /\
+        LookupExportTableCompartment config frame.(trustedStackFrame_calleeExportTable) mem = Some cid.
 
     Definition MutuallyIsolatedCompartment (config: Config) (idx1 idx2: nat) : Prop :=
       exists c1 c2,
@@ -583,15 +622,14 @@ Module CompartmentIsolation.
           nth_error config.(configCompartments) idx1 = Some c1 ->  
           nth_error config.(configCompartments) idx2 = Some c2 ->
           IsolatedFromCompartment m.(machine_memory)
-                                  (baseCapsOfCompartment c1) idx2.                                       
-
+                                  (capsOfCompartment c1) idx2.                                       
       Definition CompartmentIsolatedThreads (m: Machine) : Prop :=
         forall idx1 idx2,
         idx1 <> idx2 ->
         MutuallyIsolatedCompartment config idx1 idx2 ->
         forall thread,
         In thread m.(machine_threads) ->
-        ThreadInUserCompartment config thread idx1 ->
+        ThreadInUserCompartment config m.(machine_memory) thread idx1 ->
         IsolatedFromCompartment m.(machine_memory)
                                 (capsOfUserTS thread.(thread_userState))
                                 idx2.
@@ -835,62 +873,6 @@ Ltac saturate_footprints :=
             let H' := fresh H1 "footprint" in 
             learn_hyp (libraryInConfigFootprint _ _ _ _ H H1) as H'
    end.
-      Lemma ValidTrustedStackFrameCapCursor:
-        forall frame meta compartment,
-        compartment.(compartmentPCC).(capSealed) = None ->
-        ValidTrustedStackFrame frame meta compartment ->
-        In (capCursor (trustedStackFrame_calleeExportTable frame))
-          (compartmentFootprint compartment).
-      Proof.
-        cbv [ValidTrustedStackFrame ValidUnsealedCap compartmentFootprint Restrict].
-        intros; destruct_products; rewrite in_app_iff.
-        left. simpl_match.
-        eapply restrictUnsealedAddrsSubset; eauto.
-      Qed.
-
-      (* Lemma PCompartmentIsolation_Init: *)
-      (*   forall initial_machine, *)
-      (*   ValidInitialState config initial_machine -> *)
-      (*   PCompartmentIsolation (initial_machine, []). *)
-      (* Proof. *)
-      (*   cbv[PCompartmentIsolation]. *)
-      (*   intros * hvalid * hneq hisolated * hthread hcompartment * haddr * hreachable. *)
-      (*   consider @AddrInCompartment. consider ThreadInUserCompartment. consider hd_error. *)
-      (*   destruct_products. *)
-      (*   repeat match goal with *)
-      (*   | _ => progress destruct_products *)
-      (*   | _ => progress saturate_list *)
-      (*   | _ => progress simpl_match *)
-      (*   | _ => progress option_simpl *)
-      (*   | H: WFConfig _ |- _ => mark (MkMark "WFConfig"); destruct H *)
-      (*   | H: ValidInitialState _ _ |-_ => mark (MkMark "ValidInitialState"); destruct H  *)
-      (*   | H: Forall2 (ValidInitialThread _) _ ?xs, *)
-      (*     H1: In _ ?xs |- _ => *)
-      (*       mark (MkMark "Forall2_ValidInitialThread"); *)
-      (*       let n := fresh "n" in let rest := fresh in  *)
-      (*       apply In_nth_error in H1; destruct H1 as (n & rest); *)
-      (*       eapply Forall2_nth_error2' with (idx := n) in H; eauto; try lia *)
-      (*   | H: ValidInitialThread _ _ _ |- _ => mark (MkMark "ValidInitialThread"); destruct H *)
-      (*                                                                                               | H: AddrHasProvenance _ _ (Provenance_Compartment _) |- _ => inv H *)
-      (*          end; try lia; destruct_products. *)
-      (*   rewrite ValidInit_memory0 in *. *)
-      (*   assert (ReachableRWXAddr (configInitMemory config) (capsOfThread thread) addr) *)
-      (*     as hreachable'. *)
-      (*   { admit. } *)
-      (*   specialize ValidInitialThread_addrs0r with (1 := hreachable'). *)
-      (*   destruct ValidInitialThread_addrs0r. *)
-      (*   { saturate_footprints. simplify_Separated. } *)
-      (*   { assert (In (capCursor (trustedStackFrame_calleeExportTable frame)) *)
-      (*               (compartmentFootprint compartment0)). *)
-      (*     { eapply ValidTrustedStackFrameCapCursor; eauto. *)
-      (*       eapply WFCompartment_PCC. *)
-      (*       eapply Forall_forall. *)
-      (*       eapply WFConfig_compartmentMemory; eauto. *)
-      (*       eauto with lists. *)
-      (*     } *)
-      (*     saturate_footprints. simplify_Separated. *)
-      (*   } *)
-      (* Qed. *)
 Ltac destruct_and_save H :=
   let H' := fresh H in
   pose proof H as H';
@@ -921,7 +903,7 @@ Ltac saturate_invariants :=
           nth_error (configCompartments config) idx1 = Some c1 ->
           nth_error (configCompartments config) idx2 = Some c2 ->
           AddrsIsolatedFromCompartment (machine_memory initial_machine)
-            (baseCapsOfCompartment c1) idx2.
+            (capsOfCompartment c1) idx2.
       Proof.
         cbv[AddrsIsolatedFromCompartment AddrInCompartment].
         intros * hinit hneq hc1 hc2 * hrwx haddr. destruct_products; option_simpl.
@@ -937,7 +919,7 @@ Ltac saturate_invariants :=
           ValidInitialState config initial_machine ->
           idx1 <> idx2 ->
           nth_error (configCompartments config) idx1 = Some c1 ->
-          ReachableCap initial_machine.(machine_memory) (baseCapsOfCompartment c1) cap ->
+          ReachableCap initial_machine.(machine_memory) (capsOfCompartment c1) cap ->
           isSentry cap = true ->
           In addr cap.(capAddrs) ->
           AddrHasProvenance config addr (Provenance_Compartment idx2) ->
@@ -994,46 +976,15 @@ Proof.
   eapply ReachableCapIncrease; eauto.
 Qed.
 
-Definition invalidate_tags (mem: FullMemory) : FullMemory :=
-  (fst mem, fun _ => false).
-
-       (* Lemma initialThreadCaps: *)
-       (*   forall x y cap caps thread compartment, *)
-       (*     ValidInitialThread config x y -> *)
-       (*     ReachableCap config.(configInitMemory) (capsOfThread thread) -> *)
-       (*     ReachableCap (x.(initThreadCSP)::capsOfCompartment compartment). *)
-
-      Lemma IsolatedFromCompartmentInitialThread:
-        forall c1 idx2 x y,
-        IsolatedFromCompartment (configInitMemory config) (baseCapsOfCompartment c1) idx2 ->
-        ValidInitialThread config x y ->
-        IsolatedFromCompartment (configInitMemory config) (capsOfThread y) idx2.
-      Proof.
-        cbv[IsolatedFromCompartment].
-        intros * (haddr & hsentries & hdata) hinit.
-        split_ands.
-        - cbv[AddrsIsolatedFromCompartment]. intros.
-          eapply haddr; eauto.
-          admit.
-        - cbv[SentriesIsolatedFromCompartment]. intros.
-          eapply hsentries; eauto.
-          admit.
-        - cbv[SealedDataCapsIsolatedFromCompartment]. intros.
-          eapply hdata; eauto.
-          admit.
-      Admitted.
-
       Lemma ReachableRWXAddrSubset:
         forall mem caps addr caps',
           ReachableRWXAddr mem caps' addr ->
           Subset caps' caps ->
           ReachableRWXAddr mem caps addr.
       Proof.
-        cbv[ReachableRWXAddr ReachableReadAddr ReachableWriteAddr ReachableExecAddr]. 
-        intros.
-        destruct_or!; destruct_products; [left | right; left | right; right];
-          do 3 eexists; split; eauto;
-          eapply ReachableAddrSubset; eauto.
+        cbv[ReachableRWXAddr]. 
+        intros. destruct_products.
+        do 3 eexists; split; eauto; eapply ReachableAddrSubset; eauto.
       Qed.
 
       Lemma AddrsIsolatedFromCompartmentSubset:
@@ -1077,6 +1028,229 @@ Definition invalidate_tags (mem: FullMemory) : FullMemory :=
         - eapply SealedDataCapsIsolatedFromCompartmentSubset; eauto.
       Qed.
 
+Ltac simplify_provenance :=
+  repeat match goal with
+  | H: AddrHasProvenance _ _ (Provenance_Compartment _) |- _ =>
+      inv H
+  | H: AddrInCompartment _ _ _ |- _ =>
+      inv H
+  | H: ReachableAddr _ _ _ _ _ _ _ |- _ =>
+      inv H
+    end.
+
+      Lemma RestrictRefl: forall (x: Cap), Restrict x x.
+      Proof.
+        intros. cbv[Restrict].
+        case_match; constructor; cbv[EqSet Subset SealEq]; auto.
+        all: reflexivity.
+      Qed.
+      Lemma RestrictTrans:
+        forall (x y z: Cap),
+          Restrict x y -> Restrict y z -> Restrict x z.
+      Proof.
+        cbv[Restrict]. intros. repeat case_match;
+        repeat match goal with
+        | H: RestrictSealed _ _ |- _ => destruct H
+        | H: RestrictUnsealed _ _ |- _ => destruct H
+          end; constructor; cbv[EqSet SealEq Subset] in *; auto; try rewrite_solve.
+        all: intros *;
+             try match goal with
+             | H: _ |- _ => rewrite H 
+             end; auto.
+        all: repeat match goal with
+             | _ => progress option_simpl 
+             | H: _ = Some _ |- _ => rewrite H in *
+             | H: _ = None |- _ => rewrite H in *
+               end.
+      Qed.
+
+      Lemma RestrictSealedEq:
+        forall (c c': Cap),
+        Restrict c c' ->
+        c.(capSealed) = c'.(capSealed).      
+      Proof.
+        cbv[Restrict]. intros. case_match;
+          destruct H; cbv[SealEq] in *; rewrite_solve.
+      Qed.
+      Lemma RestrictCapSealingKeysSubset:
+        forall (c c': Cap),
+        Restrict c c' ->
+        Subset c'.(capSealingKeys) c.(capSealingKeys).
+      Proof.
+        cbv[Restrict]. intros. case_match;
+          destruct H; cbv[EqSet Subset] in *; auto.
+        intros. rewrite<-restrictSealedSealingKeysEq; auto.
+      Qed.
+      Lemma RestrictCapUnsealingKeysSubset:
+        forall (c c': Cap),
+        Restrict c c' ->
+        Subset c'.(capUnsealingKeys) c.(capUnsealingKeys).
+      Proof.
+        cbv[Restrict]. intros. case_match;
+          destruct H; cbv[EqSet Subset] in *; auto.
+        intros. rewrite<-restrictSealedUnsealingKeysSubset; auto.
+      Qed.
+      Lemma RestrictCapAddrsSubset:
+        forall (c c': Cap),
+        Restrict c c' ->
+        Subset c'.(capAddrs) c.(capAddrs).
+      Proof.
+        cbv[Restrict]. intros. case_match;
+          destruct H; cbv[EqSet Subset] in *; auto.
+        intros. rewrite<-restrictSealedAddrsEq; auto.
+      Qed.
+
+      Lemma InitialThreadCapSubset:
+        forall thread cap meta compartment ,
+          ValidInitialThread config meta thread ->
+          ReachableCap (configInitMemory config) (capsOfUserTS (thread_userState thread)) cap ->
+          nth_error (configCompartments config) (initThreadCompartment meta) = Some compartment ->
+          ReachableCap (configInitMemory config) (meta.(initThreadCSP)::capsOfCompartment compartment) cap.
+      Proof.
+        intros * hvalid hcompartment hcap. destruct hvalid. destruct_products.
+        cbv[ReachableCapSubset ReachableCaps] in *.
+        option_simpl.
+        eapply ValidInitialThread_caps0r; eauto.
+      Qed.
+Lemma setCapSealedNoneEq:
+  forall (c: Cap), capSealed c = None -> setCapSealed c None = c.
+Proof.
+  cbv[setCapSealed]. destruct c; intros; cbn in *; subst; auto.
+Qed.
+Lemma setCapSealed_inv:
+  forall (x: Cap) y z,
+  setCapSealed (setCapSealed x y) z = setCapSealed x z.
+Proof.
+  cbv[setCapSealed]. reflexivity.
+Qed.
+Lemma RestrictSetCapUnsealed:
+  forall (y z: Cap),            
+    Restrict y z ->
+    Restrict (setCapSealed y None) (setCapSealed z None).
+Proof.
+  intros. cbv[Restrict] in *. cbv[setCapSealed]. cbn.
+  case_match; inv H; constructor; cbv[SealEq]; cbn; auto.
+  all: cbv [EqSet Subset] in *; intros *; 
+             try match goal with
+             | H: _ |- _ => rewrite H 
+             end; auto.
+Qed.
+
+      (* For CSP *)
+      Lemma ReachableCapRestrictCSP:
+        forall mem cap caps x,
+          x.(capSealingKeys) = [] ->
+          x.(capUnsealingKeys) = [] ->
+          x.(capSealed) = None ->
+          (forall capa, Subset (seq (fromCapAddr capa) ISA_CAPSIZE_BYTES) x.(capAddrs) ->
+                       readTag mem capa = false) ->
+          (Restrict x (setCapSealed cap None) -> False) ->
+          ReachableCap mem (x::caps) cap ->
+          ReachableCap mem caps cap.
+      Proof.
+        intros * hseal hunseal hunsealed huntagged hnotSelf.
+        induction 1.
+        - inv inPf.
+          + rewrite setCapSealedNoneEq in * by auto.
+            exfalso. apply hnotSelf. apply RestrictRefl.
+          + apply Refl. auto.
+        - eapply StepRestrict; eauto.
+          eapply IHReachableCap. intros.
+          apply hnotSelf. eapply RestrictTrans; eauto.
+          apply RestrictSetCapUnsealed; auto.
+        - eapply StepLoadCap; eauto.
+          eapply IHReachableCap. inv xyz; destruct_products.
+          rewrite setCapSealedNoneEq by auto. intros.
+          specialize RestrictCapAddrsSubset with (1 := H0); intros.
+          cbv[readCap readMemTagCap readTag] in *.
+          rewrite huntagged in *.
+          { cbn in *. discriminate. }
+          cbv[Subset]; intros.
+          eapply H1. eapply loadFromAuthl. auto.
+        - eapply StepSeal; eauto; inv xyz; destruct_products; repeat simpl_match; subst.
+          + eapply IHReachableCap1; eauto; cbn in *; intros.
+            eapply RestrictCapSealingKeysSubset in H1l; eauto.
+            * rewrite hseal in *. contradiction.
+            * rewrite setCapSealedNoneEq in * by auto. auto.
+          + eapply IHReachableCap2. intros. cbn in *.
+            rewrite setCapSealedNoneEq in * by auto.
+            apply hnotSelf.
+            rewrite setCapSealed_inv. rewrite setCapSealedNoneEq; auto.
+        - eapply StepUnseal; eauto; inv xyz; destruct_products; repeat simpl_match; subst.
+          + eapply IHReachableCap1; auto; cbn in *; intros.
+            rewrite setCapSealedNoneEq in * by auto.
+            eapply RestrictCapUnsealingKeysSubset in H1l; eauto. rewrite hunseal in *. 
+            contradiction. 
+          + eapply IHReachableCap2; auto; cbn in *; intros.
+      Qed.
+      
+      Lemma IsolatedFromCompartmentInitialThread:
+        forall c1 idx2 x y threadId,
+        Separated (ConfigFootprints config) ->
+        IsolatedFromCompartment (configInitMemory config) (capsOfCompartment c1) idx2 ->
+        ValidInitialThread config x y ->
+        nth_error (configThreads config) threadId = Some x ->
+        (ReachableCompartment config (initThreadCompartment x) idx2 -> False) ->
+        nth_error (configCompartments config) (initThreadCompartment x) = Some c1 ->
+        IsolatedFromCompartment (configInitMemory config) (capsOfUserTS (thread_userState y)) idx2.
+      Proof.
+        cbv[IsolatedFromCompartment].
+        intros * hseparated (haddr & hsentries & hdata) hinit hthread hnot_reachable hmeta.
+        pose proof (ValidInitialCSP _ _ _ hinit) as hvalidcsp. consider @ValidCSP.
+        destruct_products.
+        split_ands.
+        - cbv[AddrsIsolatedFromCompartment]. intros.
+          eapply haddr; eauto. simplify_provenance; destruct_products.
+          consider ReachableRWXAddr. destruct_products. simplify_provenance.
+          do 3 eexists; split; eauto.
+          constructor; auto.
+          eapply ReachableCapRestrictCSP with (x := x.(initThreadCSP)); auto.
+          + eapply ValidInitialThread_stackUntagged; eauto.
+          + rewrite setCapSealedNoneEq by auto. intros hrestrict.
+            apply RestrictCapAddrsSubset in hrestrict. cbv[Subset] in *.
+            assert (In addr (stackFootprint x)).
+            { apply hrestrict. apply ina. constructor. auto. }
+            saturate_footprints; saturate_list; simplify_Separated.
+          + eapply InitialThreadCapSubset; eauto.
+        - cbv[SentriesIsolatedFromCompartment]. intros.
+          eapply hsentries; eauto; simplify_provenance; destruct_products.
+          eapply ReachableCapRestrictCSP with (x := x.(initThreadCSP)); auto.
+          + eapply ValidInitialThread_stackUntagged; eauto.
+          + intros hrestrict. apply RestrictCapAddrsSubset in hrestrict. 
+            fold (stackFootprint x) in *.
+            assert (In addr (stackFootprint x)).
+            { apply hrestrict. auto. }
+            saturate_footprints; saturate_list; simplify_Separated.
+          + eapply InitialThreadCapSubset; eauto.
+        - cbv[SealedDataCapsIsolatedFromCompartment]. intros.
+          eapply hdata; eauto; simplify_provenance; destruct_products.
+          eapply ReachableCapRestrictCSP with (x := x.(initThreadCSP)); auto.
+          + eapply ValidInitialThread_stackUntagged; eauto.
+          + intros hrestrict. apply RestrictCapAddrsSubset in hrestrict.
+            fold (stackFootprint x) in *.
+            assert (In addr (stackFootprint x)).
+            { apply hrestrict; auto. }
+            saturate_footprints; saturate_list; simplify_Separated.
+          + eapply InitialThreadCapSubset; eauto.
+       Qed.
+
+        Lemma ValidInitialThreadImpliesCompartment:
+          forall config meta thread cid frame compartment,
+          ValidInitialThread config meta thread ->
+          hd_error (trustedStack_frames (thread_trustedStack (thread_systemState thread))) =
+            Some frame ->
+          LookupExportTableCompartment config (trustedStackFrame_calleeExportTable frame) (configInitMemory config) = Some cid ->
+          nth_error (configCompartments config) cid = Some compartment ->
+          cid = initThreadCompartment meta.
+        Proof.
+          intros * hvalid hframe hcompartment hid.
+          destruct hvalid. destruct_products. unfold hd_error in *.
+          simpl_match; option_simpl.
+          match goal with
+          | H: ValidTrustedStackFrame _ _ _ _ _ |- _ => destruct H
+          end; option_simpl; auto.
+        Qed.
+
       Lemma PCompartmentIsolation_InitThreads:
         forall initial_machine,
           ValidInitialState config initial_machine ->
@@ -1100,11 +1274,12 @@ Definition invalidate_tags (mem: FullMemory) : FullMemory :=
             eapply Forall2_nth_error2' with (idx := n) in H; eauto; saturate_list; try lia
         end.
         destruct_products; option_simpl.
-        eapply IsolatedFromCompartmentSubset with (caps := capsOfThread y).
-        { admit. (* eapply IsolatedFromCompartmentInitialThread; eauto. *)
+        assert (idx1 = x.(initThreadCompartment)); try subst idx1.
+        { simplify_provenance; option_simpl.
+          eapply ValidInitialThreadImpliesCompartment; eauto.
         }
-        { eapply SubsetCapsOfUserTS. }
-      Admitted.
+        eapply IsolatedFromCompartmentInitialThread; eauto.
+      Qed.
         
       Lemma InvariantInitial :
         forall initial_machine,
@@ -1167,6 +1342,9 @@ Module ThreadIsolatedMonotonicity.
     Notation ReachableCapSubset := (@ReachableCapSubset ISA Byte Key).
     Notation RWAddressesDisjoint := (@RWAddressesDisjoint ISA Byte Key).
     Notation WriteReadDisjoint := (@WriteReadDisjoint ISA Byte Key).
+    Context {LookupExportTableCompartment: Config -> Cap -> FullMemory -> option nat}.
+    Notation ValidInitialState := (@ValidInitialState _ Byte Key _ LookupExportTableCompartment).
+    Notation ValidInitialThread := (@ValidInitialThread _ Byte Key _ LookupExportTableCompartment). 
 
     Definition SameDomainEvent (ev: Event) : Prop :=
       match ev with
