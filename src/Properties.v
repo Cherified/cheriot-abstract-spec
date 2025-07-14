@@ -281,12 +281,27 @@ Module Configuration.
         forall capa, Subset (seq (fromCapAddr capa) ISA_CAPSIZE_BYTES) (stackFootprint meta) ->
                      readTag config.(configInitMemory) capa = false
       ; ValidInitialCSP: ValidCSP meta.(initThreadCSP)
-      }.                         
+      }.
+
+      Record ValidMEPCC (mepcc: Cap) : Prop :=
+      { MEPCC_HasSystemPerm: In Perm.System mepcc.(capPerms) }.
+
+      Record UserModeOk (t: Thread ) : Prop :=
+        { MEPCC_ok: ValidMEPCC t.(thread_systemState).(thread_mepcc) }.
+
+      Definition ThreadHasSystemPerm (t: Thread) : Prop :=
+        In Perm.System t.(thread_userState).(thread_pcc).(capPerms).
+
+      Definition UserModeInvariant (m: Machine) : Prop :=
+        forall thread, In thread m.(machine_threads) ->
+                       (~ ThreadHasSystemPerm thread) ->
+                       UserModeOk thread.
                     
     Record ValidInitialState (config: Config) (m: Machine) : Prop :=
       { ValidInit_memory: m.(machine_memory) = config.(configInitMemory)
       ; ValidInit_threads: Forall2 (ValidInitialThread config) config.(configThreads) m.(machine_threads) 
       ; ValidInit_invariant: GlobalInvariant config m
+      ; ValidInit_userMode: UserModeInvariant m
       }.
 
     Hint Resolve Inv_curThread : invariants.
@@ -528,10 +543,11 @@ Module CompartmentIsolation.
           ReachableCompartment config idx1 idx2 ->
           ReachableCompartment config idx2 idx3 ->
           ReachableCompartment config idx1 idx3.
-             
-    Definition ThreadHasSystemPerm (t: Thread) : Prop :=
-      In Perm.System t.(thread_userState).(thread_pcc).(capPerms).
 
+    Definition threadHasSystemPerm (t: Thread) : bool :=
+      existsb (Perm.t_beq Perm.System)
+           (t.(thread_userState).(thread_pcc).(capPerms)).
+            
     Definition ThreadInUserCompartment (config: Config) (mem: FullMemory) (t: Thread) (cid: nat) : Prop :=
       (~ ThreadHasSystemPerm t) /\
       exists frame ,
@@ -611,9 +627,11 @@ Module CompartmentIsolation.
       Definition PIsolation (st: State) : Prop :=
         CompartmentIsolatedThreads (fst st).
 
+
       Record Invariant' (st: State) : Prop :=
-        { Inv_CompartmentIsolation: CompartmentIsolation (fst st)
-        ; Inv_IsolatedThreads: CompartmentIsolatedThreads (fst st)  
+        { Inv_UserMode: UserModeInvariant (fst st)
+        ; Inv_CompartmentIsolation: CompartmentIsolation (fst st)
+        ; Inv_IsolatedThreads: CompartmentIsolatedThreads (fst st)
         }.                                                           
       
       Definition Invariant (st: State) : Prop :=
@@ -650,9 +668,18 @@ Module CompartmentIsolation.
             let H' := fresh "HCompartmentIsolation" in 
             pose proof (Inv_CompartmentIsolation _ H) as H';
             cbv [CompartmentIsolation] in H'
+        | H : Invariant' _ |- _ =>
+            mark (MkMark "InvIsolatedThreads");
+            let H' := fresh "HIsolatedThreads" in 
+            pose proof (Inv_IsolatedThreads _ H) as H';
+            cbv [CompartmentIsolatedThreads] in H'
+        | H : Invariant' _ |- _ =>
+            mark (MkMark "InvUserMode");
+            let H' := fresh "HUserMode" in 
+            pose proof (Inv_UserMode _ H) as H'
         end.
 
-      Lemma GeneralStepOk :
+      Lemma GeneralStepOk__User :
         forall m tr m' thread generalInst userSt' sysSt',
           GlobalInvariant config m ->
           Invariant' (m, tr) ->
@@ -661,6 +688,7 @@ Module CompartmentIsolation.
               n <> machine_curThreadId m ->
               nth_error (machine_threads m') n = nth_error (machine_threads m) n) ->
           nth_error (machine_threads m) (machine_curThreadId m) = Some thread ->
+          (~ThreadHasSystemPerm thread) ->
           WfGeneralInst generalInst ->
           generalInst (thread_userState thread, machine_memory m)
                       (thread_systemState thread, machine_interruptStatus m) =
@@ -669,8 +697,20 @@ Module CompartmentIsolation.
             Some {| thread_userState := userSt'; thread_systemState := sysSt' |} ->
           Invariant' (m',(Ev_SameThread (machine_curThreadId m) Ev_General::tr)).
       Proof.
-        intros * hginv hinv hginv' hsame hthread hwf hinst hupdate.
-        constructor.
+        intros * hginv hinv hginv' hsame hthread hmode hwf huserhinst hupdate.
+        init_invariant_proof.
+        assert (CompartmentIsolatedThreads m') as hiso_thread.
+        { cbv[CompartmentIsolatedThreads].
+          intros * hneq hiso * hthread' hcompartment'.
+          admit.
+        }
+
+        assert (CompartmentIsolation m') as hiso.
+        { cbv[CompartmentIsolation].
+          intros * hneq hiso hc1 hc2.
+          admit.
+        }
+        constructor; auto.
         (* cbv[PCompartmentIsolation]. *)
         (* intros * hneq hisolated * hcurThread hcurCompartment * haddr hreachable. *)
         (* init_invariant_proof. *)
@@ -688,8 +728,16 @@ Module CompartmentIsolation.
         (*   admit. *)
         (* } *)
       Admitted.
+Lemma ThreadInUserCompartmentDoesNotHaveSystemPerm:
+  forall config mem thread id,
+  ThreadInUserCompartment config mem thread id ->
+  ThreadHasSystemPerm thread ->
+  False.
+Proof.
+  cbv[ThreadInUserCompartment]. intros. destruct_products. congruence.
+Qed.
 
-      Lemma ExceptionStepOk :
+      Lemma ExceptionStepOk__User :
         forall m tr m' thread exn,
           GlobalInvariant config m ->
           Invariant' (m, tr) ->
@@ -698,6 +746,7 @@ Module CompartmentIsolation.
               n <> machine_curThreadId m ->
               nth_error (machine_threads m') n = nth_error (machine_threads m) n) ->
           nth_error (machine_threads m) (machine_curThreadId m) = Some thread ->
+          (~ThreadHasSystemPerm thread) ->
           nth_error (machine_threads m') (machine_curThreadId m) =
             Some (Build_Thread
                     (Build_UserThreadState
@@ -710,15 +759,41 @@ Module CompartmentIsolation.
           machine_memory m = machine_memory m' ->
           Invariant' (m',(Ev_SameThread (machine_curThreadId m) Ev_Exception::tr)).
       Proof.
-        (* intros * hginv hinv hginv' hsame hthread hupdate hMemEq. *)
-        (* constructor. cbv[PCompartmentIsolation]. *)
-        (* intros * hneq hisolated * hcurThread hcurCompartment * haddr hreachable. *)
-        (* init_invariant_proof. *)
-        
-      Admitted.
+        intros * hginv hinv hginv' hsame hthread hmode huserhupdate hMemEq.
+        init_invariant_proof. cbn [fst] in *.
+        rewrite hMemEq in *.
+        assert (CompartmentIsolatedThreads m') as hiso_thread.
+        { cbv[CompartmentIsolatedThreads].
+          intros * hneq hiso * hthread' hcompartment'.
+          unsafe_saturate_list. destruct_products; option_simpl.
+          destruct (PeanoNat.Nat.eq_dec (machine_curThreadId m) n); subst; option_simpl; cbn.
+          { exfalso.
+            eapply ThreadInUserCompartmentDoesNotHaveSystemPerm; eauto.
+            cbv[ThreadHasSystemPerm]; cbn.
+            eapply HUserMode; eauto.
+          }
+          { rewrite hsame in * by lia.
+            eapply HIsolatedThreads; eauto with lists.
+          }
+        }
+        assert (CompartmentIsolation m') as hiso.
+        { cbv[CompartmentIsolation]. eauto. }
 
+        assert (UserModeInvariant m') as huserMode.
+        { cbv[UserModeInvariant].
+          intros * ht ht_userMode. 
+          unsafe_saturate_list; destruct_products; option_simpl.
+          destruct (PeanoNat.Nat.eq_dec (machine_curThreadId m) n); subst; option_simpl; cbn.
+          { exfalso. apply ht_userMode. eapply HUserMode; eauto. }
+          { rewrite hsame in * by lia.
+            eapply HUserMode; eauto with lists.
+          }
+        }
 
-      Lemma CallSentryStepOk :
+        constructor; auto; cbn.
+      Qed.
+
+      Lemma CallSentryStepOk__User :
         forall m tr m' thread callSentryInst srcReg optLink pcc' rf', 
           GlobalInvariant config m ->
           Invariant' (m, tr) ->
@@ -727,6 +802,7 @@ Module CompartmentIsolation.
               n <> machine_curThreadId m ->
               nth_error (machine_threads m') n = nth_error (machine_threads m) n) ->
           nth_error (machine_threads m) (machine_curThreadId m) = Some thread ->
+          (~ThreadHasSystemPerm thread) ->
           WfCallSentryInst callSentryInst srcReg optLink ->
           callSentryInst (thread_userState thread, machine_memory m)
                          (machine_interruptStatus m) =
@@ -737,7 +813,7 @@ Module CompartmentIsolation.
           Invariant' (m',(Ev_SameThread (machine_curThreadId m) (Ev_Call pcc' rf' (machine_interruptStatus m'))::tr)).
       Admitted.
 
-      Lemma RetSentryStepOk:
+      Lemma RetSentryStepOk__User:
         forall m tr m' thread retSentryInst srcReg pcc',  
           GlobalInvariant config m ->
           Invariant' (m, tr) ->
@@ -746,6 +822,7 @@ Module CompartmentIsolation.
               n <> machine_curThreadId m ->
               nth_error (machine_threads m') n = nth_error (machine_threads m) n) ->
           nth_error (machine_threads m) (machine_curThreadId m) = Some thread ->
+          (~ThreadHasSystemPerm thread) ->
           WfRetSentryInst retSentryInst srcReg ->
           retSentryInst (thread_userState thread, machine_memory m) =
             Ok (pcc', machine_interruptStatus m') ->
@@ -755,6 +832,25 @@ Module CompartmentIsolation.
                     thread_systemState := thread_systemState thread |} ->
           Invariant' (m',(Ev_SameThread (machine_curThreadId m) (Ev_Ret pcc' (thread_rf (thread_userState thread)) (machine_interruptStatus m'))::tr)).
       Admitted.
+      Lemma threadHasSystemPerm_false_iff:
+        forall thread,
+          threadHasSystemPerm thread = false <-> ~(ThreadHasSystemPerm thread).
+      Proof.
+        cbv[threadHasSystemPerm ThreadHasSystemPerm]. unfold not.
+        intros. split. intros.
+        - match goal with
+          | H: ?x = false |- _ =>
+              assert (x = true); [ | congruence]
+          end.
+          rewrite existsb_exists. eexists; split; eauto.
+        - intros.
+          match goal with
+          | |- ?x = false =>
+              destruct x eqn:?; auto
+          end.
+          rewrite existsb_exists in *. destruct_products.
+          apply Perm.internal_t_dec_bl in Heqbr. subst. congruence.
+      Qed.
 
       Lemma SameThreadStepOk:
         forall m tr m' ev,
@@ -767,29 +863,33 @@ Module CompartmentIsolation.
         intros * hginv hinv hginv' hstep.
         pose proof hstep as hstep'.
         inv hstep. destruct_products.
-        inv stepOkrl.
-        - rename H0 into hstep. revert hstep.
-          cbv [threadStepFunction exceptionState uc sc fst snd mem ints rf mepcc pcc sts].
-          repeat (case_match; intros; simplify_eq); rewrite threadIdEq in *.
-          + (* generalInstOk *)
-            eapply GeneralStepOk with (m := m); eauto.
-          + (* generalInstExn *)
-            eapply ExceptionStepOk with (m := m); eauto.
-          + (* callSentryOk *)
-            eapply CallSentryStepOk with (m := m); eauto.
-          + (* callSentryExn *)
-            eapply ExceptionStepOk with (m := m); eauto.
-          + (* retSentryOk *)
-            eapply RetSentryStepOk with (m := m); eauto.
-          + (* retSentryExn *)
-            eapply ExceptionStepOk with (m := m); eauto.
-          + (* Inst Exn *)
-            eapply ExceptionStepOk with (m := m); eauto.
-        - (* Fetch Exception *)
-          cbv [threadStepFunction exceptionState uc sc fst snd mem ints rf mepcc pcc sts] in *.
-          rewrite threadIdEq in *.
-          eapply ExceptionStepOk with (m := m); eauto.
-      Qed.
+        destruct (threadHasSystemPerm thread) eqn:Hmode.
+        { admit. }
+        { rewrite threadHasSystemPerm_false_iff in Hmode.
+          inv stepOkrl.
+          - rename H0 into hstep. revert hstep.
+            cbv [threadStepFunction exceptionState uc sc fst snd mem ints rf mepcc pcc sts].
+            repeat (case_match; intros; simplify_eq); rewrite threadIdEq in *.
+            + (* generalInstOk *)
+              eapply GeneralStepOk__User with (m := m); eauto.
+            + (* generalInstExn *)
+              eapply ExceptionStepOk__User with (m := m); eauto.
+            + (* callSentryOk *)
+              eapply CallSentryStepOk__User with (m := m); eauto.
+            + (* callSentryExn *)
+              eapply ExceptionStepOk__User with (m := m); eauto.
+            + (* retSentryOk *)
+              eapply RetSentryStepOk__User with (m := m); eauto.
+            + (* retSentryExn *)
+              eapply ExceptionStepOk__User with (m := m); eauto.
+            + (* Inst Exn *)
+              eapply ExceptionStepOk__User with (m := m); eauto.
+          - (* Fetch Exception *)
+            cbv [threadStepFunction exceptionState uc sc fst snd mem ints rf mepcc pcc sts] in *.
+            rewrite threadIdEq in *.
+            eapply ExceptionStepOk__User with (m := m); eauto.
+        }
+      Admitted.
       
       Lemma InvariantStep (s: State) :
         forall t,
@@ -804,9 +904,7 @@ Module CompartmentIsolation.
         assert (GlobalInvariant config m0) as hglobal' by (eapply GlobalInvariantStep; eauto).
         split; auto.
         inv hstep.
-        - constructor.
-          + pose proof (Inv_CompartmentIsolation _ hinvr) as hisolation. auto.
-          + pose proof (Inv_IsolatedThreads _ hinvr) as hisolation. auto.
+        - constructor; init_invariant_proof; auto.
         - eapply SameThreadStepOk with (m := m); eauto.
       Qed.
 
@@ -1236,6 +1334,7 @@ Qed.
         - pose proof (PCompartmentIsolation_InitCompartments _ hvalid) as hiso.
           pose proof (PCompartmentIsolation_InitThreads _ hvalid hiso) as hthread.
           constructor; auto.
+          eapply ValidInit_userMode; eauto.
       Qed.
     End WithConfig.
 
