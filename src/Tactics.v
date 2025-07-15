@@ -1,5 +1,4 @@
-From Stdlib Require Import List Lia Bool Nat NArith.
-
+From Stdlib Require Import String List Lia Bool Nat NArith.
 
 Tactic Notation "learn_hyp" constr(p) "as" ident(H') :=
   let P := type of p in
@@ -133,6 +132,7 @@ Tactic Notation "split_and" :=
   | |- _/\ _ => split
   end.
 Tactic Notation "split_and" "?" := repeat split_and.
+Ltac split_ands := repeat split_and.
 Tactic Notation "split_and" "!" := hnf; split_and; split_and?.
 Tactic Notation "destruct_or" "?" ident(H) :=
   repeat match type of H with
@@ -162,4 +162,32 @@ Ltac assert_pre_and_specialize H :=
 Ltac rewrite_solve :=
   match goal with
   | [ H: _ |- _ ] => solve[rewrite H; try congruence; auto]
+  end.
+Ltac simplify_tuples :=
+  repeat match goal with
+  | [ H: (_,_) = (_,_) |- _ ] =>
+    apply simple_tuple_inversion in H; destruct H
+  end.
+
+Ltac simplify_tupless := simplify_tuples; subst.
+
+Ltac bash_destruct H :=
+  repeat destruct_matches_in_hyp H; simpl in H; simplify_tupless; try congruence.
+
+Ltac destruct_and_save H :=
+  let H' := fresh H in
+  pose proof H as H';
+  destruct H'.
+
+Inductive MARK : string -> Type :=
+| MkMark : forall s, MARK s.
+
+Tactic Notation "mark" constr(p) :=
+  let H := fresh "Mark" in
+  learn_hyp p as H.
+
+Tactic Notation "assert_fresh" constr(P) "as" ident(H') :=
+  match goal with
+  | H : P |- _ => fail 1
+  | _ => assert P as H'
   end.

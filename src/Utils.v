@@ -94,6 +94,10 @@ Section Option.
   Proof.
     destruct x; congruence.
   Qed.
+
+  Definition from_option {A B} (f : A -> B) (y : B) (mx : option A) : B :=
+    match mx with None => y | Some x => f x end.
+
 End Option.
 
 Ltac option_simpl :=
@@ -281,6 +285,36 @@ Fixpoint listSumToInl [A B: Type] (l: list (A+B)) : list A :=
                | _ => listSumToInl xs
                end
   end.
+Lemma In_listSumToInl:
+  forall A B (xs: list (A+B)) x,
+  In (inl x) xs ->
+  In x (listSumToInl xs).
+Proof.
+  induction xs; cbn; auto.
+  intros * H. inv H; subst; auto.
+  - constructor. auto.
+  - apply IHxs in H0. case_match; [right | ]; auto.
+Qed.
+Lemma listSumToInl_In:
+  forall A B (xs: list (A+B)) x,
+  In x (listSumToInl xs) ->
+  In (inl x) xs.
+Proof.
+  induction xs; cbn; auto.
+  intros. case_match; subst.
+  - inv H; auto.
+  - apply IHxs in H. auto.
+Qed.
+
+Lemma listSumToInl_iff:
+  forall A B (xs: list (A+B)) x,
+  In x (listSumToInl xs) <->
+  In (inl x) xs.
+Proof.
+  split.
+  - apply listSumToInl_In.
+  - apply In_listSumToInl.
+Qed.
 
 Theorem seqInBounds n: forall b v,
     b <= v < b + n -> In v (seq b n).
