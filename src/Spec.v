@@ -292,7 +292,8 @@ Section Machine.
           /\ Subset (seq a sz) auth.(capAddrs).
 
         Definition StPermForCap (auth: Cap) (capa: CapAddr) :=
-          StPermForAddr auth (fromCapAddr capa) ISA_CAPSIZE_BYTES.
+          StPermForAddr auth (fromCapAddr capa) ISA_CAPSIZE_BYTES /\
+          In Perm.Cap auth.(capPerms).
 
         Definition ValidMemCapUpdate :=
           forall capa stDataCap, readCap mem capa <> readCap mem' capa ->

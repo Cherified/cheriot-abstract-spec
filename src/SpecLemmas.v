@@ -390,7 +390,7 @@ Section WithContext.
         StPermForCap mem caps' addr capa.
     Proof.
       cbv[StPermForCap].
-      intros. destruct_products.
+      intros. destruct_products. split; auto.
       eapply StPermForAddrSubset; eauto.
     Qed.
     Lemma ValidMemTagRemovalSubset:

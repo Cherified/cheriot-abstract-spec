@@ -469,8 +469,18 @@ Module Configuration.
 End Configuration.
 
 
+(* Shared buffer abstraction.
+   If a compartment:
+   - only passes arguments without Cap permission
+   - and is only passed arguments without Cap permission,
+   then no other compartment should 
+ *)
 
-
+(* If a compartment:
+   - sanitizes its arguments such that LG is unset
+   - does not return caps into anything passed by a caller
+   - does not write caps to memory regions that are currently live...  
+ *)
 
 
 (* If a (malicious) compartment is not transitively-reachable from a
