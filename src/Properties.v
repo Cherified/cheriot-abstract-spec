@@ -468,13 +468,52 @@ Module Configuration.
   Hint Resolve Inv_curThread : invariants.
 End Configuration.
 
-
-(* Shared buffer abstraction.
+(* Restricted shared buffer communication:
    If a compartment:
    - only passes arguments without Cap permission
-   - and is only passed arguments without Cap permission,
-   then no other compartment should 
+   - and is only passed arguments without Cap permission (so can't store caps in them)
+   - and does not return caps 
+   - and all caps passed are set to GL-unset&LG-unset
+   Then no other compartment should
+   - have access to its caps other than those live as arguments
+   - (transitive) callees should only have access to caps passed as arguments
+     + these caps should all be GL-unset&LG-unset 
  *)
+
+Module SharedBufferRestriction.
+  Import ListNotations.
+  Import Configuration.
+  Import Separation.
+  Section WithContext.
+    Context [ISA: ISA_params].
+    Context {Byte Key: Type}.
+    Context {capEncodeDecode: @CapEncodeDecode Byte Key}.
+    Notation FullMemory := (@FullMemory Byte).
+    Notation EXNInfo := (@EXNInfo Byte).
+    Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
+    Context {pccNotInBounds : EXNInfo}.
+    Notation Machine := (@Machine Byte Key).
+    Notation Cap := (@Cap Key).
+    Notation CapOrBytes := (@CapOrBytes Byte Key).
+    Notation PCC := Cap (only parsing).
+    Notation Thread := (@Thread Byte Key).
+    Notation Trace := (@Trace Byte Key).
+    Notation State := (Machine * Trace)%type.
+    Notation Event := (@Event Byte Key).
+    Notation Config := (@Config Byte Key).
+    Context {LookupExportTableCompartment: Config -> Cap -> FullMemory -> option nat}.
+    Notation ValidInitialState := (@ValidInitialState _ Byte Key _ LookupExportTableCompartment).
+    Notation ValidInitialThread := (@ValidInitialThread _ Byte Key _ LookupExportTableCompartment).
+
+    Definition SafeEvent (idx: nat) (ev: Event) : Prop.
+    Admitted.
+    
+    Definition SafeCompartment (idx: nat) (tr: Trace) : Prop :=
+      forall ev, In ev tr ->  SafeEvent idx ev.
+
+  End WithContext.
+End SharedBufferRestriction.
+
 
 (* If a compartment:
    - sanitizes its arguments such that LG is unset
