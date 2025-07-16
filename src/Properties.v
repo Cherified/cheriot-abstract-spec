@@ -296,35 +296,35 @@ Module Configuration.
     Definition dummy_memory (mem: Memory_t) : FullMemory :=
       (mem, fun _ => false).
 
-      Lemma threadInConfigFootprint:
-        forall config metaThread tid addr,
-          nth_error (configThreads config) tid = Some metaThread ->
-          In addr (stackFootprint metaThread) ->
-          nth_error (ConfigFootprints config) (length config.(configCompartments) + tid) = Some (stackFootprint metaThread).
-      Proof.
-        intros * hthread haddr.
-        unfold ConfigFootprints.
-        rewrite nth_error_app. rewrite length_map.
-        case_match; simplify_nat.
-        saturate_list.
-        rewrite nth_error_map.
-        replace (length (configCompartments config) + tid - length (configCompartments config)) with tid by lia.
-        rewrite hthread. cbn. eexists; split; eauto.
-      Qed.
+    Lemma threadInConfigFootprint:
+      forall config metaThread tid addr,
+        nth_error (configThreads config) tid = Some metaThread ->
+        In addr (stackFootprint metaThread) ->
+        nth_error (ConfigFootprints config) (length config.(configCompartments) + tid) = Some (stackFootprint metaThread).
+    Proof.
+      intros * hthread haddr.
+      unfold ConfigFootprints.
+      rewrite nth_error_app. rewrite length_map.
+      case_match; simplify_nat.
+      saturate_list.
+      rewrite nth_error_map.
+      replace (length (configCompartments config) + tid - length (configCompartments config)) with tid by lia.
+      rewrite hthread. cbn. eexists; split; eauto.
+    Qed.
 
-      Lemma compartmentInConfigFootprint:
-        forall config compartment cid addr,
-          nth_error (configCompartments config) cid = Some compartment ->
-          In addr (compartmentFootprint compartment) ->
-          nth_error (ConfigFootprints config) cid = Some (compartmentFootprint compartment).
-      Proof.
-        intros * hthread haddr.
-        unfold ConfigFootprints.
-        rewrite nth_error_app. rewrite length_map. repeat rewrite nth_error_map.
-        rewrite hthread.
-        case_match; simplify_nat; auto.
-        exfalso. apply H. apply nth_error_Some. rewrite_solve.
-      Qed.
+    Lemma compartmentInConfigFootprint:
+      forall config compartment cid addr,
+        nth_error (configCompartments config) cid = Some compartment ->
+        In addr (compartmentFootprint compartment) ->
+        nth_error (ConfigFootprints config) cid = Some (compartmentFootprint compartment).
+    Proof.
+      intros * hthread haddr.
+      unfold ConfigFootprints.
+      rewrite nth_error_app. rewrite length_map. repeat rewrite nth_error_map.
+      rewrite hthread.
+      case_match; simplify_nat; auto.
+      exfalso. apply H. apply nth_error_Some. rewrite_solve.
+    Qed.
 
     Section Proofs.
       Ltac saturate_footprints := 
@@ -468,65 +468,15 @@ Module Configuration.
   Hint Resolve Inv_curThread : invariants.
 End Configuration.
 
-(* Restricted shared buffer communication:
-   If a compartment:
-   - only passes arguments without Cap permission
-   - and is only passed arguments without Cap permission (so can't store caps in them)
-   - and does not return caps 
-   - and all caps passed are set to GL-unset&LG-unset
-   Then no other compartment should
-   - have access to its caps other than those live as arguments
-   - (transitive) callees should only have access to caps passed as arguments
-     + these caps should all be GL-unset&LG-unset 
- *)
-
-Module SharedBufferRestriction.
-  Import ListNotations.
-  Import Configuration.
-  Import Separation.
-  Section WithContext.
-    Context [ISA: ISA_params].
-    Context {Byte Key: Type}.
-    Context {capEncodeDecode: @CapEncodeDecode Byte Key}.
-    Notation FullMemory := (@FullMemory Byte).
-    Notation EXNInfo := (@EXNInfo Byte).
-    Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
-    Context {pccNotInBounds : EXNInfo}.
-    Notation Machine := (@Machine Byte Key).
-    Notation Cap := (@Cap Key).
-    Notation CapOrBytes := (@CapOrBytes Byte Key).
-    Notation PCC := Cap (only parsing).
-    Notation Thread := (@Thread Byte Key).
-    Notation Trace := (@Trace Byte Key).
-    Notation State := (Machine * Trace)%type.
-    Notation Event := (@Event Byte Key).
-    Notation Config := (@Config Byte Key).
-    Context {LookupExportTableCompartment: Config -> Cap -> FullMemory -> option nat}.
-    Notation ValidInitialState := (@ValidInitialState _ Byte Key _ LookupExportTableCompartment).
-    Notation ValidInitialThread := (@ValidInitialThread _ Byte Key _ LookupExportTableCompartment).
-
-    Definition SafeEvent (idx: nat) (ev: Event) : Prop.
-    Admitted.
-    
-    Definition SafeCompartment (idx: nat) (tr: Trace) : Prop :=
-      forall ev, In ev tr ->  SafeEvent idx ev.
-
-  End WithContext.
-End SharedBufferRestriction.
-
-
-(* If a compartment:
-   - sanitizes its arguments such that LG is unset
-   - does not return caps into anything passed by a caller
-   - does not write caps to memory regions that are currently live...  
- *)
-
-
 (* If a (malicious) compartment is not transitively-reachable from a
    protected compartment, then it should never have access to the
    protected compartment's memory regions.
+
+   This module just validates the initial configuration setup, by
+   proving that isolated compartments do not share addresses,
+   sentries, or switcher-sealed data caps in the initial state.
  *)
-Module CompartmentIsolation.
+Module CompartmentIsolationValidation.
   Import ListNotations.
   Import Configuration.
   Import Separation.
@@ -627,6 +577,8 @@ Module CompartmentIsolation.
          - The caps reachable from user-mode threads in a compartment should follow the above restrictions
          Extra invariants:
          - Only the switcher should have the unsealing key to sealedCapToExportEntries
+
+         NB: for inductive proof, we likely want make these transitively closed properties.
        *)
       Definition AddrsIsolatedFromCompartment
         (mem: FullMemory) (srcCaps: list Cap) (cid: nat): Prop :=
@@ -680,15 +632,15 @@ Module CompartmentIsolation.
         CompartmentIsolatedThreads (fst st).
 
 
-      Record Invariant' (st: State) : Prop :=
+      Record InitialProperty' (st: State) : Prop :=
         { Inv_UserMode: UserModeInvariant (fst st)
         ; Inv_CompartmentIsolation: CompartmentIsolation (fst st)
         ; Inv_IsolatedThreads: CompartmentIsolatedThreads (fst st)
         }.                                                           
       
-      Definition Invariant (st: State) : Prop :=
+      Definition InitialProperty (st: State) : Prop :=
         GlobalInvariant config (fst st) /\
-          Invariant' st.
+          InitialProperty' st.
 
       Ltac simplify_invariants :=
         repeat match goal with
@@ -707,87 +659,35 @@ Module CompartmentIsolation.
             specialize generalInstOkCommon with (1 := H) (2 := H1) as Hok;
             assert_pre_and_specialize Hok; [simplify_invariants | ];
             cbn in Hok; destruct_products
-        | H : Invariant' _ |- _ =>
+        | H : InitialProperty'  _ |- _ =>
             mark (MkMark "InvCompartmentIsolation");
             let H' := fresh "HCompartmentIsolation" in 
             pose proof (Inv_CompartmentIsolation _ H) as H';
             cbv [CompartmentIsolation] in H'
-        | H : Invariant' _ |- _ =>
+        | H : InitialProperty'  _ |- _ =>
             mark (MkMark "InvIsolatedThreads");
             let H' := fresh "HIsolatedThreads" in 
             pose proof (Inv_IsolatedThreads _ H) as H';
             cbv [CompartmentIsolatedThreads] in H'
-        | H : Invariant' _ |- _ =>
+        | H : InitialProperty' _ |- _ =>
             mark (MkMark "InvUserMode");
             let H' := fresh "HUserMode" in 
             pose proof (Inv_UserMode _ H) as H'
         end.
 
-      (* TODO: decidable mutually unreachable compartment???
-         - is it necessary to case proof on whether compartments are reachable?
-       *)
-      Lemma GeneralStepOk__User :
-        forall m tr m' thread generalInst userSt' sysSt',
-          GlobalInvariant config m ->
-          Invariant' (m, tr) ->
-          GlobalInvariant config m' ->
-          (forall n : nat,
-              n <> machine_curThreadId m ->
-              nth_error (machine_threads m') n = nth_error (machine_threads m) n) ->
-          nth_error (machine_threads m) (machine_curThreadId m) = Some thread ->
-          (~ThreadHasSystemPerm thread) ->
-          WfGeneralInst generalInst ->
-          generalInst (thread_userState thread, machine_memory m)
-                      (thread_systemState thread, machine_interruptStatus m) =
-            Ok (userSt', machine_memory m', (sysSt', machine_interruptStatus m')) ->
-          nth_error (machine_threads m') (machine_curThreadId m) =
-            Some {| thread_userState := userSt'; thread_systemState := sysSt' |} ->
-          Invariant' (m',(Ev_SameThread (machine_curThreadId m) Ev_General::tr)).
+      Lemma ThreadInUserCompartmentDoesNotHaveSystemPerm:
+        forall config mem thread id,
+          ThreadInUserCompartment config mem thread id ->
+          ThreadHasSystemPerm thread ->
+          False.
       Proof.
-        intros * hginv hinv hginv' hsame hthread hmode hwf huserhinst hupdate.
-        init_invariant_proof.
-        assert (CompartmentIsolatedThreads m') as hiso_thread.
-        { cbv[CompartmentIsolatedThreads].
-          intros * hneq hiso * hthread' hcompartment'.
-          admit.
-        }
-
-        assert (CompartmentIsolation m') as hiso.
-        { cbv[CompartmentIsolation]. 
-          intros * hneq hiso hc1.
-          admit.
-        }
-        constructor; auto.
-        (* cbv[PCompartmentIsolation]. *)
-        (* intros * hneq hisolated * hcurThread hcurCompartment * haddr hreachable. *)
-        (* init_invariant_proof. *)
-        (* saturate_list; unsafe_saturate_list; destruct_products. *)
-        (* destruct (PeanoNat.Nat.eq_dec (machine_curThreadId m) n); subst. *)
-        (* { admit. } *)
-        (* { rewrite hsame in * by lia. saturate_list. destruct_products. *)
-        (*   (* Thread0 is in compartment idx2, which is isolated from idx1 *) *)
-        (*   (* Addr is reachable from mem' from thread0 *) *)
-        (*   (* But addr is in compartment idx1 *) *)
-        (*   pose proof HCompartmentIsolation as Hiso'. *)
-        (*   specialize Hiso' with (1 := hneq) (thread := thread0) (addr := addr). *)
-        (*   propositional. *)
-        (*   (* apply Hiso'. *) *)
-        (*   admit. *)
-        (* } *)
-      Admitted.
-Lemma ThreadInUserCompartmentDoesNotHaveSystemPerm:
-  forall config mem thread id,
-  ThreadInUserCompartment config mem thread id ->
-  ThreadHasSystemPerm thread ->
-  False.
-Proof.
-  cbv[ThreadInUserCompartment]. intros. destruct_products. congruence.
-Qed.
+        cbv[ThreadInUserCompartment]. intros. destruct_products. congruence.
+      Qed.
 
       Lemma ExceptionStepOk__User :
         forall m tr m' thread exn,
           GlobalInvariant config m ->
-          Invariant' (m, tr) ->
+          InitialProperty' (m, tr) ->
           GlobalInvariant config m' ->
           (forall n : nat,
               n <> machine_curThreadId m ->
@@ -804,7 +704,7 @@ Qed.
                        exn 
                        (thread_trustedStack (thread_systemState thread)))) ->
           machine_memory m = machine_memory m' ->
-          Invariant' (m',(Ev_SameThread (machine_curThreadId m) Ev_Exception::tr)).
+          InitialProperty' (m',(Ev_SameThread (machine_curThreadId m) Ev_Exception::tr)).
       Proof.
         intros * hginv hinv hginv' hsame hthread hmode huserhupdate hMemEq.
         init_invariant_proof. cbn [fst] in *.
@@ -840,331 +740,101 @@ Qed.
         constructor; auto; cbn.
       Qed.
 
-Definition ReachableViaCallRet (caps caps': list Cap) :=
-    forall cap, In cap caps' ->
-                In cap caps \/
-                (* Seal *)
-                (exists c, In c caps
-                             /\ isSealed c = false
-                             /\ RestrictUnsealed c (setCapSealed cap None)
-                             /\ isSentry cap = true) \/
-                (* Unseal *)
-                (exists c, In c caps /\ isSentry c = true /\ cap = setCapSealed c None).
-
-
-Hint Resolve RestrictRefl: ReachableCap.
-Hint Resolve Refl: ReachableCap.
-Hint Resolve StepRestrict: ReachableCap.
-Hint Resolve StepLoadCap: ReachableCap.
-Hint Resolve StepSeal: ReachableCap.
-Hint Resolve StepUnseal: ReachableCap.
-Hint Resolve RestrictUnsealedOk: ReachableCap.
-  Lemma ReachableCapPostCallRetWithIsolatedSentries:
-    forall mem caps caps' idx addr,
-      ReachableViaCallRet caps caps' ->
-      SentriesIsolatedFromCompartment mem caps idx ->
-      (forall addr : Addr,
-        ReachableRWXAddr mem caps addr -> AddrInCompartment config idx addr -> False) ->
-      AddrInCompartment config idx addr ->
-      forall c, ReachableCap mem caps' c ->
-      capSealed c = None ->
-      In addr (capAddrs c) ->
-      ReachableCap mem caps c.
-  Proof.
-    cbv[ReachableViaCallRet SentriesIsolatedFromCompartment AddrInCompartment].
-    intros * hreachable hsentries haddr_isolated haddr. destruct_products.
-    (* induction 1. *)
-    (* - intros * hnotSealed hsubset. *)
-    (*   specialize hreachable with (1 := inPf). *)
-    (*   destruct_or?. *)
-    (*   + apply Refl; auto. *)
-    (*   + destruct_products. subst. cbn in *. *)
-    (*     exfalso. eapply hsentries; eauto. *)
-    (*     * apply Refl; auto. *)
-    (*     * eapply CompartmentCodeProvenance; eauto. *)
-    (*   +  destruct_products; subst. cbv[isSentry] in *. by simpl_match. *)
-    (* - intros * hunsealed hauth_addr. *)
-    (*   eapply StepRestrict; eauto. *)
-    (*   eapply IHReachableCap; eauto. *)
-    (*   + by erewrite RestrictSealedEq. *)
-    (*   + eapply RestrictCapAddrsSubset; eauto. *)
-    (* - intros * hunsealed hauth_addr. *)
-    (*   eapply StepLoadCap; eauto. *)
-    (*   eapply IHReachableCap; eauto. *)
-    (*   * inv xyz; auto. *)
-    (*   * exfalso. apply haddr_isolated with (addr := addr). *)
-    (*     {  *)
-    (*   (* TODO *) *)
-    (*   admit. admit. *)
-    (* - intros * hunsealed hauth_addr. *)
-    (*   eapply StepSeal; eauto. *)
+      Definition ReachableViaCallRet (caps caps': list Cap) :=
+        forall cap, In cap caps' ->
+                    In cap caps \/
+                      (* Seal *)
+                      (exists c, In c caps
+                                 /\ isSealed c = false
+                                 /\ RestrictUnsealed c (setCapSealed cap None)
+                                 /\ isSentry cap = true) \/
+                      (* Unseal *)
+                      (exists c, In c caps /\ isSentry c = true /\ cap = setCapSealed c None).
       
-  Admitted.
-Ltac simplify_ReachableCap :=
-  repeat match goal with
-  | H: ReachableCap ?mem ?caps ?y,
-    H1: Restrict ?y ?z
-    |- ReachableCap ?mem ?caps ?z =>
-      eapply StepRestrict with (1 := H) (2 := H1)
-  | H: ReachableCap ?mem ?caps (setCapSealed ?y None),
-    H1: Restrict ?y ?z
-    |- ReachableCap ?mem ?caps (setCapSealed ?z None) =>
-      eapply StepRestrict with (1 := H)
-  | H : isSentry ?y = true, H1: Restrict ?y ?z |- isSentry ?z = true =>
-        unfold isSentry;
-        rewrite<-RestrictSealedEq with (1 := H1)
-  | H: Restrict ?x ?y, H1: Restrict ?y ?z |-  Restrict ?x ?z =>
-      apply RestrictTrans with (1 := H) (2 := H1)
-  | H : isSentry ?x = true, H1: capSealed ?x = None |- _ =>
-      exfalso; clear - H H1; cbv[isSentry] in *; simpl_match; discriminate
-  | _ => progress (auto with ReachableCap)
-  end.
+      
+      Hint Resolve RestrictRefl: ReachableCap.
+      Hint Resolve Refl: ReachableCap.
+      Hint Resolve StepRestrict: ReachableCap.
+      Hint Resolve StepLoadCap: ReachableCap.
+      Hint Resolve StepSeal: ReachableCap.
+      Hint Resolve StepUnseal: ReachableCap.
+      Hint Resolve RestrictUnsealedOk: ReachableCap.
+      Ltac simplify_ReachableCap :=
+        repeat match goal with
+          | H: ReachableCap ?mem ?caps ?y,
+              H1: Restrict ?y ?z
+            |- ReachableCap ?mem ?caps ?z =>
+              eapply StepRestrict with (1 := H) (2 := H1)
+          | H: ReachableCap ?mem ?caps (setCapSealed ?y None),
+              H1: Restrict ?y ?z
+            |- ReachableCap ?mem ?caps (setCapSealed ?z None) =>
+              eapply StepRestrict with (1 := H)
+          | H : isSentry ?y = true, H1: Restrict ?y ?z |- isSentry ?z = true =>
+              unfold isSentry;
+              rewrite<-RestrictSealedEq with (1 := H1)
+          | H: Restrict ?x ?y, H1: Restrict ?y ?z |-  Restrict ?x ?z =>
+              apply RestrictTrans with (1 := H) (2 := H1)
+          | H : isSentry ?x = true, H1: capSealed ?x = None |- _ =>
+              exfalso; clear - H H1; cbv[isSentry] in *; simpl_match; discriminate
+          | _ => progress (auto with ReachableCap)
+          end.
 
-(* Lemma ReachableViaCallRetImplies: *)
-(*   forall caps caps', *)
-(*   ReachableViaCallRet caps caps' -> *)
-(*   forall mem cap, *)
-(*   ReachableCap mem caps' cap -> *)
-(*   ReachableCap mem caps cap \/ *)
-(*   (ReachableCap mem caps (setCapSealed cap None) /\ isSentry cap = true) \/ (* Make sentry *) *)
-(*     (exists c, ReachableCap mem caps c *)
-(*                /\ isSentry c = true *)
-(*                /\ ReachableCap mem ((setCapSealed c None)::caps) cap). (* Unseal sentry *) *)
-(* Proof. *)
-(*   cbv[ReachableViaCallRet]. *)
-(*   intros * hreachable. *)
-(*   induction 1. *)
-(*   - specialize hreachable with (1 := inPf). *)
-(*     destruct_or?; destruct_products; simplify_ReachableCap. *)
-(*     + right; left; split_and?; auto. *)
-(*       eapply StepRestrict with (y := c0); eauto with ReachableCap. *)
-(*     + destruct_products; subst. *)
-(*       right. right. exists c0. split_and?; simplify_ReachableCap. *)
-(*       apply Refl. left. auto. *)
-(*   - destruct_or?; destruct_products; subst; simplify_ReachableCap. *)
-(*     * left. simplify_ReachableCap. *)
-(*     * right. left. split; simplify_ReachableCap. *)
-(*     * right. right. exists c; split_and?; simplify_ReachableCap. *)
-(*   - destruct_or?; destruct_products; subst; simplify_ReachableCap. *)
-(*     * left. eapply StepLoadCap; eauto. *)
-(*     * inv xyz. simplify_ReachableCap. *)
-(*     * *)
-
-(*       right. right.   *)
-(*       (* right. right.  *) *)
-(*       (* exfalso. inv xyz. *) *)
-(*       (* right; left. *) *)
-(*       (* exists c; split_and?; auto.  *) *)
-
-(* Admitted. *)
-
-Lemma AddrsIsolatedFromCompartment_ReachableViaCallRet:
-  forall mem (caps caps': list Cap) idx,
-  ReachableViaCallRet caps caps' ->
-  SentriesIsolatedFromCompartment mem caps idx ->
-  AddrsIsolatedFromCompartment mem caps idx ->
-  AddrsIsolatedFromCompartment mem caps' idx.
-Proof.
-  cbv[AddrsIsolatedFromCompartment].
-  intros * hreachable hsentries hinit * hreach haddr.
-  eapply hinit with (2 := haddr).
-  cbv[ReachableRWXAddr]. unfold ReachableRWXAddr in hreach.
-  destruct_products.
-  exists p, cs, cbs.
-  split_and?; auto.
-
-
-  (* inv hreachl. constructor; auto. *)
-  (* eapply ReachableCapPostCallRetWithIsolatedSentries; eauto. *)
-  (* apply ina. constructor; auto. *)
-Admitted.
-Lemma SentriesIsolatedFromCompartment_ReachableViaCallRet:
-  forall mem (caps caps': list Cap) idx,
-  ReachableViaCallRet caps caps' ->
-  SentriesIsolatedFromCompartment mem caps idx ->
-  SentriesIsolatedFromCompartment mem caps' idx.
-Admitted.
-Lemma SealedDataCapsIsolatedFromCompartment_ReachableViaCallRet:
-  forall mem (caps caps': list Cap) idx,
-  ReachableViaCallRet caps caps' ->
-  SealedDataCapsIsolatedFromCompartment mem caps idx ->
-  SealedDataCapsIsolatedFromCompartment mem caps' idx.
-Proof.
-  cbv[SealedDataCapsIsolatedFromCompartment].
-  intros * hreachable hiso * hreach hsealed haddr hprovenance.
-  
-
-  cbv[ReachableViaCallRet] in *.
-
-
-  admit.
-  (* eapply hiso; eauto. *)
-  (* specialize ReachableViaCallRetImplies with (1 := hreachable) (2 := hreach). intros cases. *)
-  (* destruct_or?; destruct_products; cbv[isSentry] in *; repeat simpl_match; auto; try discriminate; subst. *)
-  (* discriminate. *)
-Admitted.
-
-(* Lemma IsolatedFromCompartment_ReachableViaCallRet: *)
-(*   forall mem (caps caps': list Cap) idx, *)
-(*   ReachableViaCallRet caps caps' -> *)
-(*   IsolatedFromCompartment mem caps idx -> *)
-(*   IsolatedFromCompartment mem caps' idx. *)
-(* Proof. *)
-(*   cbv[IsolatedFromCompartment]. *)
-(*   intros. destruct_products. split_and?. *)
-(*   - eapply AddrsIsolatedFromCompartment_ReachableViaCallRet; eauto. *)
-(*   - eapply SentriesIsolatedFromCompartment_ReachableViaCallRet; eauto. *)
-(*   - eapply SealedDataCapsIsolatedFromCompartment_ReachableViaCallRet; eauto. *)
-(* Qed. *)
-Lemma ThreadInUserCompartmentSystemEquiv:
-  forall config mem thread thread' idx,
-  ~ ThreadHasSystemPerm thread' ->
-  thread.(thread_systemState) = thread'.(thread_systemState) ->
-  ThreadInUserCompartment config mem thread idx ->
-  ThreadInUserCompartment config mem thread' idx.
-Proof.
-  cbv[ThreadInUserCompartment]. intros. rewrite<-H0. destruct_products; eauto.
-Qed.
-
-
-
-
-Lemma WfCallSentryInst_CapsReached :
-  forall callSentryInst srcReg optLink userCtx mem istatus pcc' rf' istatus',
-  ValidRf (thread_rf userCtx) ->
-  WfCallSentryInst callSentryInst srcReg optLink ->
-  callSentryInst (userCtx, mem) istatus = Ok(pcc', rf', istatus') ->
-  ReachableViaCallRet (capsOfUserTS userCtx) (pcc' :: capsOfRf rf'). 
-Proof.
-  cbv[ReachableViaCallRet].
-  intros * hrf hwf hcall * hin'.
-  match goal with
-  | H: ?callSentryInst ?userCtx ?istatus = Ok (?pcc', ?rf', ?istatus'),
-      H1: WfCallSentryInst ?callSentryInst ?srcReg ?optLink |- _ =>
-      cbv[WfCallSentryInst] in *;
-      specialize H1 with (rf := thread_rf (fst userCtx))
-                         (pcc := thread_pcc (fst userCtx))
-                         (ints := istatus)
-                         (mem := snd userCtx); cbn in H1;
-      setoid_rewrite H in H1
-  end; propositional.
-  destruct_products. subst.
-  inv hin'.
-  - destruct (isSentry src_cap) eqn:hsrc_cap.
-    + right. right. exists src_cap. split_and?; auto.
-      cbv[capsOfUserTS]. right.
-      saturate_list. apply In_listSumToInl. auto.
-    + left. cbv[capsOfUserTS]. right.
-      rewrite setCapSealedNoneEq.
-      2: { cbv[isSentry] in *. by (bash_destruct hsrc_cap). }
-      saturate_list. apply In_listSumToInl. auto.
-  - destruct_with_eqn optLink; destruct_products; subst.
-    + apply listSumToInl_In in H.
-      rewrite In_iff_nth_error in H. destruct_products.
-      fold (CapOrBytes) in *.
-      destruct (PeanoNat.Nat.eq_dec n n0); subst; option_simpl.
-      * inv H. right. left. exists (thread_pcc userCtx); split_and?; auto.
-        { left; auto. }
-        { cbv [isSentry]. by simpl_match. }
-      * left. right.
-        match goal with
-        | H: forall _, _ <> _ -> nth_error _ _ = nth_error _ _ |- _ =>
-            rewrite H in * by lia
-        end.
-        saturate_list.
-        apply listSumToInl_iff. auto.
-    + left. right. auto.
-Qed.
-
-      Lemma CallSentryStepOk__User :
-        forall m tr m' thread callSentryInst srcReg optLink pcc' rf', 
-          GlobalInvariant config m ->
-          Invariant' (m, tr) ->
-          GlobalInvariant config m' ->
-          (forall n : nat,
-              n <> machine_curThreadId m ->
-              nth_error (machine_threads m') n = nth_error (machine_threads m) n) ->
-          nth_error (machine_threads m) (machine_curThreadId m) = Some thread ->
-          (~ThreadHasSystemPerm thread) ->
-          WfCallSentryInst callSentryInst srcReg optLink ->
-          callSentryInst (thread_userState thread, machine_memory m)
-                         (machine_interruptStatus m) =
-            Ok (pcc', rf', machine_interruptStatus m') ->
-          nth_error (machine_threads m') (machine_curThreadId m) =
-            Some {| thread_userState := {| thread_rf := rf'; thread_pcc := pcc' |};
-                    thread_systemState := thread_systemState thread |} ->
-          machine_memory m = machine_memory m' ->
-          Invariant' (m',(Ev_SameThread (machine_curThreadId m) (Ev_Call pcc' rf' (machine_interruptStatus m'))::tr)).
+      Lemma ThreadInUserCompartmentSystemEquiv:
+        forall config mem thread thread' idx,
+          ~ ThreadHasSystemPerm thread' ->
+          thread.(thread_systemState) = thread'.(thread_systemState) ->
+          ThreadInUserCompartment config mem thread idx ->
+          ThreadInUserCompartment config mem thread' idx.
       Proof.
-        intros * hginv hinv hginv' hsame hthread hmode hwf hinst hupdate hMemEq.
-        assert (ValidRf (thread_rf (thread_userState thread))) as Hvalid_rf.
-        { simplify_invariants. }
-        init_invariant_proof. cbn [fst] in *.
-        rewrite hMemEq in *.
-
-        assert (CompartmentIsolatedThreads m') as hiso_thread.
-        { cbv[CompartmentIsolatedThreads].
-          intros * hneq hiso * hthread' hcompartment'.
-          unsafe_saturate_list. destruct_products; option_simpl.
-          destruct (PeanoNat.Nat.eq_dec (machine_curThreadId m) n); subst; option_simpl; cbn.
-          { pose proof hiso as hiso'. cbv[MutuallyIsolatedCompartment] in hiso'.
-            destruct_products.
-
-            (* If I take a step to unseal a sentry,
-               - I gain access to new caps, either in the stack or another compartment
-               - If in another compartment
-                   * 
-must still be isolated from idx2
-                 ->
-             *)
-
-            eapply IsolatedFromCompartment_ReachableViaCallRet with
-              (caps := capsOfUserTS (thread_userState thread)); eauto.
-            2: { eapply HIsolatedThreads; eauto.
-                 eapply ThreadInUserCompartmentSystemEquiv with (3 := hcompartment'); auto.
-            }
-
-            eapply WfCallSentryInst_CapsReached; eauto.
-          }
-          { rewrite hsame in * by lia.
-            eapply HIsolatedThreads; eauto with lists.
-          }
-        }
-        assert (CompartmentIsolation m') as hiso.
-        { auto. }
-        assert (UserModeInvariant m') as huserMode.
-        { cbv[UserModeInvariant].
-          intros * ht ht_userMode. 
-          unsafe_saturate_list; destruct_products; option_simpl.
-          destruct (PeanoNat.Nat.eq_dec (machine_curThreadId m) n); subst; option_simpl; cbn.
-          { constructor. cbn. eapply MEPCC_ok; auto. }
-          { rewrite hsame in * by lia.
-            eapply HUserMode; eauto with lists.
-          }
-        }
-        constructor; auto.
+        cbv[ThreadInUserCompartment]. intros. rewrite<-H0. destruct_products; eauto.
       Qed.
 
-      Lemma RetSentryStepOk__User:
-        forall m tr m' thread retSentryInst srcReg pcc',  
-          GlobalInvariant config m ->
-          Invariant' (m, tr) ->
-          GlobalInvariant config m' ->
-          (forall n : nat,
-              n <> machine_curThreadId m ->
-              nth_error (machine_threads m') n = nth_error (machine_threads m) n) ->
-          nth_error (machine_threads m) (machine_curThreadId m) = Some thread ->
-          (~ThreadHasSystemPerm thread) ->
-          WfRetSentryInst retSentryInst srcReg ->
-          retSentryInst (thread_userState thread, machine_memory m) =
-            Ok (pcc', machine_interruptStatus m') ->
-          nth_error (machine_threads m') (machine_curThreadId m) =
-            Some {| thread_userState := {| thread_rf := thread_rf (thread_userState thread);
-                                           thread_pcc := pcc' |};
-                   thread_systemState := thread_systemState thread |} ->
-          machine_memory m = machine_memory m' ->
-          Invariant' (m',(Ev_SameThread (machine_curThreadId m) (Ev_Ret pcc' (thread_rf (thread_userState thread)) (machine_interruptStatus m'))::tr)).
-      Admitted.
+      Lemma WfCallSentryInst_CapsReached :
+        forall callSentryInst srcReg optLink userCtx mem istatus pcc' rf' istatus',
+        ValidRf (thread_rf userCtx) ->
+        WfCallSentryInst callSentryInst srcReg optLink ->
+        callSentryInst (userCtx, mem) istatus = Ok(pcc', rf', istatus') ->
+        ReachableViaCallRet (capsOfUserTS userCtx) (pcc' :: capsOfRf rf'). 
+      Proof.
+        cbv[ReachableViaCallRet].
+        intros * hrf hwf hcall * hin'.
+        match goal with
+        | H: ?callSentryInst ?userCtx ?istatus = Ok (?pcc', ?rf', ?istatus'),
+            H1: WfCallSentryInst ?callSentryInst ?srcReg ?optLink |- _ =>
+            cbv[WfCallSentryInst] in *;
+            specialize H1 with (rf := thread_rf (fst userCtx))
+                               (pcc := thread_pcc (fst userCtx))
+                               (ints := istatus)
+                               (mem := snd userCtx); cbn in H1;
+            setoid_rewrite H in H1
+        end; propositional.
+        destruct_products. subst.
+        inv hin'.
+        - destruct (isSentry src_cap) eqn:hsrc_cap.
+          + right. right. exists src_cap. split_and?; auto.
+            cbv[capsOfUserTS]. right.
+            saturate_list. apply In_listSumToInl. auto.
+          + left. cbv[capsOfUserTS]. right.
+            rewrite setCapSealedNoneEq.
+            2: { cbv[isSentry] in *. by (bash_destruct hsrc_cap). }
+            saturate_list. apply In_listSumToInl. auto.
+        - destruct_with_eqn optLink; destruct_products; subst.
+          + apply listSumToInl_In in H.
+            rewrite In_iff_nth_error in H. destruct_products.
+            fold (CapOrBytes) in *.
+            destruct (PeanoNat.Nat.eq_dec n n0); subst; option_simpl.
+            * inv H. right. left. exists (thread_pcc userCtx); split_and?; auto.
+              { left; auto. }
+              { cbv [isSentry]. by simpl_match. }
+            * left. right.
+              match goal with
+              | H: forall _, _ <> _ -> nth_error _ _ = nth_error _ _ |- _ =>
+                  rewrite H in * by lia
+              end.
+              saturate_list.
+              apply listSumToInl_iff. auto.
+          + left. right. auto.
+      Qed.
 
       Lemma threadHasSystemPerm_false_iff:
         forall thread,
@@ -1190,101 +860,36 @@ must still be isolated from idx2
       Notation SameThreadStep := (SameThreadStep fetchAddrs decode pccNotInBounds).
       Notation MachineStep := (MachineStep fetchAddrs decode pccNotInBounds).
 
-      Lemma SameThreadStepOk:
-        forall m tr m' ev,
-          GlobalInvariant config m ->
-          Invariant' (m, tr) ->
-          GlobalInvariant config m' ->
-          SameThreadStep m m' ev ->
-          Invariant' (m', ev::tr).
-      Proof.
-        intros * hginv hinv hginv' hstep.
-        pose proof hstep as hstep'.
-        inv hstep. destruct_products.
-        destruct (threadHasSystemPerm thread) eqn:Hmode.
-        { admit. }
-        { rewrite threadHasSystemPerm_false_iff in Hmode.
-          inv stepOkrl.
-          - rename H0 into hstep. revert hstep.
-            cbv [threadStepFunction exceptionState uc sc fst snd mem ints rf mepcc pcc sts].
-            repeat (case_match; intros; simplify_eq); rewrite threadIdEq in *.
-            + (* generalInstOk *)
-              eapply GeneralStepOk__User with (m := m); eauto.
-            + (* generalInstExn *)
-              eapply ExceptionStepOk__User with (m := m); eauto.
-            + (* callSentryOk *)
-              eapply CallSentryStepOk__User with (m := m); eauto.
-            + (* callSentryExn *)
-              eapply ExceptionStepOk__User with (m := m); eauto.
-            + (* retSentryOk *)
-              eapply RetSentryStepOk__User with (m := m); eauto.
-            + (* retSentryExn *)
-              eapply ExceptionStepOk__User with (m := m); eauto.
-            + (* Inst Exn *)
-              eapply ExceptionStepOk__User with (m := m); eauto.
-          - (* Fetch Exception *)
-            cbv [threadStepFunction exceptionState uc sc fst snd mem ints rf mepcc pcc sts] in *.
-            rewrite threadIdEq in *.
-            eapply ExceptionStepOk__User with (m := m); eauto.
-        }
-      Admitted.
-      
-      Lemma InvariantStep (s: State) :
-        forall t,
-        Invariant s ->
-        MachineStep s t ->
-        Invariant t.
-      Proof.
-        cbv[Invariant].
-        intros * hinv hstep. destruct s. destruct t.
-        cbv [fst snd] in *.
-        destruct_products.
-        assert (GlobalInvariant config m0) as hglobal' by (eapply GlobalInvariantStep; eauto).
-        split; auto.
-        inv hstep.
-        - constructor; init_invariant_proof; auto.
-        - eapply SameThreadStepOk with (m := m); eauto.
-      Qed.
-
-      Lemma InvariantUse (s: State) :
-        Invariant s ->
-        PIsolation s.
-      Proof.
-        cbv[Invariant].
-        intros * [hginv hinv].
-        by (eapply Inv_IsolatedThreads).
-      Qed.
-
-(* TODO: duplicated *)
-Ltac saturate_footprints := 
- repeat match goal with
-        | H: nth_error (configThreads _) _ = Some ?thread,
-          H1: In ?addr (stackFootprint ?thread) |- _ =>
-            let H' := fresh H1 "footprint" in 
-            learn_hyp (threadInConfigFootprint _ _ _ _ H H1) as H'
-        | H: nth_error (configCompartments _) _ = Some ?comp,
-        H1: In ?addr (compartmentFootprint ?comp) |- _ =>
-            let H' := fresh H1 "footprint" in 
-            learn_hyp (compartmentInConfigFootprint _ _ _ _ H H1) as H'
-   end.
+      (* TODO: duplicated *)
+      Ltac saturate_footprints := 
+       repeat match goal with
+              | H: nth_error (configThreads _) _ = Some ?thread,
+                H1: In ?addr (stackFootprint ?thread) |- _ =>
+                  let H' := fresh H1 "footprint" in 
+                  learn_hyp (threadInConfigFootprint _ _ _ _ H H1) as H'
+              | H: nth_error (configCompartments _) _ = Some ?comp,
+              H1: In ?addr (compartmentFootprint ?comp) |- _ =>
+                  let H' := fresh H1 "footprint" in 
+                  learn_hyp (compartmentInConfigFootprint _ _ _ _ H H1) as H'
+         end.
 
             
-Ltac saturate_invariants :=
-  repeat match goal with
-  | H: WFConfig _ |- _ =>
-      mark (MkMark "WFConfig");
-      destruct_and_save H
-  | H: ValidInitialState _ _ |- _ =>
-      mark (MkMark "ValidInitialState");
-      destruct_and_save H
-  | H: Forall _ _ |- _ => rewrite Forall_forall in H
-  | H: forall x, In x _ -> _,
-    H1: In _ _ |- _ =>
-      learn_hyp (H _ H1)
-  | H : machine_memory _ = configInitMemory _ |- _ =>
-      rewrite H in *
-  | _ => progress (saturate_list; repeat simpl_match)
-  end; auto.
+      Ltac saturate_invariants :=
+        repeat match goal with
+        | H: WFConfig _ |- _ =>
+            mark (MkMark "WFConfig");
+            destruct_and_save H
+        | H: ValidInitialState _ _ |- _ =>
+            mark (MkMark "ValidInitialState");
+            destruct_and_save H
+        | H: Forall _ _ |- _ => rewrite Forall_forall in H
+        | H: forall x, In x _ -> _,
+          H1: In _ _ |- _ =>
+            learn_hyp (H _ H1)
+        | H : machine_memory _ = configInitMemory _ |- _ =>
+            rewrite H in *
+        | _ => progress (saturate_list; repeat simpl_match)
+        end; auto.
 
       Lemma AddressesInitiallyIsolated:
         forall idx1 idx2 initial_machine c1 c2,
@@ -1303,12 +908,12 @@ Ltac saturate_invariants :=
         saturate_footprints.
         simplify_Separated.
       Qed.
-Ltac saturate_subset:=
-  repeat match goal with
-  | H: Subset ?x ?y,
-    H1: In ?z ?x |- _ =>
-      learn_hyp (H _ H1)
-    end.
+      Ltac saturate_subset:=
+        repeat match goal with
+        | H: Subset ?x ?y,
+          H1: In ?z ?x |- _ =>
+            learn_hyp (H _ H1)
+          end.
 
       Lemma PCompartmentIsolation_InitCompartments:
         forall initial_machine,
@@ -1374,17 +979,15 @@ Ltac saturate_subset:=
         - eapply SealedDataCapsIsolatedFromCompartmentSubset; eauto.
       Qed.
 
-Ltac simplify_provenance :=
-  repeat match goal with
-  | H: AddrHasProvenance _ _ (Provenance_Compartment _) |- _ =>
-      inv H
-  | H: AddrInCompartment _ _ _ |- _ =>
-      inv H
-  | H: ReachableAddr _ _ _ _ _ _ _ |- _ =>
-      inv H
-    end.
-
-
+      Ltac simplify_provenance :=
+        repeat match goal with
+        | H: AddrHasProvenance _ _ (Provenance_Compartment _) |- _ =>
+            inv H
+        | H: AddrInCompartment _ _ _ |- _ =>
+            inv H
+        | H: ReachableAddr _ _ _ _ _ _ _ |- _ =>
+            inv H
+          end.
 
       Lemma InitialThreadCapSubset:
         forall thread cap meta compartment ,
@@ -1401,7 +1004,7 @@ Ltac simplify_provenance :=
 
       (* For CSP *)
       Lemma ReachableCapRestrictCSP:
-        forall mem cap caps x,
+        forall mem (cap: Cap) caps x,
           x.(capSealingKeys) = [] ->
           x.(capUnsealingKeys) = [] ->
           x.(capSealed) = None ->
@@ -1424,7 +1027,7 @@ Ltac simplify_provenance :=
         - eapply StepLoadCap; eauto.
           eapply IHReachableCap. inv xyz; destruct_products.
           rewrite setCapSealedNoneEq by auto. intros.
-          specialize RestrictCapAddrsSubset with (1 := H0); intros.
+          specialize @RestrictCapAddrsSubset with (1 := H0); intros.
           cbv[readCap readMemTagCap readTag] in *.
           rewrite huntagged in *.
           { cbn in *. discriminate. }
@@ -1544,10 +1147,10 @@ Ltac simplify_provenance :=
         eapply IsolatedFromCompartmentInitialThread; eauto.
       Qed.
         
-      Lemma InvariantInitial :
+      Lemma InitialPropertyHolds :
         forall initial_machine,
         ValidInitialState config initial_machine ->
-        Invariant (initial_machine, []).
+        InitialProperty (initial_machine, []).
       Proof.
         intros * hvalid.
         constructor.
@@ -1558,25 +1161,8 @@ Ltac simplify_provenance :=
           eapply ValidInit_userMode; eauto.
       Qed.
     End WithConfig.
-    Context {decode: list Byte -> @Inst _ _ _ capEncodeDecode}.
-    Notation SameThreadStep := (SameThreadStep fetchAddrs decode pccNotInBounds).
-    Notation MachineStep := (MachineStep fetchAddrs decode pccNotInBounds).
-
-    Theorem MutuallyIsolatedCompartments :
-      forall config initial_machine,
-        WFConfig config ->
-        ValidInitialState config initial_machine ->
-        Combinators.always MachineStep (PIsolation config) (initial_machine, []).
-    Proof.
-      intros * hwf_config hinit_ok.
-      econstructor.
-      - eapply InvariantInitial; eauto.
-      - eapply InvariantStep; eauto.
-      - eapply InvariantUse; eauto.
-    Qed.
-
   End WithContext.
-End CompartmentIsolation.
+End CompartmentIsolationValidation.
 
 (* From any valid initial state where threads are isolated (their reachable
    read/write caps are disjoint), for any sequence of same-domain (Ev_General)
