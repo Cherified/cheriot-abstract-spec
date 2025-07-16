@@ -103,16 +103,24 @@ Module Configuration.
       match c.(compartmentCGP) with
       | None => true
       | _ => false
-      end.               
+      end.
+
+    Record SwitcherConfig := {
+        Switcher_compartmentIdx: nat;
+        Switcher_AddrOf_compartment_switcher_entry: Addr;
+        Switcher_AddrOf_exception_entry_asm : Addr;
+        Switcher_AddrOf_switcher_after_compartment_call: Addr;
+        Switcher_key: Key                                                    
+    }.
+
     (* The initial state of a machine is defined in terms of its
        compartments, libraries, the trusted switcher, the initial
        state of the threads, and the initial memory. *)
     Record Config := {
         configCompartments: list Compartment;
-        configSwitcher: nat; (* Index of the switcher*)
         configThreads : list InitialThreadMetadata;
         configInitMemory: FullMemory;
-        configSwitcherKey: Key
+        configSwitcher: SwitcherConfig;
     }.
     Definition compartmentFootprint (compartment: Compartment) : list Addr :=
       compartment.(compartmentPCC).(capAddrs) ++
@@ -179,7 +187,7 @@ Module Configuration.
                        isSentry cap = true /\
                        InLibraryFootprint config cap) /\
          (forall cap, importEntry = ImportEntry_SealedCapToExportEntry cap ->
-                      cap.(capSealed) = Some (inr config.(configSwitcherKey))).
+                      cap.(capSealed) = Some (inr config.(configSwitcher).(Switcher_key))).
    
     Record WFCompartment (config: Config) (c: Compartment) :=
       { WFCompartment_ReachableRWXAddr:
@@ -193,6 +201,7 @@ Module Configuration.
       }.                                                                       
 
     Definition WFSwitcher (c: Compartment) : Prop := True.
+    Notation switcherIdx config := (config.(configSwitcher).(Switcher_compartmentIdx)).
 
     Definition ConfigFootprints (config: Config) :=
         (* (configMMIOAddrs config) :: *)
@@ -202,7 +211,7 @@ Module Configuration.
     Record WFConfig (config: Config) := {
         WFConfig_footprintDisjoint: Separated (ConfigFootprints config);
         WFConfig_compartmentMemory: Forall (WFCompartment config) config.(configCompartments);
-        WFConfig_switcher: exists c, nth_error config.(configCompartments) config.(configSwitcher) = Some c /\
+        WFConfig_switcher: exists c, nth_error config.(configCompartments) (switcherIdx config) = Some c /\
                                 WFSwitcher c
         (* WFConfig_importEntriesOk: ImportEntriesOk config *)
     }.
@@ -327,6 +336,12 @@ Module Configuration.
     Qed.
 
     Section Proofs.
+
+      Definition AddrInSwitcherFootprint (config: Config) (addr: Addr) :=
+        AddrInCompartment config (switcherIdx config) addr.
+      Definition AddrsInSwitcherFootprint (config: Config) (addr: list Addr) :=
+        forall a, In a addr -> AddrInCompartment config (switcherIdx config) a.
+
       Ltac saturate_footprints := 
         repeat match goal with
           | H: nth_error (configThreads _) _ = Some ?thread,
@@ -468,6 +483,127 @@ Module Configuration.
   Hint Resolve Inv_curThread : invariants.
 End Configuration.
 
+Module SwitcherProperty.
+  Import ListNotations.
+  Import Configuration.
+  Import Separation.
+
+  (* We focus on the following entry points of the switcher:
+     - compartment_switcher_entry (we can assume compartments have a
+       forward sentry to this point)
+     - exception_entry_asm (in user mode, MEPCC should point here)
+
+     The switcher passes backwards sentries to:
+     - switcher_after_compartment_call
+
+     Notes:
+     - We have specified the behavior of the interrupt handler as
+       switching threads atomically.
+     - The MTDC register nominally points to the trusted stack, which
+       is a first-class citizen in our spec.
+     - Instructions in the switcher might use the MTDC register (and
+       other system registers). We'll probably want to add more system
+       registers to the spec. Instructions that clobber the MTDC
+       register should be viewed as atomic steps, with interrupts
+       disabled.
+   *)
+
+  Section WithContext.
+    Context [ISA: ISA_params].
+    Context {Byte Key: Type}.
+    Context {capEncodeDecode: @CapEncodeDecode Byte Key}.
+    Notation FullMemory := (@FullMemory Byte).
+    Notation EXNInfo := (@EXNInfo Byte).
+    Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
+    Context {pccNotInBounds : EXNInfo}.
+    Notation Machine := (@Machine Byte Key).
+    Notation Cap := (@Cap Key).
+    Notation CapOrBytes := (@CapOrBytes Byte Key).
+    Notation AddrOffset := nat (only parsing).
+    Notation PCC := Cap (only parsing).
+    Notation Thread := (@Thread Byte Key).
+    Notation Trace := (@Trace Byte Key).
+    Notation State := (Machine * Trace)%type.
+    Notation Event := (@Event Byte Key).
+    Notation Config := (@Config Byte Key).
+    Context {LookupExportTableCompartment: Config -> Cap -> FullMemory -> option nat}.
+    Notation ValidInitialState := (@ValidInitialState _ Byte Key _ LookupExportTableCompartment).
+    Notation ValidInitialThread := (@ValidInitialThread _ Byte Key _ LookupExportTableCompartment).
+    Context {decode: list Byte -> @Inst _ _ _ capEncodeDecode}.
+    Notation MachineStep := (MachineStep fetchAddrs decode pccNotInBounds).
+    Notation ThreadStep := (ThreadStep fetchAddrs decode pccNotInBounds).
+    Notation UserContext := (@UserContext Byte Key).
+    Notation SystemContext := (@SystemContext Byte Key).
+    Notation ThreadState := (UserContext * SystemContext)%type.
+
+    Section ExceptionEntry_WithConfig.
+      Variable config: Config.
+      Variable (pf_wf_config: WFConfig config).
+
+      (* - mepcc contains caller's pcc
+       *)
+      Record ExceptionEntry_Pre (tid: nat) (st: ThreadState) : Prop.
+
+      Definition inSystemMode (st: ThreadState) : bool :=
+        existsb (Perm.t_beq Perm.System) (pcc st).(capPerms).
+      Definition InSystemMode (st: ThreadState) : Prop :=
+        In Perm.System (Spec.pcc st).(capPerms).
+
+      (* If there was an error handler:
+         -
+         If no error handler:
+         - unwind stack --> pop a stack frame and try again
+         In other words:
+         - return to the topmost error handler if exists
+         If there are no error handlers: we neverreach the postcondition?
+       *)
+      Record ExceptionEntry_Post (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
+      { EEPost_Mode: ~(InSystemMode st)
+      }.
+
+      (* We want to define the behavior of the switcher as a function
+         of thread-local state (register file, CSP-region of memory,
+         system thread state) + read-only switcher state. We want to
+         guarantee disjointness of other threads updates from
+         thread-local memory regions.
+
+         Then if we jump to the switcher's exception handler:
+         - For some sequence of thread steps, P UNTIL Q
+           - Q (Post): returns to usermode /\ R holds
+           - P (Invariant): - it should act as a function of thread-local + read-only switcher state
+                - not usermode 
+           - R: post condition of exception handler, in terms of initial state
+             - A good exception handler was found and we jumped to it
+         - No guarantee of availability unless we add EVENTUALLY Q
+       *)
+
+      (* TODO: fetchAddrs
+       *)
+      Record ExceptionEntry_Invariant
+        (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
+      { EE_Inv_Mode: InSystemMode st
+      ; EE_Inv_SwitcherPCC: AddrsInSwitcherFootprint config (pcc st).(capAddrs)
+      }.
+      
+      Definition ThreadStepOk st1 st2 :=
+        exists ev, ThreadStep st1 (st2, ev).
+      
+      Definition Exception :=
+        forall tid init,
+        ExceptionEntry_Pre tid init ->
+        Combinators.until
+          ThreadStepOk
+          (ExceptionEntry_Invariant tid init)
+          (ExceptionEntry_Post tid init)
+          init.
+
+      
+    End ExceptionEntry_WithConfig.
+   
+  End WithContext.
+
+End SwitcherProperty.
+
 (* If a (malicious) compartment is not transitively-reachable from a
    protected compartment, then it should never have access to the
    protected compartment's memory regions.
@@ -598,7 +734,7 @@ Module CompartmentIsolationValidation.
         (mem: FullMemory) (srcCaps: list Cap) (cid: nat): Prop :=
         (forall cap addr,
             ReachableCap mem srcCaps cap ->
-            cap.(capSealed) = Some (inr config.(configSwitcherKey)) ->
+            cap.(capSealed) = Some (inr config.(configSwitcher).(Switcher_key)) ->
             In addr cap.(capAddrs) ->
             AddrHasProvenance config addr (Provenance_Compartment cid) ->
             False).
@@ -793,11 +929,12 @@ Module CompartmentIsolationValidation.
         forall callSentryInst srcReg optLink userCtx mem istatus pcc' rf' istatus',
         ValidRf (thread_rf userCtx) ->
         WfCallSentryInst callSentryInst srcReg optLink ->
+        isSealed (thread_pcc userCtx) = false ->
         callSentryInst (userCtx, mem) istatus = Ok(pcc', rf', istatus') ->
         ReachableViaCallRet (capsOfUserTS userCtx) (pcc' :: capsOfRf rf'). 
       Proof.
         cbv[ReachableViaCallRet].
-        intros * hrf hwf hcall * hin'.
+        intros * hrf hwf hpcc_unsealed hcall * hin'.
         match goal with
         | H: ?callSentryInst ?userCtx ?istatus = Ok (?pcc', ?rf', ?istatus'),
             H1: WfCallSentryInst ?callSentryInst ?srcReg ?optLink |- _ =>

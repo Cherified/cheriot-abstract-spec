@@ -14,6 +14,24 @@ Module Combinators.
         (Establish: invariant initial)
         (Preserve: forall s t, invariant s -> step s t -> invariant t)
         (Use: forall s, invariant s -> P s).
+
+    (* P until Q *)
+    Inductive untilAndThen (P: State -> Prop) (Q: State -> Prop) : Prop :=
+    | until_done:
+      Q initial ->
+      until P Q initial
+    | until_step:
+      P initial ->
+      (forall mid, step initial mid -> until P Q mid) ->
+      until P Q initial.
+
+    (* Inductive eventually(P: State -> Prop)(initial: State): Prop := *)
+    (* | eventually_done: *)
+    (*       P initial -> *)
+    (*       eventually P initial *)
+    (* | eventually_step: *)
+    (*       (forall mid, step initial mid -> eventually P mid) -> *)
+    (*       eventually P initial. *)
   End __.
 End Combinators.
 

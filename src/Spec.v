@@ -527,7 +527,7 @@ Section Machine.
               e1 = e2
           | _, _ => False
           end.
-
+      (* TODO: PCC unsealed? *)
       Definition WfCallSentryInst (src: RegIdx) (optLink: option RegIdx):= forall rf pcc ints mem,
           ValidRf rf ->
           src < ISA_NREGS /\
@@ -537,7 +537,6 @@ Section Machine.
           | Ok (pcc', rf', ints') =>
             let caps := pcc :: capsOfRf rf in
             In Perm.Exec pcc.(capPerms) /\
-            isSealed pcc = false /\
             (exists src_cap,
                nth_error rf src = Some (inl src_cap) /\
                In Perm.Exec src_cap.(capPerms) /\
@@ -690,10 +689,13 @@ Section Machine.
           end.
 
         Definition fetchAddrsInBounds := Subset (fetchAddrs mem pcc.(capCursor)) pcc.(capAddrs)
-                                         /\ In pcc.(capCursor) pcc.(capAddrs).
+                                         /\ In pcc.(capCursor) pcc.(capAddrs)
+                                         /\ isSealed pcc = false
+                                         /\ In Perm.Exec pcc.(capPerms).                                                            
+
 
         Inductive ThreadStep : ((UserContext * SystemContext) * SameThreadEvent) -> Prop :=
-        | GoodUserThreadStep (inBounds: fetchAddrsInBounds) : ThreadStep threadStepFunction
+        | GoodThreadStep (inBounds: fetchAddrsInBounds) : ThreadStep threadStepFunction
         | BadUserFetch (notInBounds: ~ fetchAddrsInBounds) : ThreadStep (exceptionState pccNotInBounds).
       End WithContext.
 
