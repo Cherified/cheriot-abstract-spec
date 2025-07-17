@@ -103,7 +103,8 @@ Module Configuration.
         Switcher_AddrOf_compartment_switcher_entry: Addr;
         Switcher_AddrOf_exception_entry_asm : Addr;
         Switcher_AddrOf_switcher_after_compartment_call: Addr;
-        Switcher_key: Key                                                    
+        Switcher_AddrOf_error_handler_return: Addr;
+        Switcher_key: Key
     }.
 
     (* The initial state of a machine is defined in terms of its
@@ -201,7 +202,7 @@ Module Configuration.
       }.                                                                       
 
     Definition WFSwitcher (c: Compartment) : Prop := True.
-    Notation switcherIdx config := (config.(configSwitcher).(Switcher_compartmentIdx)).
+    Definition switcherIdx config := (config.(configSwitcher).(Switcher_compartmentIdx)).
 
     Definition ConfigFootprints (config: Config) :=
         (* (configMMIOAddrs config) :: *)
@@ -576,9 +577,24 @@ Module SwitcherProperty.
         ; EEPre_Invariant: ExceptionEntry_Invariant tid st st 
         }.
 
+(* (* Let's keep caps in a canonical form... *) *)
+(* Record CapEquiv (c1 c2: Cap) := { *)
+(*     capEquiv_Sealed: c1.(capSealed) = c2.(capSealed); *)
+(*     capEquiv_Perms:  EqSet c1.(capPerms) c2.(capPerms); *)
+(*     capEquiv_capCanStore: EqSet c1.(capCanStore) c2.(capCanStore); *)
+(*     capEquiv_capCanBeStored: EqSet c1.(capCanBeStored) c2.(capCanBeStored); *)
+(*     capEquiv_capSealingKeys: EqSet c1.(capSealingKeys) c2.(capSealingKeys); *)
+(*     capEquiv_capAddrs: EqSet c1.(capAddrs) c2.(capAddrs); *)
+(*     capEquiv_capKeepPerms: EqSet c1.(capKeepPerms) c2.(capKeepPerms); *)
+(*     capEquiv_capKeepCanStore: EqSet c1.(capKeepCanStore) c2.(capKeepCanStore); *)
+(*     capEquiv_capKeepCanBeStored: EqSet c1.(capKeepCanBeStored) c2.(capKeepCanBeStored); *)
+(*     capEquiv_capCursor: c1.(capCursor) = c2.(capCursor) *)
+(* }. *)
+
       Definition ExceptionHandler_PostUserThreadState (uts: UserThreadState) : Prop.
       Admitted.
 
+      
       (* If there was an error handler (and recoverable error? what is non-recoverable):
          - PCC points to error handler entrypoint
          - ra (backward sentry to switcher's error handler return)
@@ -592,17 +608,138 @@ Module SwitcherProperty.
                         a1 = mtval
                         a2 = zero
          - other regs: zero
-
          If no error handler:
-         - unwind stack --> pop a stack frame and try again
+         - .Lcommon_force_unwind --> pop a stack frame and try again
+           - zero stack 
+         - a0 = -ECompartmentFAIL
+         - a1 = 0
+         - pop a frame 
          In other words:
-         - return to the topmost error handler if exists
+         - if top of trusted stack contains error handler, do above
+         - if not, pop a frame and return to caller with -ECOMPARTMENTFAIL
          If there are no error handlers: we neverreach the postcondition?
          TODO: ECALLs
        *)
+
+      (* TODO: WF condition *)
+      Record SWITCHER_PARAMS :=
+        { SPILL_SLOT_cs0 : nat;
+          SPILL_SLOT_cs1 : nat;
+          SPILL_SLOT_pcc : nat;
+          SPILL_SLOT_cgp : nat;
+          SPILL_SLOT_SIZE : nat
+        }.
+
+      (* TODO: rename *)
+      Record Semantic_EXNHandler :=
+        { RF_RA : nat;
+          RF_GP : nat;
+          RF_SP : nat;
+          RF_a0 : nat;
+          RF_a1 : nat;
+          RF_a2 : nat;
+          RF_a3 : nat;
+          RF_a4 : nat;
+          RF_a5 : nat;
+          RF_t0: nat;
+        }.
+
+      Context {zeroBytes : list Byte}.
+      Context {exnDecode: ExnInfo -> (Bytes * Bytes)}. (* MCAUSE * MTVAL *)
+
+      Definition RfSpecT : Type := list (nat * (CapOrBytes -> Prop)).
+      Definition RegProp (rf: RegisterFile) (idx : nat) (P: CapOrBytes -> Prop) :=
+        exists v, nth_error rf idx = Some v /\ P v.
+      Record RfSpec (spec: RfSpecT) (rf: RegisterFile) (default: CapOrBytes -> Prop) : Prop :=
+        { RfSpec_ValidRF: ValidRf rf
+        ; RfSpec_props : forall idx p, In (idx, p) spec -> RegProp rf idx p
+        ; RfSpec_other: forall idx, idx < ISA_NREGS ->
+                                    (~(exists p, In (idx, p) spec)) ->
+                                    RegProp rf idx default
+        }.
+      Definition mtval exnInfo := snd (exnDecode exnInfo).
+      Definition mcause exnInfo := fst (exnDecode exnInfo).
+
+      Definition OfSwitcherPCC (P: Cap -> Prop) := 
+        exists compartment,
+          nth_error config.(configCompartments)
+                    (switcherIdx config) = Some compartment /\
+          P (compartment.(compartmentPCC)).  
+
+      (* The error handler returns a IRQ-enabling reverse sentry to
+         the error handler return address. *)
+      Definition IsErrorHandlerReturnCap (cap: CapOrBytes) : Prop :=
+        OfSwitcherPCC
+          (fun pcc => let addrCap := (setCapCursor pcc config.(configSwitcher).(Switcher_AddrOf_error_handler_return)) in
+                    let sealed := setCapSealed addrCap (Some (inl RetEnableInterrupt)) in
+                    cap = inl sealed).
+
+      Definition isBackwardsSentry (s: Sentry) : bool :=
+        match s with
+        | RetEnableInterrupt => true
+        | RetDisableInterrupt => true 
+        | _ => false                                    
+       end.                                    
+      
+      (* TODO: Can we pass only IRQ-enabling sentries here? *)
+      Definition IsSwitcherAfterCompartmentCallCap (cap: CapOrBytes) : Prop :=
+        OfSwitcherPCC
+          (fun pcc =>
+             exists sentry, isBackwardsSentry sentry = true /\
+             let addrCap := (setCapCursor pcc config.(configSwitcher).(Switcher_AddrOf_switcher_after_compartment_call)) in
+             let sealed := setCapSealed addrCap (Some (inl sentry)) in
+             cap = inl sealed).
+     
+      Definition ExnRFPost_StacklessHandler
+        (gp: Cap) (sp: Cap) (exnInfo: ExnInfo) sem (rf: RegisterFile)
+        : RfSpecT :=
+        [ (RF_RA sem, (fun v => IsErrorHandlerReturnCap v))
+        ; (RF_GP sem, (fun v => v = inl gp))
+        ; (RF_SP sem, (fun v => v = inl sp))
+        ; (RF_a0 sem, (fun v => v = inr (mcause exnInfo)))
+        ; (RF_a1 sem, (fun v => v = inr (mtval  exnInfo)))
+          (* a2 is zero *)
+        ].
+
+      Definition ExnRFPost_RichHandler
+        (gp: Cap ) (sp: Cap) (exnInfo: ExnInfo) sem (rf: RegisterFile)
+        : RfSpecT :=
+        [ (RF_RA sem, (fun v => IsErrorHandlerReturnCap v))
+        ; (RF_GP sem, (fun v => v = inl gp))
+        ; (RF_SP sem, (fun v => v = inl sp))
+        ; (RF_a0 sem, (fun v => v = inl sp)) (* points to invocation csp, with a register spill frame *)
+        ; (RF_a1 sem, (fun v => v = inr (mcause exnInfo)))
+        ; (RF_a2 sem, (fun v => v = inr (mtval  exnInfo)))
+        ].
+
+      Definition RFPost_SwitcherAfterCompartmentCall
+        (gp: Cap) (init_rf: RegisterFile ) sem (rf: RegisterFile) : RfSpecT :=
+        [ (RF_RA sem, (fun _ => True))
+        ; (RF_SP sem, (fun _ => True))
+        ; (RF_GP sem, (fun _ => True))
+        ; (RF_a0 sem, (fun v => RegProp init_rf (RF_a0 sem) (eq v)))
+        ; (RF_a1 sem, (fun v => RegProp init_rf (RF_a1 sem) (eq v)))
+        ].
+
+
+      Definition RFPost_CompartmentCall (gp: Cap) (init: ThreadState) sem (rf: RegisterFile)
+        : RfSpecT :=
+        [ (RF_RA sem, (fun v => IsSwitcherAfterCompartmentCallCap v))
+        ; (RF_GP sem, (fun v => v = inl gp))
+        ; (RF_SP sem, (fun _ => True))
+        ; (RF_a0 sem, (fun v => True))
+        ; (RF_a1 sem, (fun v => True))
+        ; (RF_a2 sem, (fun v => True))
+        ; (RF_a3 sem, (fun v => True))
+        ; (RF_a4 sem, (fun v => True))
+        ; (RF_a5 sem, (fun v => True))
+        ; (RF_t0 sem, (fun v => True))
+        ].
+
       Record ExceptionEntry_Post (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
-      { EEPost_Mode: ~(InSystemMode st)
-      }.
+        { EEPost_Mode: ~(InSystemMode st)
+        (* ; EEPost_PCC :            *)
+        }.
 
       (* We want to define the behavior of the switcher as a function
          of thread-local state (register file, CSP-region of memory,

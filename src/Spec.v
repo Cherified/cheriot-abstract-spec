@@ -147,6 +147,20 @@ Section Machine.
          capKeepCanBeStored := c.(capKeepCanBeStored);
          capCursor := c.(capCursor)
       |}.
+    Definition setCapCursor (c: Cap) (cursor: Addr) : Cap :=
+      {| capSealed := c.(capSealed);
+         capPerms := c.(capPerms);
+         capCanStore := c.(capCanStore);
+         capCanBeStored := c.(capCanBeStored);
+         capSealingKeys := c.(capSealingKeys);
+         capUnsealingKeys := c.(capUnsealingKeys);
+         capAddrs := c.(capAddrs);
+         capKeepPerms := c.(capKeepPerms);
+         capKeepCanStore := c.(capKeepCanStore);
+         capKeepCanBeStored := c.(capKeepCanBeStored);
+         capCursor := cursor
+      |}.
+
     Definition isSentry (c: Cap) :=
       match c.(capSealed) with
       | Some (inl _) => true
