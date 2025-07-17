@@ -11,16 +11,16 @@ Set Nested Proofs Allowed.
 
 Section WithContext.
   Context [ISA: ISA_params].
-  Context {Byte Key: Type}.
-  Context {capEncodeDecode: @CapEncodeDecode Byte Key}.
-  Notation FullMemory := (@FullMemory Byte).
-  Notation Cap := (@Cap Key).
-  Notation CapOrBytes := (@CapOrBytes Byte Key).
-  Notation Machine := (@Machine Byte Key).
-  Notation AddrOffset := nat (only parsing).
-  Notation PCC := Cap (only parsing).
-  Notation RegisterFile := (@RegisterFile Byte Key).
-  Notation Thread := (@Thread Byte Key).
+  Context {machineTypeParams: MachineTypeParams}.
+  Context {capEncodeDecode: @CapEncodeDecode machineTypeParams}.
+  (* Notation FullMemory := (@FullMemory Byte). *)
+  (* Notation Cap := (@Cap Key). *)
+  (* Notation CapOrBytes := (@CapOrBytes Byte Key). *)
+  (* Notation Machine := (@Machine Byte Key). *)
+  (* Notation AddrOffset := nat (only parsing). *)
+  (* Notation PCC := Cap (only parsing). *)
+  (* Notation RegisterFile := (@RegisterFile Byte Key). *)
+  (* Notation Thread := (@Thread Byte Key). *)
 
   Section ISA_params.
     Lemma ISA_CAPSIZE_BYTES_NONZERO:
@@ -671,7 +671,7 @@ Section WithContext.
   Section WFInstructionLemmas.
     Lemma ValidRfUpdate:
       forall rf rf' v idx,
-        @ValidRf ISA Byte Key rf ->
+        ValidRf rf ->
         (forall n, n <> idx -> nth_error rf' n = nth_error rf n) ->
         idx < length rf ->
         nth_error rf' idx = Some v ->
@@ -737,8 +737,8 @@ Section WithContext.
 
   Section Step.
     Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
-    Context {decode: list Byte -> @Inst _ _ _ capEncodeDecode}.
-    Context {pccNotInBounds : @EXNInfo Byte}.
+    Context {decode: list Byte -> @Inst _ _ capEncodeDecode}.
+    Context {pccNotInBounds : EXNInfo}.
     Notation MachineStep := (MachineStep fetchAddrs decode pccNotInBounds).
     Notation SameThreadStep := (SameThreadStep fetchAddrs decode pccNotInBounds).
     Notation ThreadStep := (ThreadStep fetchAddrs decode pccNotInBounds).

@@ -46,12 +46,8 @@ Ltac simplify_Separated :=
 Module Configuration.
   Section WithContext. 
     Context [ISA: ISA_params].
-    Context {Byte Key: Type}.
-    Context {capEncodeDecode: @CapEncodeDecode Byte Key}.
-    Notation Cap := (@Cap Key).
-    Notation CapOrBytes := (@CapOrBytes Byte Key).
-    Notation FullMemory := (@FullMemory Byte).
-    Notation TrustedStackFrame := (@TrustedStackFrame Key).
+    Context {machineTypeParams: MachineTypeParams}.
+    Context {capEncodeDecode: CapEncodeDecode }.
 
     Record ExportEntry : Type := {
         exportEntryOffset: nat; 
@@ -73,16 +69,13 @@ Module Configuration.
     | ImportEntry_SentryToLibraryFunction (c: Cap).
 
     Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
-    Context {decode: list Byte -> @Inst _ _ _ capEncodeDecode}.
-    Context {pccNotInBounds : @EXNInfo Byte}.
-    Notation Machine := (@Machine Byte Key).
+    Context {decode: list Byte -> @Inst _ _ capEncodeDecode}.
+    Context {pccNotInBounds : EXNInfo}.
     Notation AddrOffset := nat (only parsing).
     Notation MachineStep := (MachineStep fetchAddrs decode pccNotInBounds).
     Notation PCC := Cap (only parsing).
     Notation SameThreadStep := (SameThreadStep fetchAddrs decode pccNotInBounds).
-    Notation RegisterFile := (@RegisterFile Byte Key).
     Notation ThreadStep := (ThreadStep fetchAddrs decode pccNotInBounds).
-    Notation Thread := (@Thread Byte Key).
 
     Record InitialThreadMetadata := {
         (* initThreadEntryPoint: Addr; *)
@@ -143,7 +136,13 @@ Module Configuration.
     Definition AddrInCompartment (config: Config) (cid: nat) (addr: Addr): Prop :=
       exists compartment,
         nth_error config.(configCompartments) cid = Some compartment /\
-        In addr (compartmentFootprint compartment).
+          In addr (compartmentFootprint compartment).
+
+    Definition AddrInStack (config: Config) (tid: nat) (addr: Addr): Prop :=
+      exists meta,
+        nth_error config.(configThreads) tid = Some meta /\
+        In addr (stackFootprint meta).
+
 
     (* The total set of capabilities reachable from a compartment are
        the PCC+CGP+imports. *)
@@ -194,7 +193,8 @@ Module Configuration.
           InitialCompartmentAddressesOk config.(configInitMemory) c
       ; WFCompartment_InitialCaps:
           AllReachableCaps config.(configInitMemory) (capsOfCompartment c)
-      ; WFCompartment_PCC: c.(compartmentPCC).(capSealed) = None
+      ; WFCompartment_PCC: c.(compartmentPCC).(capSealed) = None /\
+                           (In Perm.Store c.(compartmentPCC).(capPerms) -> False)
       ; WFCompartment_Sentries: SentriesOnlyFromImportTables config.(configInitMemory) c
       ; WFCompartment_SealedDataCap: SealedDataCapsOnlyFromImportTables config.(configInitMemory) c
       ; WFCompartment_ImportEntries: forall entry, In entry c.(compartmentImports) -> WFImportEntry config entry
@@ -510,30 +510,20 @@ Module SwitcherProperty.
 
   Section WithContext.
     Context [ISA: ISA_params].
-    Context {Byte Key: Type}.
-    Context {capEncodeDecode: @CapEncodeDecode Byte Key}.
-    Notation FullMemory := (@FullMemory Byte).
-    Notation EXNInfo := (@EXNInfo Byte).
+    Context {machineTypeParams: MachineTypeParams}.
+    Context {capEncodeDecode: CapEncodeDecode}.
     Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
+    Context {fetchAddrsOk: FetchAddrsOk fetchAddrs}.
     Context {pccNotInBounds : EXNInfo}.
-    Notation Machine := (@Machine Byte Key).
-    Notation Cap := (@Cap Key).
-    Notation CapOrBytes := (@CapOrBytes Byte Key).
     Notation AddrOffset := nat (only parsing).
     Notation PCC := Cap (only parsing).
-    Notation Thread := (@Thread Byte Key).
-    Notation Trace := (@Trace Byte Key).
     Notation State := (Machine * Trace)%type.
-    Notation Event := (@Event Byte Key).
-    Notation Config := (@Config Byte Key).
     Context {LookupExportTableCompartment: Config -> Cap -> FullMemory -> option nat}.
-    Notation ValidInitialState := (@ValidInitialState _ Byte Key _ LookupExportTableCompartment).
-    Notation ValidInitialThread := (@ValidInitialThread _ Byte Key _ LookupExportTableCompartment).
-    Context {decode: list Byte -> @Inst _ _ _ capEncodeDecode}.
+    Notation ValidInitialState := (@ValidInitialState _ _ _ LookupExportTableCompartment).
+    Notation ValidInitialThread := (@ValidInitialThread _ _ _ LookupExportTableCompartment).
+    Context {decode: list Byte -> @Inst _ _ capEncodeDecode}.
     Notation MachineStep := (MachineStep fetchAddrs decode pccNotInBounds).
     Notation ThreadStep := (ThreadStep fetchAddrs decode pccNotInBounds).
-    Notation UserContext := (@UserContext Byte Key).
-    Notation SystemContext := (@SystemContext Byte Key).
     Notation ThreadState := (UserContext * SystemContext)%type.
 
     Section ExceptionEntry_WithConfig.
@@ -542,20 +532,73 @@ Module SwitcherProperty.
 
       (* - mepcc contains caller's pcc
        *)
-      Record ExceptionEntry_Pre (tid: nat) (st: ThreadState) : Prop.
-
       Definition inSystemMode (st: ThreadState) : bool :=
         existsb (Perm.t_beq Perm.System) (pcc st).(capPerms).
+
       Definition InSystemMode (st: ThreadState) : Prop :=
         In Perm.System (Spec.pcc st).(capPerms).
 
-      (* If there was an error handler:
-         -
+      (* TODO: property on exception entry addresses and fetch addresses being ok *)
+      Definition ValidExceptionEntryPCC (pcc: PCC) : Prop :=
+        pcc.(capCursor) = config.(configSwitcher).(Switcher_AddrOf_exception_entry_asm).
+
+      Record ExceptionEntry_Invariant'
+        (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
+      { EE_Inv_Mode: InSystemMode st
+      ; EE_Inv_SwitcherPCC: AddrsInSwitcherFootprint config (pcc st).(capAddrs)
+      ; EE_Inv_fetchAddrs: fetchAddrsInBounds fetchAddrs st
+      }.
+
+      Definition MemEquivalentAtAddr (mem1 mem2: FullMemory) (addr: Addr) :=
+        readByte mem1 addr = readByte mem2 addr /\
+        (readTag mem1 (toCapAddr addr) = readTag mem2 (toCapAddr addr)).
+       
+      Definition MemEquivalentAtThread (tid: nat) (mem1 mem2: FullMemory) : Prop :=
+        forall addr, AddrInStack config tid addr ->
+                     MemEquivalentAtAddr mem1 mem2 addr.
+
+      Definition SwitcherCodeUnchanged (mem: FullMemory) : Prop :=
+        forall addr, AddrInCompartment config config.(configSwitcher).(Switcher_compartmentIdx) addr ->
+                     MemEquivalentAtAddr config.(configInitMemory) mem addr.
+
+      Definition SwitcherMemEquivAtThread (tid: nat) (mem1 mem2: FullMemory) : Prop :=
+        MemEquivalentAtThread tid mem1 mem2 /\
+        SwitcherCodeUnchanged mem2.
+      
+      Definition ExceptionEntry_Invariant
+        (tid: nat) (st_init: ThreadState) (st: ThreadState) :=
+        forall mem',
+        SwitcherMemEquivAtThread tid (mem st_init) mem' ->
+        ExceptionEntry_Invariant' tid st_init ((fst (uc st), mem'), sc st).
+
+      Record ExceptionEntry_Pre (tid: nat) (st: ThreadState) : Prop :=
+        { EEPre_PCCAddr: (pcc st).(capCursor) = config.(configSwitcher).(Switcher_AddrOf_exception_entry_asm)
+        ; EEPre_Invariant: ExceptionEntry_Invariant tid st st 
+        }.
+
+      Definition ExceptionHandler_PostUserThreadState (uts: UserThreadState) : Prop.
+      Admitted.
+
+      (* If there was an error handler (and recoverable error? what is non-recoverable):
+         - PCC points to error handler entrypoint
+         - ra (backward sentry to switcher's error handler return)
+         - gp (target compartment cgp)
+         - sp (target compartment invocation stack pointer)
+         - a0,a1,a2
+           + stackful: a0 = invocation stack with register spill frame there and above
+                       a1 = mcause
+                       a2 = mtval
+           + stackless: a0 = mcause
+                        a1 = mtval
+                        a2 = zero
+         - other regs: zero
+
          If no error handler:
          - unwind stack --> pop a stack frame and try again
          In other words:
          - return to the topmost error handler if exists
          If there are no error handlers: we neverreach the postcondition?
+         TODO: ECALLs
        *)
       Record ExceptionEntry_Post (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
       { EEPost_Mode: ~(InSystemMode st)
@@ -577,18 +620,12 @@ Module SwitcherProperty.
          - No guarantee of availability unless we add EVENTUALLY Q
        *)
 
-      (* TODO: fetchAddrs
-       *)
-      Record ExceptionEntry_Invariant
-        (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
-      { EE_Inv_Mode: InSystemMode st
-      ; EE_Inv_SwitcherPCC: AddrsInSwitcherFootprint config (pcc st).(capAddrs)
-      }.
-      
+      (* TODO: fetchAddrs *)
+     
       Definition ThreadStepOk st1 st2 :=
         exists ev, ThreadStep st1 (st2, ev).
       
-      Definition Exception :=
+      Definition ExceptionHandlerOk :=
         forall tid init,
         ExceptionEntry_Pre tid init ->
         Combinators.until
@@ -597,7 +634,6 @@ Module SwitcherProperty.
           (ExceptionEntry_Post tid init)
           init.
 
-      
     End ExceptionEntry_WithConfig.
    
   End WithContext.
@@ -618,25 +654,16 @@ Module CompartmentIsolationValidation.
   Import Separation.
   Section WithContext.
     Context [ISA: ISA_params].
-    Context {Byte Key: Type}.
-    Context {capEncodeDecode: @CapEncodeDecode Byte Key}.
-    Notation FullMemory := (@FullMemory Byte).
-    Notation EXNInfo := (@EXNInfo Byte).
+    Context {machineTypeParams: MachineTypeParams}.
+    Context {capEncodeDecode: CapEncodeDecode}.
     Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
     Context {pccNotInBounds : EXNInfo}.
-    Notation Machine := (@Machine Byte Key).
-    Notation Cap := (@Cap Key).
-    Notation CapOrBytes := (@CapOrBytes Byte Key).
     Notation AddrOffset := nat (only parsing).
     Notation PCC := Cap (only parsing).
-    Notation Thread := (@Thread Byte Key).
-    Notation Trace := (@Trace Byte Key).
     Notation State := (Machine * Trace)%type.
-    Notation Event := (@Event Byte Key).
-    Notation Config := (@Config Byte Key).
     Context {LookupExportTableCompartment: Config -> Cap -> FullMemory -> option nat}.
-    Notation ValidInitialState := (@ValidInitialState _ Byte Key _ LookupExportTableCompartment).
-    Notation ValidInitialThread := (@ValidInitialThread _ Byte Key _ LookupExportTableCompartment).
+    Notation ValidInitialState := (@ValidInitialState _ _ _ LookupExportTableCompartment).
+    Notation ValidInitialThread := (@ValidInitialThread _ _ _ LookupExportTableCompartment).
 
     (* Compartments are connected on the audit graph.
        - Compartments can share libraries without being connected.
@@ -993,7 +1020,7 @@ Module CompartmentIsolationValidation.
           apply Perm.internal_t_dec_bl in Heqbr. subst. congruence.
       Qed.
 
-      Context {decode: list Byte -> @Inst _ _ _ capEncodeDecode}.
+      Context {decode: list Byte -> @Inst _ _ capEncodeDecode}.
       Notation SameThreadStep := (SameThreadStep fetchAddrs decode pccNotInBounds).
       Notation MachineStep := (MachineStep fetchAddrs decode pccNotInBounds).
 
@@ -1310,31 +1337,19 @@ Module ThreadIsolatedMonotonicity.
   Import Separation.
   Section WithContext. 
     Context [ISA: ISA_params].
-    Context {Byte Key: Type}.
-    Context {capEncodeDecode: @CapEncodeDecode Byte Key}.
-    Notation FullMemory := (@FullMemory Byte).
-    Notation EXNInfo := (@EXNInfo Byte).
+    Context {machineTypeParams: MachineTypeParams}.
+    Context {capEncodeDecode: CapEncodeDecode}.
     Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
-    Context {decode: list Byte -> @Inst _ _ _ capEncodeDecode}.
+    Context {decode: list Byte -> @Inst _ _ capEncodeDecode}.
     Context {pccNotInBounds : EXNInfo}.
-    Notation Machine := (@Machine Byte Key).
-    Notation Cap := (@Cap Key).
-    Notation CapOrBytes := (@CapOrBytes Byte Key).
     Notation AddrOffset := nat (only parsing).
     Notation MachineStep := (MachineStep fetchAddrs decode pccNotInBounds).
     Notation PCC := Cap (only parsing).
-    Notation Thread := (@Thread Byte Key).
-    Notation Trace := (@Trace Byte Key).
     Notation State := (Machine * Trace)%type.
-    Notation Event := (@Event Byte Key).
-    Notation Config := (@Config Byte Key).
     Notation SameThreadStep := (SameThreadStep fetchAddrs decode pccNotInBounds).
-    Notation ReachableCapSubset := (@ReachableCapSubset ISA Byte Key).
-    Notation RWAddressesDisjoint := (@RWAddressesDisjoint ISA Byte Key).
-    Notation WriteReadDisjoint := (@WriteReadDisjoint ISA Byte Key).
     Context {LookupExportTableCompartment: Config -> Cap -> FullMemory -> option nat}.
-    Notation ValidInitialState := (@ValidInitialState _ Byte Key _ LookupExportTableCompartment).
-    Notation ValidInitialThread := (@ValidInitialThread _ Byte Key _ LookupExportTableCompartment). 
+    Notation ValidInitialState := (@ValidInitialState _ _ _ LookupExportTableCompartment).
+    Notation ValidInitialThread := (@ValidInitialThread _ _ _ LookupExportTableCompartment). 
 
     Definition SameDomainEvent (ev: Event) : Prop :=
       match ev with

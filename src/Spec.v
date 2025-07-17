@@ -21,9 +21,14 @@ Module Perm.
   Scheme Equality for t.
 End Perm.
 
+Class MachineTypeParams := {
+    Byte : Type;
+    Key : Type
+}.
+
 Section Machine.
   Context [ISA: ISA_params].
-  Context {Byte Key: Type}.
+  Context {machineTypeParams: MachineTypeParams}.
   Definition Addr := nat.
   Definition CapAddr := nat.
   Definition toCapAddr (a: Addr): CapAddr := Nat.shiftr a ISA_LG_CAPSIZE_BYTES.
@@ -747,6 +752,10 @@ Module CHERIoTValidation.
   | Executable (GL: bool) (SR: bool) (LM: bool) (LG: bool) (* Implicit: EX, LD, MC *)
   | Sealing (GL: bool) (U0: bool) (SE: bool) (US: bool) (* Implicit: None *).
 
+  Instance machineTypeParams : MachineTypeParams :=
+    { Byte := N;
+      Key := N
+    }.
   Record cheriot_cap :=
   { reserved: bool;
     permissions: CompressedPerm;
@@ -862,7 +871,7 @@ Module CHERIoTValidation.
         |}
     end.
 
-  Definition mk_abstract_cap (c: cheriot_cap) : @Cap N :=
+  Definition mk_abstract_cap (c: cheriot_cap) : Cap :=
     let d := decompress_perm c.(permissions) in
     {|capSealed := if d.(EX)
                    then match c.(otype) with

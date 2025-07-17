@@ -16,7 +16,7 @@ Module Combinators.
         (Use: forall s, invariant s -> P s).
 
     (* P until Q *)
-    Inductive untilAndThen (P: State -> Prop) (Q: State -> Prop) : Prop :=
+    Inductive until (P: State -> Prop) (Q: State -> Prop) (initial: State) : Prop :=
     | until_done:
       Q initial ->
       until P Q initial
