@@ -577,20 +577,6 @@ Module SwitcherProperty.
         ; EEPre_Invariant: ExceptionEntry_Invariant tid st st 
         }.
 
-(* (* Let's keep caps in a canonical form... *) *)
-(* Record CapEquiv (c1 c2: Cap) := { *)
-(*     capEquiv_Sealed: c1.(capSealed) = c2.(capSealed); *)
-(*     capEquiv_Perms:  EqSet c1.(capPerms) c2.(capPerms); *)
-(*     capEquiv_capCanStore: EqSet c1.(capCanStore) c2.(capCanStore); *)
-(*     capEquiv_capCanBeStored: EqSet c1.(capCanBeStored) c2.(capCanBeStored); *)
-(*     capEquiv_capSealingKeys: EqSet c1.(capSealingKeys) c2.(capSealingKeys); *)
-(*     capEquiv_capAddrs: EqSet c1.(capAddrs) c2.(capAddrs); *)
-(*     capEquiv_capKeepPerms: EqSet c1.(capKeepPerms) c2.(capKeepPerms); *)
-(*     capEquiv_capKeepCanStore: EqSet c1.(capKeepCanStore) c2.(capKeepCanStore); *)
-(*     capEquiv_capKeepCanBeStored: EqSet c1.(capKeepCanBeStored) c2.(capKeepCanBeStored); *)
-(*     capEquiv_capCursor: c1.(capCursor) = c2.(capCursor) *)
-(* }. *)
-
       Definition ExceptionHandler_PostUserThreadState (uts: UserThreadState) : Prop.
       Admitted.
 
@@ -627,7 +613,9 @@ Module SwitcherProperty.
           SPILL_SLOT_cs1 : nat;
           SPILL_SLOT_pcc : nat;
           SPILL_SLOT_cgp : nat;
-          SPILL_SLOT_SIZE : nat
+          SPILL_SLOT_SIZE : nat;
+          STACK_ENTRY_RESERVED_SPACE: nat
+
         }.
 
       (* TODO: rename *)
@@ -644,6 +632,7 @@ Module SwitcherProperty.
           RF_t0: nat;
           RF_s0: nat;
           RF_s1: nat;
+          RF_t1: nat (* contains sealed export table entry for target callee *)
         }.
 
       Context {zeroBytes : list Byte}.
@@ -662,56 +651,73 @@ Module SwitcherProperty.
       Definition mtval exnInfo := snd (exnDecode exnInfo).
       Definition mcause exnInfo := fst (exnDecode exnInfo).
 
-      Definition OfSwitcherPCC (P: Cap -> Prop) := 
-        exists compartment,
-          nth_error config.(configCompartments)
-                    (switcherIdx config) = Some compartment /\
-          P (compartment.(compartmentPCC)).  
+      Definition OfSwitcherPCC (f: Cap -> CapOrBytes) : option CapOrBytes := 
+          match nth_error config.(configCompartments)
+                                   (switcherIdx config) with
+          | None => None
+          | Some compartment => Some (f (compartment.(compartmentPCC)))
+          end.                                  
 
       (* The error handler returns a IRQ-enabling reverse sentry to
          the error handler return address. *)
-      Definition IsErrorHandlerReturnCap (cap: CapOrBytes) : Prop :=
+      Definition errorHandlerReturnCap : option CapOrBytes :=
         OfSwitcherPCC
           (fun pcc => let addrCap := (setCapCursor pcc config.(configSwitcher).(Switcher_AddrOf_error_handler_return)) in
                     let sealed := setCapSealed addrCap (Some (inl RetEnableInterrupt)) in
-                    cap = inl sealed).
+                    inl sealed).
 
-      Definition isBackwardsSentry (s: Sentry) : bool :=
-        match s with
-        | RetEnableInterrupt => true
-        | RetDisableInterrupt => true 
-        | _ => false                                    
-       end.                                    
-      
       (* TODO: Can we pass only IRQ-enabling sentries here? *)
-      Definition IsSwitcherAfterCompartmentCallCap (cap: CapOrBytes) : Prop :=
+      Definition switcherAfterCompartmentCallCap (enable_interrupts: bool): option CapOrBytes :=
+        let sentry := match enable_interrupts with
+                      | true => RetEnableInterrupt
+                      | false => RetDisableInterrupt
+                      end in 
         OfSwitcherPCC
           (fun pcc =>
-             exists sentry, isBackwardsSentry sentry = true /\
              let addrCap := (setCapCursor pcc config.(configSwitcher).(Switcher_AddrOf_switcher_after_compartment_call)) in
              let sealed := setCapSealed addrCap (Some (inl sentry)) in
-             cap = inl sealed).
+             inl sealed).
      
       Definition ExnRFPost_StacklessHandler
-        (gp: Cap) (sp: Cap) (exnInfo: ExnInfo) sem (rf: RegisterFile)
+        (tsframe: TrustedStackFrame)                 
+        (gp: Cap) (exnInfo: ExnInfo) sem (rf: RegisterFile)
         : RfSpecT :=
-        [ (RF_RA sem, (fun v => IsErrorHandlerReturnCap v))
-        ; (RF_GP sem, (fun v => v = inl gp))
-        ; (RF_SP sem, (fun v => v = inl sp))
-        ; (RF_a0 sem, (fun v => v = inr (mcause exnInfo)))
-        ; (RF_a1 sem, (fun v => v = inr (mtval  exnInfo)))
+        let tcsp := tsframe.(trustedStackFrame_CSP) in
+        [ (RF_RA sem, (fun v => errorHandlerReturnCap = Some v))
+        ; (RF_GP sem, eq (inl gp))
+        ; (RF_SP sem, eq (inl tcsp))
+        ; (RF_a0 sem, eq (inr (mcause exnInfo)))
+        ; (RF_a1 sem, eq (inr (mtval  exnInfo)))
           (* a2 is zero *)
         ].
 
       Definition ExnRFPost_RichHandler
-        (gp: Cap) (sp: Cap) (exnInfo: ExnInfo) sem (rf: RegisterFile)
+        (tsframe: TrustedStackFrame)                 
+        (gp: Cap) (exnInfo: ExnInfo) sem (rf: RegisterFile)
         : RfSpecT :=
-        [ (RF_RA sem, (fun v => IsErrorHandlerReturnCap v))
-        ; (RF_GP sem, (fun v => v = inl gp))
-        ; (RF_SP sem, (fun v => v = inl sp))
-        ; (RF_a0 sem, (fun v => v = inl sp)) (* points to invocation csp, with a register spill frame *)
-        ; (RF_a1 sem, (fun v => v = inr (mcause exnInfo)))
-        ; (RF_a2 sem, (fun v => v = inr (mtval  exnInfo)))
+        let tcsp := tsframe.(trustedStackFrame_CSP) in
+        [ (RF_RA sem, (fun v => errorHandlerReturnCap = Some v))
+        ; (RF_GP sem, eq (inl gp))
+        ; (RF_SP sem, eq (inl tcsp))
+        ; (RF_a0 sem, eq (inl tcsp)) (* points to invocation csp, with a register spill frame *)
+        ; (RF_a1 sem, eq (inr (mcause exnInfo)))
+        ; (RF_a2 sem, eq (inr (mtval  exnInfo)))
+        ].
+
+      (* a0 should either be -ECOMPARTMENTFAIL? or... *)
+      Definition ExnRFPost_UnwindStack
+        (tsframe: TrustedStackFrame)                 
+        a0 (init_mem: FullMemory)
+        sem (rf: RegisterFile) : RfSpecT :=
+        let tcsp := tsframe.(trustedStackFrame_CSP) in
+        let readCapAtCSPOffset offset :=
+          readCap init_mem (Nat.add tcsp.(capCursor) offset) in 
+        [ (RF_RA sem, eq (readCapAtCSPOffset switcherParams.(SPILL_SLOT_pcc)))
+        ; (RF_SP sem, eq (inl (updateCapCursor tcsp (Nat.add switcherParams.(SPILL_SLOT_SIZE))))) (* Restore caller stack pointer and increment *)
+        ; (RF_GP sem, eq (readCapAtCSPOffset switcherParams.(SPILL_SLOT_cgp)))
+        ; (RF_a0 sem, eq a0) (* RF_a1 zeroed *)
+        ; (RF_s0 sem, eq (readCapAtCSPOffset switcherParams.(SPILL_SLOT_cs0)))
+        ; (RF_s1 sem, eq (readCapAtCSPOffset switcherParams.(SPILL_SLOT_cs1)))
         ].
 
       (* Return *)
@@ -732,18 +738,46 @@ Module SwitcherProperty.
         ; (RF_s1 sem, eq (readCapAtCSPOffset switcherParams.(SPILL_SLOT_cs1)))
         ].
 
-      Definition RFPost_CompartmentCall (gp: Cap) (init: ThreadState) sem (rf: RegisterFile)
+      (* TODO: alignment; check underflow  *)
+      Definition postCompartmentCallCSP (init_csp: Cap) : Cap :=
+        let newCursor := init_csp.(capCursor) - switcherParams.(SPILL_SLOT_SIZE) - switcherParams.(STACK_ENTRY_RESERVED_SPACE) in
+        {|capSealed := None;
+          capPerms := [Perm.Load; Perm.Store; Perm.Cap];
+          capCanStore := [Local; NonLocal];
+          capCanBeStored := [Local]; 
+          capSealingKeys := [];  
+          capUnsealingKeys := [];
+          capAddrs := filter (Nat.ltb newCursor) init_csp.(capAddrs);
+          capKeepPerms := [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
+          capKeepCanStore := [Local; NonLocal];   
+          capKeepCanBeStored := [Local;NonLocal];
+          capCursor := newCursor 
+        |}.
+
+      Definition ZeroArg (numArgs: nat) (regArgNum: nat) (init_rf: RegisterFile) (regIdx: nat) : CapOrBytes -> Prop :=
+        fun v => RegProp init_rf regIdx (fun old => v = if Nat.leb numArgs regArgNum then
+                                                          inr zeroBytes
+                                                        else old).
+
+      
+      (* TODO: preconditions *)
+      Definition RFPost_CompartmentCall
+        (numArgs: nat) (gp: Cap) (stackSz: nat)
+        (init_rf: RegisterFile) (enable_interrupts: bool) sem (rf: RegisterFile)
         : RfSpecT :=
-        [ (RF_RA sem, (fun v => IsSwitcherAfterCompartmentCallCap v))
-        ; (RF_GP sem, (fun v => v = inl gp))
-        ; (RF_SP sem, (fun _ => True))
-        ; (RF_a0 sem, (fun v => True))
-        ; (RF_a1 sem, (fun v => True))
-        ; (RF_a2 sem, (fun v => True))
-        ; (RF_a3 sem, (fun v => True))
-        ; (RF_a4 sem, (fun v => True))
-        ; (RF_a5 sem, (fun v => True))
-        ; (RF_t0 sem, (fun v => True))
+        [ (RF_RA sem, (fun v => switcherAfterCompartmentCallCap enable_interrupts = Some v))
+        ; (RF_GP sem, eq (inl gp))
+        ; (RF_SP sem, (fun v => RegProp init_rf (RF_SP sem)
+                                  (fun init_sp =>
+                                     exists init_csp, init_sp = inl init_csp /\
+                                                      v = inl (postCompartmentCallCSP init_csp))))
+        ; (RF_a0 sem, ZeroArg numArgs 0 init_rf (RF_a0 sem))
+        ; (RF_a1 sem, ZeroArg numArgs 1 init_rf (RF_a1 sem))
+        ; (RF_a2 sem, ZeroArg numArgs 2 init_rf (RF_a2 sem))
+        ; (RF_a3 sem, ZeroArg numArgs 3 init_rf (RF_a3 sem))
+        ; (RF_a4 sem, ZeroArg numArgs 4 init_rf (RF_a4 sem))
+        ; (RF_a5 sem, ZeroArg numArgs 5 init_rf (RF_a5 sem))
+        ; (RF_t0 sem, ZeroArg numArgs 6 init_rf (RF_t0 sem))
         ].
 
       Record ExceptionEntry_Post (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
@@ -1747,3 +1781,17 @@ End ThreadIsolatedMonotonicity.
    -> that is, the only caps a thread in a different compartment should have access to belonging to 
  *)
                                                                               
+(* (* Let's keep caps in a canonical form... *) *)
+(* Record CapEquiv (c1 c2: Cap) := { *)
+(*     capEquiv_Sealed: c1.(capSealed) = c2.(capSealed); *)
+(*     capEquiv_Perms:  EqSet c1.(capPerms) c2.(capPerms); *)
+(*     capEquiv_capCanStore: EqSet c1.(capCanStore) c2.(capCanStore); *)
+(*     capEquiv_capCanBeStored: EqSet c1.(capCanBeStored) c2.(capCanBeStored); *)
+(*     capEquiv_capSealingKeys: EqSet c1.(capSealingKeys) c2.(capSealingKeys); *)
+(*     capEquiv_capAddrs: EqSet c1.(capAddrs) c2.(capAddrs); *)
+(*     capEquiv_capKeepPerms: EqSet c1.(capKeepPerms) c2.(capKeepPerms); *)
+(*     capEquiv_capKeepCanStore: EqSet c1.(capKeepCanStore) c2.(capKeepCanStore); *)
+(*     capEquiv_capKeepCanBeStored: EqSet c1.(capKeepCanBeStored) c2.(capKeepCanBeStored); *)
+(*     capEquiv_capCursor: c1.(capCursor) = c2.(capCursor) *)
+(* }. *)
+
