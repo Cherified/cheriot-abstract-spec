@@ -642,11 +642,13 @@ Module SwitcherProperty.
           RF_a4 : nat;
           RF_a5 : nat;
           RF_t0: nat;
+          RF_s0: nat;
+          RF_s1: nat;
         }.
 
       Context {zeroBytes : list Byte}.
       Context {exnDecode: ExnInfo -> (Bytes * Bytes)}. (* MCAUSE * MTVAL *)
-
+      Context {switcherParams: SWITCHER_PARAMS}.
       Definition RfSpecT : Type := list (nat * (CapOrBytes -> Prop)).
       Definition RegProp (rf: RegisterFile) (idx : nat) (P: CapOrBytes -> Prop) :=
         exists v, nth_error rf idx = Some v /\ P v.
@@ -702,7 +704,7 @@ Module SwitcherProperty.
         ].
 
       Definition ExnRFPost_RichHandler
-        (gp: Cap ) (sp: Cap) (exnInfo: ExnInfo) sem (rf: RegisterFile)
+        (gp: Cap) (sp: Cap) (exnInfo: ExnInfo) sem (rf: RegisterFile)
         : RfSpecT :=
         [ (RF_RA sem, (fun v => IsErrorHandlerReturnCap v))
         ; (RF_GP sem, (fun v => v = inl gp))
@@ -712,15 +714,23 @@ Module SwitcherProperty.
         ; (RF_a2 sem, (fun v => v = inr (mtval  exnInfo)))
         ].
 
+      (* Return *)
+      (* Do we have an invariant on csp in trusted stack frame? *)
       Definition RFPost_SwitcherAfterCompartmentCall
-        (gp: Cap) (init_rf: RegisterFile ) sem (rf: RegisterFile) : RfSpecT :=
-        [ (RF_RA sem, (fun _ => True))
-        ; (RF_SP sem, (fun _ => True))
-        ; (RF_GP sem, (fun _ => True))
+        (tsframe: TrustedStackFrame)                 
+        (init_rf: RegisterFile ) (init_mem: FullMemory)
+        sem (rf: RegisterFile) : RfSpecT :=
+        let tcsp := tsframe.(trustedStackFrame_CSP) in
+        let readCapAtCSPOffset offset :=
+          readCap init_mem (Nat.add tcsp.(capCursor) offset) in 
+        [ (RF_RA sem, eq (readCapAtCSPOffset switcherParams.(SPILL_SLOT_pcc)))
+        ; (RF_SP sem, eq (inl (updateCapCursor tcsp (Nat.add switcherParams.(SPILL_SLOT_SIZE))))) (* Restore caller stack pointer and increment *)
+        ; (RF_GP sem, eq (readCapAtCSPOffset switcherParams.(SPILL_SLOT_cgp)))
         ; (RF_a0 sem, (fun v => RegProp init_rf (RF_a0 sem) (eq v)))
         ; (RF_a1 sem, (fun v => RegProp init_rf (RF_a1 sem) (eq v)))
+        ; (RF_s0 sem, eq (readCapAtCSPOffset switcherParams.(SPILL_SLOT_cs0)))
+        ; (RF_s1 sem, eq (readCapAtCSPOffset switcherParams.(SPILL_SLOT_cs1)))
         ].
-
 
       Definition RFPost_CompartmentCall (gp: Cap) (init: ThreadState) sem (rf: RegisterFile)
         : RfSpecT :=
@@ -1036,7 +1046,6 @@ Module CompartmentIsolationValidation.
             eapply HUserMode; eauto with lists.
           }
         }
-
         constructor; auto; cbn.
       Qed.
 

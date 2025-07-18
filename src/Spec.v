@@ -161,6 +161,9 @@ Section Machine.
          capCursor := cursor
       |}.
 
+    Definition updateCapCursor (c: Cap) (fn: Addr -> Addr) : Cap :=
+      setCapCursor c (fn c.(capCursor)).
+
     Definition isSentry (c: Cap) :=
       match c.(capSealed) with
       | Some (inl _) => true
