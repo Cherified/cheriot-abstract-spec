@@ -496,6 +496,7 @@ Module SwitcherProperty.
 
      The switcher passes backwards sentries to:
      - switcher_after_compartment_call
+     - handle_error_handler_return:
 
      Notes:
      - We have specified the behavior of the interrupt handler as
@@ -504,9 +505,10 @@ Module SwitcherProperty.
        is a first-class citizen in our spec.
      - Instructions in the switcher might use the MTDC register (and
        other system registers). We'll probably want to add more system
-       registers to the spec. Instructions that clobber the MTDC
-       register should be viewed as atomic steps, with interrupts
-       disabled.
+       registers or register-spill-areas to the trusted
+       stack. Instructions that clobber the MTDC or register spill
+       area used in context switching should be viewed as atomic
+       steps, with interrupts disabled.
    *)
 
   Section WithContext.
@@ -527,58 +529,129 @@ Module SwitcherProperty.
     Notation ThreadStep := (ThreadStep fetchAddrs decode pccNotInBounds).
     Notation ThreadState := (UserContext * SystemContext)%type.
 
-    Section ExceptionEntry_WithConfig.
+    Section WithConfig.
       Variable config: Config.
       Variable (pf_wf_config: WFConfig config).
+      Definition MemEquivalentAtAddr (mem1 mem2: FullMemory) (addr: Addr) :=
+        readByte mem1 addr = readByte mem2 addr /\
+        (readTag mem1 (toCapAddr addr) = readTag mem2 (toCapAddr addr)).
+      Definition MemEquivalentAtThread (tid: nat) (mem1 mem2: FullMemory) : Prop :=
+        forall addr, AddrInStack config tid addr ->
+                     MemEquivalentAtAddr mem1 mem2 addr.
 
-      (* - mepcc contains caller's pcc
-       *)
       Definition inSystemMode (st: ThreadState) : bool :=
         existsb (Perm.t_beq Perm.System) (pcc st).(capPerms).
 
       Definition InSystemMode (st: ThreadState) : Prop :=
         In Perm.System (Spec.pcc st).(capPerms).
-
-      (* TODO: property on exception entry addresses and fetch addresses being ok *)
-      Definition ValidExceptionEntryPCC (pcc: PCC) : Prop :=
-        pcc.(capCursor) = config.(configSwitcher).(Switcher_AddrOf_exception_entry_asm).
-
-      Record ExceptionEntry_Invariant'
-        (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
-      { EE_Inv_Mode: InSystemMode st
-      ; EE_Inv_SwitcherPCC: AddrsInSwitcherFootprint config (pcc st).(capAddrs)
-      ; EE_Inv_fetchAddrs: fetchAddrsInBounds fetchAddrs st
-      }.
-
-      Definition MemEquivalentAtAddr (mem1 mem2: FullMemory) (addr: Addr) :=
-        readByte mem1 addr = readByte mem2 addr /\
-        (readTag mem1 (toCapAddr addr) = readTag mem2 (toCapAddr addr)).
-       
-      Definition MemEquivalentAtThread (tid: nat) (mem1 mem2: FullMemory) : Prop :=
-        forall addr, AddrInStack config tid addr ->
-                     MemEquivalentAtAddr mem1 mem2 addr.
+      Definition ThreadInSystemMode (t: Thread) :=
+        In Perm.System t.(thread_userState).(thread_pcc).(capPerms).
 
       Definition SwitcherCodeUnchanged (mem: FullMemory) : Prop :=
-        forall addr, AddrInCompartment config config.(configSwitcher).(Switcher_compartmentIdx) addr ->
+        forall addr, AddrInCompartment config
+                       config.(configSwitcher).(Switcher_compartmentIdx) addr ->
                      MemEquivalentAtAddr config.(configInitMemory) mem addr.
 
-      Definition SwitcherMemEquivAtThread (tid: nat) (mem1 mem2: FullMemory) : Prop :=
-        MemEquivalentAtThread tid mem1 mem2 /\
-        SwitcherCodeUnchanged mem2.
+      Definition ReadOnlyMemUnchanged (mem: FullMemory) : Prop :=
+        forall addr compartment,
+          In compartment config.(configCompartments) ->
+          In addr compartment.(compartmentPCC).(capAddrs) ->
+          MemEquivalentAtAddr config.(configInitMemory) mem addr.
       
-      Definition ExceptionEntry_Invariant
-        (tid: nat) (st_init: ThreadState) (st: ThreadState) :=
-        forall mem',
-        SwitcherMemEquivAtThread tid (mem st_init) mem' ->
-        ExceptionEntry_Invariant' tid st_init ((fst (uc st), mem'), sc st).
+      Record GlobalMemInvariants (mem: FullMemory) : Prop :=
+        { Inv_ReadOnlyMem: ReadOnlyMemUnchanged mem}.
 
-      Record ExceptionEntry_Pre (tid: nat) (st: ThreadState) : Prop :=
-        { EEPre_PCCAddr: (pcc st).(capCursor) = config.(configSwitcher).(Switcher_AddrOf_exception_entry_asm)
-        ; EEPre_Invariant: ExceptionEntry_Invariant tid st st 
+      Definition switcherFootprint :=
+        match nth_error config.(configCompartments) config.(configSwitcher).(Switcher_compartmentIdx) with
+        | Some compartment => compartment.(compartmentPCC).(capAddrs)
+        | None => []                                             
+        end.
+
+      (* TODO: check this. Probably wrong *)
+      Definition MEPCC : Cap :=
+        {| capSealed := None;
+           capPerms := [Perm.Exec;Perm.System;Perm.Load;Perm.Cap];
+           capCanStore := [];
+           capCanBeStored := [Local]; 
+           capSealingKeys := [];  
+           capUnsealingKeys := [];
+           capAddrs := switcherFootprint;          
+           capKeepPerms := [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
+           capKeepCanStore := [Local;NonLocal];
+           capKeepCanBeStored := [Local;NonLocal];
+           capCursor := config.(configSwitcher).(Switcher_AddrOf_exception_entry_asm); 
+        |}.
+
+      
+      Record UserModeInvariants (meta: InitialThreadMetadata) (t: Thread) : Prop :=
+      { UserInv_MEPCC := t.(thread_systemState).(thread_mepcc) = MEPCC
+      }.    
+      
+      Record ThreadInv' (meta: InitialThreadMetadata) (t: Thread) : Prop :=
+      { Inv_validRf : ValidRf t.(thread_userState).(thread_rf)
+      ; Inv_userMode: ~(ThreadInSystemMode t) -> UserModeInvariants meta t
+      }.                                                                    
+
+      Record GlobalInvariants (m: Machine) : Prop :=
+      { Inv_Mem: GlobalMemInvariants m.(machine_memory)
+      ; Inv_Threads: Forall2 ThreadInv' config.(configThreads) m.(machine_threads)
+      }.
+
+      Section SwitcherParams.
+        Record SWITCHER_PARAMS :=
+          { SPILL_SLOT_cs0 : nat;
+            SPILL_SLOT_cs1 : nat;
+            SPILL_SLOT_pcc : nat;
+            SPILL_SLOT_cgp : nat;
+            SPILL_SLOT_SIZE : nat;
+            STACK_ENTRY_RESERVED_SPACE: nat
+
+          }.
+        Record ConcreteRF :=
+          { RF_RA : nat;
+            RF_GP : nat;
+            RF_SP : nat;
+            RF_tp: nat;
+            RF_t0: nat;
+            RF_t1: nat; (* contains sealed export table entry for target callee *)
+            RF_t2: nat; (* contains sealed export table entry for target callee *)
+            RF_s0: nat;
+            RF_s1: nat;
+            RF_a0 : nat;
+            RF_a1 : nat;
+            RF_a2 : nat;
+            RF_a3 : nat;
+            RF_a4 : nat;
+            RF_a5 : nat;
+          }.
+
+      End SwitcherParams.
+      
+      Section ExceptionHandler.
+        Record ExceptionEntry_Invariant'
+          (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
+        { EE_Inv_Mode: InSystemMode st
+        ; EE_Inv_SwitcherPCC: AddrsInSwitcherFootprint config (pcc st).(capAddrs)
+        ; EE_Inv_fetchAddrs: fetchAddrsInBounds fetchAddrs st
         }.
 
-      Definition ExceptionHandler_PostUserThreadState (uts: UserThreadState) : Prop.
-      Admitted.
+        Definition SwitcherMemEquivAtThread (tid: nat) (mem1 mem2: FullMemory) : Prop :=
+          MemEquivalentAtThread tid mem1 mem2 /\
+          SwitcherCodeUnchanged mem2.
+        
+        Definition ExceptionEntry_Invariant
+          (tid: nat) (st_init: ThreadState) (st: ThreadState) :=
+          forall mem',
+          SwitcherMemEquivAtThread tid (mem st_init) mem' ->
+          ExceptionEntry_Invariant' tid st_init ((fst (uc st), mem'), sc st).
+
+        Record ExceptionEntry_Pre (tid: nat) (st: ThreadState) : Prop :=
+          { EEPre_PCCAddr: pcc st = MEPCC
+          ; EEPre_Invariant: ExceptionEntry_Invariant tid st st 
+          }.
+
+        Definition ExceptionHandler_PostUserThreadState (uts: UserThreadState) : Prop.
+        Admitted.
 
       
       (* If there was an error handler (and recoverable error? what is non-recoverable):
@@ -608,32 +681,6 @@ Module SwitcherProperty.
        *)
 
       (* TODO: WF condition *)
-      Record SWITCHER_PARAMS :=
-        { SPILL_SLOT_cs0 : nat;
-          SPILL_SLOT_cs1 : nat;
-          SPILL_SLOT_pcc : nat;
-          SPILL_SLOT_cgp : nat;
-          SPILL_SLOT_SIZE : nat;
-          STACK_ENTRY_RESERVED_SPACE: nat
-
-        }.
-
-      (* TODO: rename *)
-      Record Semantic_EXNHandler :=
-        { RF_RA : nat;
-          RF_GP : nat;
-          RF_SP : nat;
-          RF_a0 : nat;
-          RF_a1 : nat;
-          RF_a2 : nat;
-          RF_a3 : nat;
-          RF_a4 : nat;
-          RF_a5 : nat;
-          RF_t0: nat;
-          RF_s0: nat;
-          RF_s1: nat;
-          RF_t1: nat (* contains sealed export table entry for target callee *)
-        }.
 
       Context {zeroBytes : list Byte}.
       Context {exnDecode: ExnInfo -> (Bytes * Bytes)}. (* MCAUSE * MTVAL *)
@@ -652,8 +699,7 @@ Module SwitcherProperty.
       Definition mcause exnInfo := fst (exnDecode exnInfo).
 
       Definition OfSwitcherPCC (f: Cap -> CapOrBytes) : option CapOrBytes := 
-          match nth_error config.(configCompartments)
-                                   (switcherIdx config) with
+          match nth_error config.(configCompartments) (switcherIdx config) with
           | None => None
           | Some compartment => Some (f (compartment.(compartmentPCC)))
           end.                                  
@@ -688,7 +734,7 @@ Module SwitcherProperty.
         ; (RF_SP sem, eq (inl tcsp))
         ; (RF_a0 sem, eq (inr (mcause exnInfo)))
         ; (RF_a1 sem, eq (inr (mtval  exnInfo)))
-          (* a2 is zero *)
+          (* a2 and other regs are zero *)
         ].
 
       Definition ExnRFPost_RichHandler
@@ -739,6 +785,7 @@ Module SwitcherProperty.
         ].
 
       (* TODO: alignment; check underflow  *)
+      (* Alternatively, could define in terms of restricting the initial csp *)
       Definition postCompartmentCallCSP (init_csp: Cap) : Cap :=
         let newCursor := init_csp.(capCursor) - switcherParams.(SPILL_SLOT_SIZE) - switcherParams.(STACK_ENTRY_RESERVED_SPACE) in
         {|capSealed := None;
