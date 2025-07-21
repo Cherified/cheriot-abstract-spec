@@ -786,7 +786,7 @@ Module CHERIoTValidation.
 
   Record Perm :=
     {
-      EX : bool; (* PERMIT_EXECuTE *)
+      EX : bool; (* PERMIT_EXECUTE *)
       GL : bool; (* GLOBAL *)
       LD : bool; (* PERMIT_LOAD *)
       SD : bool; (* PERMIT_STORE *)
