@@ -130,6 +130,11 @@ Section Machine.
   Definition writeBytes (mem: FullMemory) := writeMemBytes (fst mem).
   Definition writeTag (mem: FullMemory) := writeTagTag (snd mem).
   Definition writeCap (mem: FullMemory) := writeMemTagCap (fst mem) (snd mem).
+  Definition writeCapOrBytes (mem: FullMemory) (a: Addr) (v: CapOrBytes) : FullMemory :=
+    match v with
+    | inl cap => writeCap mem (toCapAddr a) cap
+    | inr bytes => (writeBytes mem a bytes, snd mem)
+    end.    
 
   Definition ExnInfo := Bytes.
 

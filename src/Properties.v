@@ -670,7 +670,26 @@ Module SwitcherProperty.
             compartmentFailValue: list Byte;
             exnDecode: ExnInfo -> (Bytes * Bytes) (* mcause * mtval *)
           }.
-        Context {rfidx: ConcreteRf}.
+
+        Definition rfidx :=
+          {| rf_ra := 1; 
+             rf_gp := 2;
+             rf_sp := 3;
+             rf_tp := 4;
+             rf_t0 := 5;
+             rf_t1 := 6;
+             rf_t2 := 7;
+             rf_s0 := 8;
+             rf_s1 := 9;
+             rf_a0 := 10;
+             rf_a1 := 11;
+             rf_a2 := 12;
+             rf_a3 := 13;
+             rf_a4 := 14;
+             rf_a5 := 15 
+          |}.
+
+        (* Context {rfidx: ConcreteRf}. *)
         Context {switcher: SWITCHER_PARAMS rfidx}.
 
         Definition mtval exnInfo := snd (exnDecode exnInfo).
@@ -809,11 +828,12 @@ Module SwitcherProperty.
             ].
 
           Definition ExceptionEntry_PostRfSpec_Stackless
-            (tcsp: Cap)
-            (cgp: Cap)
+            (frame: TrustedStackFrame)                      
+            (compartment: Compartment)
             (exnInfo: ExnInfo)
             (rf: RegisterFile) :=
-            RfSpec (ExceptionEntry_PostRf_Stackless tcsp cgp exnInfo) rf
+            exists cgp, compartment.(compartmentCGP) = Some cgp /\
+            RfSpec (ExceptionEntry_PostRf_Stackless frame.(trustedStackFrame_CSP) cgp exnInfo) rf
                    (eq (inr zeroBytes)).
   
           Definition ExceptionEntry_PostRf_UnwindStack
@@ -856,20 +876,47 @@ Module SwitcherProperty.
               In (Build_ErrorHandler offset handlerT) compartment.(compartmentErrorHandlers) /\
               pcc = updateCapCursor compartment.(compartmentPCC) (Nat.add offset).
 
+          Definition NREGS_TO_STORE := 15.
+          Definition SPILL_FRAME_SIZE := (NREGS_TO_STORE + 1) * ISA_CAPSIZE_BYTES.
+
+          (* Stack: 
+           * - Only part of memory modified should be the stack
+           * - stack should have a spill frame right above the tcsp
+           *)
+          Definition spillRegisterFileForErrorHandlerOk 
+            (csp: Cap) (rf: RegisterFile) (mepcc: Cap) (mem: FullMemory) (mem': FullMemory) :=
+            (* Store PCC (mepcc) with clear tagged *)
+            readCap mem' (toCapAddr csp.(capCursor)) = inr (capToBytes mepcc) /\
+            (* Store all (15) registers *)
+            Forall (fun idx => RegProp rf idx (eq (readCap mem' (toCapAddr (csp.(capCursor) + (idx * ISA_CAPSIZE_BYTES)))))) (seq 1 NREGS_TO_STORE) /\
+            (* Stack had permission to store in the range *)
+            (forall addr, In addr (seq (csp.(capCursor)) SPILL_FRAME_SIZE) ->
+                     In addr csp.(capAddrs)) /\
+            (* All other mem is unchanged. *)
+            (forall addr, (In addr (seq (csp.(capCursor)) SPILL_FRAME_SIZE) ->False) ->
+                     readByte mem' addr = readByte mem addr /\
+                     readTag mem' (toCapAddr addr) = readTag mem (toCapAddr addr)).
+          
           Definition ExceptionEntry_Post_Stackful
             (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
             ExceptionEntry_PostOk_Common tid st_init st /\
             (exists frame frames compartment mem',
               trustedStack_frames (thread_trustedStack (sts st_init)) = frame::frames /\
               LookupExportTableCompartment config frame.(trustedStackFrame_calleeExportTable) = Some compartment /\
-              mem st = mem' /\ (* TODO *)
+              spillRegisterFileForErrorHandlerOk (trustedStackFrame_CSP frame) (rf st) (mepcc st) (mem st) (mem') /\
               (ValidErrorHandlerPCC Stackful compartment (pcc st)) /\
               (ExceptionEntry_PostRfSpec_Stackful frame compartment (sts st).(thread_exceptionInfo)) (rf st)
             ).
   
           Definition ExceptionEntry_Post_Stackless
-            (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop.
-          Admitted.
+            (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
+            ExceptionEntry_PostOk_Common tid st_init st /\
+            (exists frame frames compartment mem',
+              trustedStack_frames (thread_trustedStack (sts st_init)) = frame::frames /\
+              LookupExportTableCompartment config frame.(trustedStackFrame_calleeExportTable) = Some compartment /\
+              mem' = mem st (* memory is unchanged *) /\
+              (ValidErrorHandlerPCC Stackless compartment (pcc st)) /\
+              (ExceptionEntry_PostRfSpec_Stackless frame compartment (sts st).(thread_exceptionInfo)) (rf st)).
         
           Definition ExceptionEntry_Post_UnwindStack
             (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop.
