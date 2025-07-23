@@ -115,7 +115,7 @@ Module Configuration.
         Switcher_AddrOf_exception_entry_asm : Addr;
         Switcher_AddrOf_switcher_after_compartment_call: Addr;
         Switcher_AddrOf_error_handler_return: Addr;
-        Switcher_key: Key
+        Switcher_key: Key;
     }.
 
     (* The initial state of a machine is defined in terms of its
@@ -274,12 +274,26 @@ Module Configuration.
           = Some cid
       ; ValidTrustedStackFrame_CSP :
           Restrict meta.(initThreadCSP) frame.(trustedStackFrame_CSP)
-      }.                                                                                 
+      }.
+    Definition mkCSP (base: Addr) (len: nat) (cursor: Addr) : Cap :=
+      {| capSealed := None;
+         capPerms := [Perm.Load;Perm.Store;Perm.Cap];
+         capCanStore := [Local;NonLocal];
+         capCanBeStored := [Local];
+         capSealingKeys := [];
+         capUnsealingKeys := [];
+         capAddrs := seq base len;
+         capKeepPerms := [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
+         capKeepCanStore := [Local;NonLocal];
+         capKeepCanBeStored := [Local;NonLocal]; (* Check this *)
+         capCursor := cursor 
+      |}. 
 
     Definition ValidCSP (csp: Cap) :=
-      csp.(capSealingKeys) = [] /\
-      csp.(capUnsealingKeys ) = [] /\
-      csp.(capSealed) = None.
+      exists base len addr,
+      In addr (seq base len) /\
+      csp = mkCSP base len addr.
+
     Record ValidInitialThread (config: Config) (meta: InitialThreadMetadata) (t: Thread) : Prop :=
       { ValidInitialThread_caps:
         exists compartment,
@@ -659,17 +673,19 @@ Module SwitcherProperty.
             rf_a5 : nat;
           }.
 
+        (* TODO: constrain spill slot size *)
         Class SWITCHER_PARAMS (rf: ConcreteRf) :=
-          { SPILL_SLOT_cs0 : nat;
-            SPILL_SLOT_cs1 : nat;
-            SPILL_SLOT_pcc : nat;
-            SPILL_SLOT_cgp : nat;
-            SPILL_SLOT_SIZE : nat;
+          { SPILL_SLOT_cs0 : nat; (* < 4 *)
+            SPILL_SLOT_cs1 : nat; (* < 4 *)
+            SPILL_SLOT_pcc : nat; (* < 4 *)
+            SPILL_SLOT_cgp : nat; (* < 4 *)
+            (* SPILL_SLOT_SIZE : nat; (* #Bytes *) *)
             STACK_ENTRY_RESERVED_SPACE: nat;
-            zeroBytes: list Byte;
+            zeroByte: Byte;
             compartmentFailValue: list Byte;
             exnDecode: ExnInfo -> (Bytes * Bytes) (* mcause * mtval *)
           }.
+        Definition SPILL_SLOT_SIZE := 4 * ISA_CAPSIZE_BYTES. 
 
         Definition rfidx :=
           {| rf_ra := 1; 
@@ -691,6 +707,7 @@ Module SwitcherProperty.
 
         (* Context {rfidx: ConcreteRf}. *)
         Context {switcher: SWITCHER_PARAMS rfidx}.
+        Definition zeroBytes : list Byte := map (fun _ => zeroByte) (seq 0 ISA_CAPSIZE_BYTES). 
 
         Definition mtval exnInfo := snd (exnDecode exnInfo).
         Definition mcause exnInfo := fst (exnDecode exnInfo).
@@ -724,6 +741,8 @@ Module SwitcherProperty.
 
         Section ExceptionHandler.
 
+          Definition ValidTrustedStack (trustedStack: TrustedStack) : Prop.
+          Admitted.
           (* While a thread is in the exception handling path of the switcher:
              - The thread is in system mode.
              - The PCC points to addresses in the switcher.
@@ -840,7 +859,6 @@ Module SwitcherProperty.
             (tcsp: Cap) (* topmost trusted stack frame's csp *)
             (init_mem: FullMemory)
             (cgp: Cap)   (* cgp associated with error handler *)
-            (exnInfo: ExnInfo)
             : RfSpecT :=
             let readCapAtCSPOffset offset :=
               readCap init_mem (toCapAddr (Nat.add tcsp.(capCursor) offset)) in 
@@ -855,12 +873,12 @@ Module SwitcherProperty.
             ].
   
           Definition ExceptionEntry_PostRfSpec_UnwindStack
-            (tcsp: Cap)
+            (frame: TrustedStackFrame)
             (init_mem: FullMemory)
-            (cgp: Cap)
-            (exnInfo: ExnInfo)
+            (compartment: Compartment)
             (rf: RegisterFile) :=
-            RfSpec (ExceptionEntry_PostRf_UnwindStack tcsp init_mem cgp exnInfo) rf
+            exists cgp, compartment.(compartmentCGP) = Some cgp /\
+            RfSpec (ExceptionEntry_PostRf_UnwindStack frame.(trustedStackFrame_CSP) init_mem cgp) rf
               (eq (inr zeroBytes)).
 
           Definition ExceptionEntry_PostOk_Common
@@ -893,7 +911,7 @@ Module SwitcherProperty.
             (forall addr, In addr (seq (csp.(capCursor)) SPILL_FRAME_SIZE) ->
                      In addr csp.(capAddrs)) /\
             (* All other mem is unchanged. *)
-            (forall addr, (In addr (seq (csp.(capCursor)) SPILL_FRAME_SIZE) ->False) ->
+            (forall addr, (csp.(capCursor) < addr < csp.(capCursor) + SPILL_FRAME_SIZE -> False) ->
                      readByte mem' addr = readByte mem addr /\
                      readTag mem' (toCapAddr addr) = readTag mem (toCapAddr addr)).
           
@@ -917,11 +935,52 @@ Module SwitcherProperty.
               mem' = mem st (* memory is unchanged *) /\
               (ValidErrorHandlerPCC Stackless compartment (pcc st)) /\
               (ExceptionEntry_PostRfSpec_Stackless frame compartment (sts st).(thread_exceptionInfo)) (rf st)).
-        
+     
+          Definition BaseAddr (c: Cap) (addr: Addr) : Prop := 
+            In addr c.(capAddrs) /\
+            (forall a', In a' c.(capAddrs) -> addr <= a').
+
+          Definition zeroedStack (base top: Addr) (mem: FullMemory) :=
+            (forall addr, base <= addr < top ->
+                     readByte mem addr = zeroByte /\
+                     readTag mem (toCapAddr addr) = false).
+ 
+          Definition unwindStackForErrorHandlerOk
+            (csp: Cap) (mem: FullMemory) (mem': FullMemory) :=
+            exists baseAddr,
+            BaseAddr csp baseAddr /\
+            (* Zero stack *)
+            (zeroedStack baseAddr (csp.(capCursor) + SPILL_SLOT_SIZE) mem') /\
+            (* Stack had permission to store in the range *)
+            (forall addr, baseAddr < addr < (csp.(capCursor) + SPILL_SLOT_SIZE) ->
+                     In addr csp.(capAddrs)) /\
+            (* All other mem is unchanged. *)
+            (forall addr, (baseAddr < addr < csp.(capCursor) + SPILL_SLOT_SIZE -> False) ->
+                     readByte mem' addr = readByte mem addr /\
+                     readTag mem' (toCapAddr addr) = readTag mem (toCapAddr addr)).
+
+          (* TODO: check interrupt status *)
+          (* TODO: permission to read stack *)
+          (* TODO: CSR_MSHWM *)
           Definition ExceptionEntry_Post_UnwindStack
-            (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop.
-          Admitted.
-          
+            (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
+            exists frame frames compartment exnInfo,
+              let tcsp := frame.(trustedStackFrame_CSP) in
+              trustedStack_frames (thread_trustedStack (sts st_init)) = frame::frames /\
+              sc st = ({| thread_mepcc := MEPCC;
+                          thread_exceptionInfo := exnInfo;
+                          thread_trustedStack := Build_TrustedStack frames
+                       |}, ints st_init) /\
+              LookupExportTableCompartment config frame.(trustedStackFrame_calleeExportTable) = Some compartment /\
+              (* mem *)
+              unwindStackForErrorHandlerOk tcsp (mem st_init) (mem st) /\
+              (* pcc *)
+              (let readCapAtCSPOffset offset :=
+                   readCap (mem st_init) (toCapAddr (tcsp.(capCursor) + offset)) in 
+                 readCapAtCSPOffset SPILL_SLOT_pcc = inl (pcc st)) /\
+              (* rf *)
+              (ExceptionEntry_PostRfSpec_UnwindStack frame (mem st_init) compartment (rf st)).
+
           Record ExceptionEntry_Post (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
             { EEPost_Mode: ~(InSystemMode st)
             ; EEPost_Cases: ExceptionEntry_Post_Stackful tid st_init st
