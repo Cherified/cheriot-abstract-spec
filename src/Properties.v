@@ -809,11 +809,12 @@ Module SwitcherProperty.
           (* TODO: check interrupt status *)
           (* TODO: permission to read stack *)
           (* TODO: CSR_MSHWM *)
-
           Definition PostRf_UnwindStack
             (tcsp: Cap) (* topmost trusted stack frame's csp *)
             (init_mem: FullMemory)
             (cgp: Cap)   (* cgp associated with error handler *)
+            (ret0: CapOrBytes -> Prop)
+            (ret1: CapOrBytes -> Prop)
             : RfSpecT :=
             let readCapAtCSPOffset offset :=
               readCap init_mem (toCapAddr (Nat.add tcsp.(capCursor) offset)) in 
@@ -824,21 +825,29 @@ Module SwitcherProperty.
             ; (rf_sp rfidx, eq (inl (updateCapCursor tcsp (Nat.add SPILL_SLOT_SIZE))))
             ; (rf_s0 rfidx, eq (readCapAtCSPOffset SPILL_SLOT_cs0))
             ; (rf_s1 rfidx, eq (readCapAtCSPOffset SPILL_SLOT_cs1))
-            ; (rf_a0 rfidx, eq (inr compartmentFailValue))
+            ; (rf_a0 rfidx, ret0)
+            ; (rf_a1 rfidx, ret1)
             ].
   
           Definition PostRfSpec_UnwindStack
             (frame: TrustedStackFrame)
             (init_mem: FullMemory)
             (compartment: Compartment)
-            (rf: RegisterFile) :=
+            (rf: RegisterFile)
+            (ret0: CapOrBytes -> Prop)
+            (ret1: CapOrBytes -> Prop)
+            :=
             exists cgp, compartment.(compartmentCGP) = Some cgp /\
-            RfSpec (PostRf_UnwindStack frame.(trustedStackFrame_CSP) init_mem cgp) rf
+              RfSpec (PostRf_UnwindStack frame.(trustedStackFrame_CSP) init_mem cgp ret0 ret1)
+              rf
               (eq (inr zeroBytes)).
 
 
-          Definition Post_UnwindStack
-            (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
+          Definition Post_UnwindStackBase
+            (ret0: RegisterFile -> CapOrBytes -> Prop)
+            (ret1: RegisterFile -> CapOrBytes -> Prop)
+            (tid: nat) (st_init: ThreadState) (st: ThreadState)
+            : Prop :=
             exists frame frames compartment exnInfo,
               let tcsp := frame.(trustedStackFrame_CSP) in
               trustedStack_frames (thread_trustedStack (sts st_init)) = frame::frames /\
@@ -854,7 +863,23 @@ Module SwitcherProperty.
                    readCap (mem st_init) (toCapAddr (tcsp.(capCursor) + offset)) in 
                  readCapAtCSPOffset SPILL_SLOT_pcc = inl (pcc st)) /\
               (* rf *)
-              (PostRfSpec_UnwindStack frame (mem st_init) compartment (rf st)).
+              (PostRfSpec_UnwindStack frame (mem st_init) compartment (rf st)
+                                      (ret0 (rf st_init)) (ret1 (rf st_init))
+              ).
+
+          Definition Post_UnwindStackForced
+            (tid: nat) (st_init: ThreadState) (st: ThreadState) :=
+            Post_UnwindStackBase
+              (fun rf_init => eq (inr compartmentFailValue))
+              (fun rf_init => eq (inr zeroBytes))
+              tid st_init st.
+
+          Definition Post_UnwindStackReturnOk
+            (tid: nat) (st_init: ThreadState) (st: ThreadState) :=
+            Post_UnwindStackBase
+              (fun rf_init v => RegProp rf_init (rf_a0 rfidx) (eq v))
+              (fun rf_init v => RegProp rf_init (rf_a1 rfidx) (eq v))
+              tid st_init st.
 
           Definition SwitcherEntry_Invariant
             (tid: nat) (st_init: ThreadState) (st: ThreadState) :=
@@ -1039,7 +1064,7 @@ Module SwitcherProperty.
             { EEPost_Mode: ~(InSystemMode st)
             ; EEPost_Cases: ExceptionEntry_Post_Stackful tid st_init st
                             \/ ExceptionEntry_Post_Stackless tid st_init st
-                            \/ Post_UnwindStack tid st_init st
+                            \/ Post_UnwindStackForced tid st_init st
             }.
   
   
@@ -1123,7 +1148,7 @@ Module SwitcherProperty.
             ; ERPost_Cases: 
                 (* Note: switcher will be rewritten. TODO: decrement fault path? Disable interrupts? *)
                 ExceptionEntry_PostInstallContext tid st_init st \/
-                Post_UnwindStack tid st_init st 
+                Post_UnwindStackForced tid st_init st 
             }.
 
           Definition ExceptionReturnOk :=
@@ -1244,7 +1269,9 @@ Module SwitcherProperty.
               (* MEM *)
               compartmentCallStackOk newTCSP (mem st_init) (mem st)).
 
-          (* TODO: check this. Also too strong. *)
+          (* TODO: check this. Also too strong.
+             We could relax this to say they're all caller-reachable caps or values 
+           *)
           Definition CCall_PostRf_NotEnoughStack
             (rf_init: RegisterFile)
             : RfSpecT :=
@@ -1285,7 +1312,7 @@ Module SwitcherProperty.
           { CCPost_Mode: ~(InSystemMode st)
           ; CCPost_Cases: CCall_Post_Ok tid st_init st \/
                           CCall_Post_NotEnoughStack tid st_init st \/
-                          Post_UnwindStack tid st_init st 
+                          Post_UnwindStackForced tid st_init st 
           }.
 
           (* For all sequences of thread steps, the thread stays in *)
@@ -1301,30 +1328,39 @@ Module SwitcherProperty.
               init.
 
         End CompartmentCall.
-     
+
+
+        (* Pop a frame from the trusted stack, leaving registers in
+           the state expected by the caller of a cross-compartment
+           call. The callee is responsible for zeroing unused return
+           registers; the switcher will zero other non-return argument
+           and temporary registers.
+        *)
         Section CompartmentReturn.
-          
+          Definition CompartmentReturn_Invariant (tid: nat) (st_init: ThreadState) (st: ThreadState) :=
+            SwitcherEntry_Invariant tid st_init st.
+
+          Record CompartmentReturn_Pre (tid: nat) (st: ThreadState) : Prop :=
+          { CRetReturn_PCCAddr: pcc st = CompartmentCallPCC
+          ; CRetReturn_TrustedStack: ValidTrustedStack (sts st).(thread_trustedStack)
+          ; CRetReturn_Invariant: CompartmentCall_Invariant tid st st
+          }.
+
+          Record CompartmentReturn_Post (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
+          { CRetPost_Mode: ~(InSystemMode st)
+          ; CRetPost_Cases: Post_UnwindStackReturnOk tid st_init st}.
+
+          Definition CompartmentReturnOk :=
+          forall tid init,
+           CompartmentReturn_Pre tid init ->
+           Combinators.until
+             ThreadStepOk
+             (fun st => InSystemMode st /\ CompartmentReturn_Invariant tid init st)
+             (fun st => ~(InSystemMode st) /\ CompartmentReturn_Post tid init st)
+             init.
+         
         End CompartmentReturn.
       
-
-      (* (* Return *) *)
-      (* (* Do we have an invariant on csp in trusted stack frame? *) *)
-      (* Definition RFPost_SwitcherAfterCompartmentCall *)
-      (*   (tsframe: TrustedStackFrame)                  *)
-      (*   (init_rf: RegisterFile ) (init_mem: FullMemory) *)
-      (*   sem (rf: RegisterFile) : RfSpecT := *)
-      (*   let tcsp := tsframe.(trustedStackFrame_CSP) in *)
-      (*   let readCapAtCSPOffset offset := *)
-      (*     readCap init_mem (Nat.add tcsp.(capCursor) offset) in  *)
-      (*   [ (RF_RA sem, eq (readCapAtCSPOffset switcherParams.(SPILL_SLOT_pcc))) *)
-      (*   ; (RF_SP sem, eq (inl (updateCapCursor tcsp (Nat.add switcherParams.(SPILL_SLOT_SIZE))))) (* Restore caller stack pointer and increment *) *)
-      (*   ; (RF_GP sem, eq (readCapAtCSPOffset switcherParams.(SPILL_SLOT_cgp))) *)
-      (*   ; (RF_a0 sem, (fun v => RegProp init_rf (RF_a0 sem) (eq v))) *)
-      (*   ; (RF_a1 sem, (fun v => RegProp init_rf (RF_a1 sem) (eq v))) *)
-      (*   ; (RF_s0 sem, eq (readCapAtCSPOffset switcherParams.(SPILL_SLOT_cs0))) *)
-      (*   ; (RF_s1 sem, eq (readCapAtCSPOffset switcherParams.(SPILL_SLOT_cs1))) *)
-      (*   ]. *)
-
       (* (* We want to define the behavior of the switcher as a function *)
       (*    of thread-local state (register file, CSP-region of memory, *)
       (*    system thread state) + read-only switcher state. We want to *)
