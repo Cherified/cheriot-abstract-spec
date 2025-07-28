@@ -701,7 +701,8 @@ Section WithContext.
         [ clear hwf_user; rename i into hmode| clear hwf_sys].
       - specialize hwf_sys with (1 := hmode) (2 := hpre) (mem := mem)
                                 (mepcc := thread_mepcc sysSt) (exnInfo := thread_exceptionInfo sysSt)
-                                (ts := thread_trustedStack sysSt) (ints := istatus).
+                                (ts := thread_trustedStack sysSt) (ints := istatus)
+                                (stat := thread_alive sysSt).
         setoid_rewrite hinst in hwf_sys. destruct_products. auto.
       - cbv[capsOfUserTS capsOfSystemTS]. destruct_products.
         specialize hwf_userl with (1 := hpre) (pcc := thread_pcc userSt) (mem := mem).

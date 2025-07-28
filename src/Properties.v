@@ -10,36 +10,7 @@ Create HintDb lists.
 Hint Resolve nth_error_In : lists.
 
 Set Nested Proofs Allowed.
-
 Import Separation.
-Ltac finish_Separated :=
-  match goal with
-  | H: Separated ?xs,
-    H1: nth_error ?xs ?t1 = Some ?s1,
-    H2: nth_error ?xs ?t2 = Some ?s2,
-    H3: In ?addr ?s1,
-    H4: In ?addr ?s2,
-    H5: ?t1 <> ?t2 |- _ =>
-      exfalso; eapply H with (2 := H1) (3 := H2) (4 := H3) (5 := H4);
-      solve[option_simpl; auto; lia]
-  | _ => progress(option_simpl; lia)
-  end.
-
-Ltac prepare_Separated :=
-  try match goal with
-      | H1: nth_error ?xs ?t1 = Some ?s1,
-        H2: nth_error ?xs ?t2 = Some ?s2,
-        H3: In ?addr ?s1,
-        H4: In ?addr ?s2
-        |- _ =>
-        let Heq := fresh in   
-        assert_fresh (t1 = t2) as Heq;
-        [ destruct (PeanoNat.Nat.eq_dec t1 t2); [ by auto | ]  | subst ]
-    end.
-
-Ltac simplify_Separated :=
-  prepare_Separated; try solve[finish_Separated].
-
 
 (* Defining the valid initial states of a machine in terms of
    compartments and thread initialization. *)
@@ -843,17 +814,19 @@ Module SwitcherProperty.
               (eq (inr zeroBytes)).
 
 
+          (* Ensure there's at least one stack frame left *)
           Definition Post_UnwindStackBase
             (ret0: RegisterFile -> CapOrBytes -> Prop)
             (ret1: RegisterFile -> CapOrBytes -> Prop)
             (tid: nat) (st_init: ThreadState) (st: ThreadState)
             : Prop :=
-            exists frame frames compartment exnInfo,
+            exists frame frame' frames compartment exnInfo,
               let tcsp := frame.(trustedStackFrame_CSP) in
-              trustedStack_frames (thread_trustedStack (sts st_init)) = frame::frames /\
+              trustedStack_frames (thread_trustedStack (sts st_init)) = frame::frame'::frames /\
               sc st = ({| thread_mepcc := MEPCC;
                           thread_exceptionInfo := exnInfo;
-                          thread_trustedStack := Build_TrustedStack frames
+                          thread_trustedStack := Build_TrustedStack (frame'::frames);
+                          thread_alive := thread_alive (sts st_init)
                        |}, ints st_init) /\
               LookupExportTableCompartment config frame.(trustedStackFrame_calleeExportTable) = Some compartment /\
               (* mem *)
@@ -995,7 +968,8 @@ Module SwitcherProperty.
             exists exnInfo',
               sc st = ({| thread_mepcc := MEPCC;
                           thread_exceptionInfo := exnInfo';
-                          thread_trustedStack := thread_trustedStack (sts st_init)
+                          thread_trustedStack := thread_trustedStack (sts st_init);
+                          thread_alive := thread_alive (sts st_init)
                        |}, InterruptsEnabled).
 
           Definition ValidErrorHandlerPCC (handlerT: handlerType) (compartment: Compartment) (pcc: Cap) : Prop :=
@@ -1037,7 +1011,8 @@ Module SwitcherProperty.
               trustedStack_frames (thread_trustedStack (sts st_init)) = frame::frames /\
               sc st = ({| thread_mepcc := MEPCC;
                           thread_exceptionInfo := exnInfo';
-                          thread_trustedStack := Build_TrustedStack ((increment_errorCounter frame)::frames)
+                          thread_trustedStack := Build_TrustedStack ((increment_errorCounter frame)::frames);
+                          thread_alive := thread_alive (sts st_init)
                        |}, InterruptsEnabled) /\
               LookupExportTableCompartment config frame.(trustedStackFrame_calleeExportTable) = Some compartment /\
               (* TODO: untrusted CSP? *)
@@ -1052,7 +1027,8 @@ Module SwitcherProperty.
               trustedStack_frames (thread_trustedStack (sts st_init)) = frame::frames /\
               sc st = ({| thread_mepcc := MEPCC;
                           thread_exceptionInfo := exnInfo';
-                          thread_trustedStack := Build_TrustedStack ((increment_errorCounter frame)::frames)
+                          thread_trustedStack := Build_TrustedStack ((increment_errorCounter frame)::frames);
+                          thread_alive := thread_alive (sts st_init) 
                        |}, InterruptsEnabled) /\
               LookupExportTableCompartment config frame.(trustedStackFrame_calleeExportTable) = Some compartment /\
               mem' = mem st (* memory is unchanged *) /\
@@ -1129,7 +1105,8 @@ Module SwitcherProperty.
               RegProp (rf st_init) (rf_sp rfidx) (eq (inl cspCap)) /\
               sc st = ({| thread_mepcc := MEPCC;
                           thread_exceptionInfo := exnInfo';
-                          thread_trustedStack := thread_trustedStack (sts st_init)
+                          thread_trustedStack := thread_trustedStack (sts st_init);
+                          thread_alive := thread_alive (sts st_init)  
                        |}, ints st_init (* TODO: want to restore mstatus *)) /\
                (* mem is unchanged *)
                mem st = mem st_init /\
@@ -1259,7 +1236,8 @@ Module SwitcherProperty.
                               |} in 
               sc st = ({| thread_mepcc := MEPCC;
                           thread_exceptionInfo := exnInfo';
-                          thread_trustedStack := Build_TrustedStack (newFrame::(sts st).(thread_trustedStack).(trustedStack_frames))
+                          thread_trustedStack := Build_TrustedStack (newFrame::(sts st).(thread_trustedStack).(trustedStack_frames));
+                          thread_alive := thread_alive (sts st_init) 
                        |}, entry.(exportEntryInterruptStatus)) /\
               (* PCC *)
               pcc st = updateCapCursor compartment.(compartmentPCC) (Nat.add entry.(exportEntryOffset)) /\
@@ -1299,7 +1277,8 @@ Module SwitcherProperty.
             (exists exnInfo',
               sc st = ({| thread_mepcc := MEPCC;
                           thread_exceptionInfo := exnInfo';
-                          thread_trustedStack := thread_trustedStack (sts st_init)
+                          thread_trustedStack := thread_trustedStack (sts st_init);
+                          thread_alive := thread_alive (sts st_init)  
                        |}, ints st_init)) /\
             (* mem is unchanged *)
             mem st = mem st_init /\
@@ -1380,10 +1359,10 @@ Module SwitcherProperty.
       (* (* TODO: fetchAddrs *) *)
      
    
-    End WithSwitcherParams.
-  End WithConfig.
-End WithContext.
-
+      End WithSwitcherParams.
+    End WithConfig.
+  End WithContext.
+End SwitcherProperty.
 (* If a (malicious) compartment is not transitively-reachable from a
    protected compartment, then it should never have access to the
    protected compartment's memory regions.
@@ -1592,7 +1571,7 @@ Module CompartmentIsolationValidation.
       Qed.
 
       Lemma ExceptionStepOk__User :
-        forall m tr m' thread exn,
+        forall m tr m' thread exn status,
           GlobalInvariant config m ->
           InitialProperty' (m, tr) ->
           GlobalInvariant config m' ->
@@ -1609,7 +1588,10 @@ Module CompartmentIsolationValidation.
                     (Build_SystemThreadState
                        (thread_pcc (thread_userState thread))
                        exn 
-                       (thread_trustedStack (thread_systemState thread)))) ->
+                       (thread_trustedStack (thread_systemState thread))
+                       status 
+                    )
+              ) ->
           machine_memory m = machine_memory m' ->
           InitialProperty' (m',(Ev_SameThread (machine_curThreadId m) Ev_Exception::tr)).
       Proof.
@@ -2218,7 +2200,7 @@ Module ThreadIsolatedMonotonicity.
         intros * hginv hinv hginv' hev hstep.
         pose proof hstep as hstep'.
         inv hstep. destruct_products.
-        inv stepOkrl.
+        inv stepOkrrl.
         rename H0 into hstep.
         revert hstep. cbv [threadStepFunction exceptionState uc sc fst snd].
         repeat (case_match; simplify_eq); try congruence.
@@ -2264,7 +2246,7 @@ Module ThreadIsolatedMonotonicity.
           - intros * hx hy.
             destruct (PeanoNat.Nat.eq_dec idx (m'.(machine_curThreadId))); subst.
             + rewrite threadIdEq in *.
-              rewrite stepOkrr in *. option_simpl.
+              rewrite stepOkrrr in *. option_simpl.
               assert (ThreadReachableCapSubset (machine_memory initialMachine) (machine_memory m)
                                          x thread) as hsubset0.
               { eapply InvariantImpliesThreadReachableCapSubset; eauto. }

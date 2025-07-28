@@ -35,21 +35,8 @@ Module Combinators.
   End __.
 End Combinators.
 
-Module Separation.
-  Definition Disjoint {T: Type} (xs ys: list T) : Prop :=
-    forall t, In t xs -> In t ys -> False.
 
-  Definition Pairwise {T: Type} (P: T -> T -> Prop) (xss: list T) : Prop :=
-    forall i j xi xj,
-      i <> j ->
-      nth_error xss i = Some xi ->
-      nth_error xss j = Some xj ->
-      P xi xj.
 
-  Definition Separated {T: Type} (xss: list (list T)) : Prop :=
-    Pairwise Disjoint xss.
-
-End Separation.
 
 Section EqSet.
   Context [A: Type].
@@ -350,3 +337,45 @@ Ltac simplify_nat :=
   | H: _ <? _ = false |- _ => rewrite PeanoNat.Nat.ltb_nlt in H
   | _ => lia                                                                       
   end.
+Module Separation.
+  Definition Disjoint {T: Type} (xs ys: list T) : Prop :=
+    forall t, In t xs -> In t ys -> False.
+
+  Definition Pairwise {T: Type} (P: T -> T -> Prop) (xss: list T) : Prop :=
+    forall i j xi xj,
+      i <> j ->
+      nth_error xss i = Some xi ->
+      nth_error xss j = Some xj ->
+      P xi xj.
+
+  Definition Separated {T: Type} (xss: list (list T)) : Prop :=
+    Pairwise Disjoint xss.
+
+End Separation.
+Ltac finish_Separated :=
+  match goal with
+  | H: Separation.Separated ?xs,
+    H1: nth_error ?xs ?t1 = Some ?s1,
+    H2: nth_error ?xs ?t2 = Some ?s2,
+    H3: In ?addr ?s1,
+    H4: In ?addr ?s2,
+    H5: ?t1 <> ?t2 |- _ =>
+      exfalso; eapply H with (2 := H1) (3 := H2) (4 := H3) (5 := H4);
+      solve[option_simpl; auto; lia]
+  | _ => progress(option_simpl; lia)
+  end.
+
+Ltac prepare_Separated :=
+  try match goal with
+      | H1: nth_error ?xs ?t1 = Some ?s1,
+        H2: nth_error ?xs ?t2 = Some ?s2,
+        H3: In ?addr ?s1,
+        H4: In ?addr ?s2
+        |- _ =>
+        let Heq := fresh in   
+        assert_fresh (t1 = t2) as Heq;
+        [ destruct (PeanoNat.Nat.eq_dec t1 t2); [ by auto | ]  | subst ]
+    end.
+
+Ltac simplify_Separated :=
+  prepare_Separated; try solve[finish_Separated].

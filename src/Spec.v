@@ -388,12 +388,17 @@ Section Machine.
       }.
     Definition capsOfUserTS uts := uts.(thread_pcc) :: capsOfRf uts.(thread_rf).
 
+    Inductive ThreadAliveStatus :=
+    | ThreadAlive
+    | ThreadDead.
+
     (* SystemThreadState is a first class entity like TrustedStack.
-       In CHERIoT, only MEPCC is a first class entity; the rest are objects in memory *)
+      In CHERIoT, only MEPCC is a first class entity; the rest are objects in memory *)
     Record SystemThreadState :=
       { thread_mepcc: MEPCC;
         thread_exceptionInfo: EXNInfo;
-        thread_trustedStack: TrustedStack
+        thread_trustedStack: TrustedStack;
+        thread_alive: ThreadAliveStatus
       }.
     Definition capsOfSystemTS sts := sts.(thread_mepcc) :: capsOfTS sts.(thread_trustedStack).
 
@@ -487,24 +492,24 @@ Section Machine.
     Section SystemInst.
       Variable systemInst: UserContext -> SystemContext -> Result ExnInfo (UserContext * SystemContext).
 
-      Definition FuncSystem := forall rf pcc mepcc exnInfo ts ints m1 m2,
+      Definition FuncSystem := forall rf pcc mepcc exnInfo ts stat ints m1 m2,
           ReachableMemSame m1 m2 ((pcc :: capsOfRf rf) ++ (mepcc :: capsOfTS ts)) ->
           match systemInst (Build_UserThreadState rf pcc, m1)
-                  (Build_SystemThreadState mepcc exnInfo ts, ints),
+                  (Build_SystemThreadState mepcc exnInfo ts stat, ints),
                 systemInst (Build_UserThreadState rf pcc, m2)
-                                       (Build_SystemThreadState mepcc exnInfo ts, ints) with
+                                       (Build_SystemThreadState mepcc exnInfo ts stat, ints) with
           | Ok ((uts1, m1'), sc1), Ok ((uts2, m2'), sc2) =>
               uts1 = uts2 /\ sc1 = sc2 /\ UpdatedMemSame m1 m2 m1' m2'
           | Exn e1, Exn e2 => e1 = e2
           | _, _ => False
           end.
 
-      Definition WfSystemInst pcc := forall rf mem mepcc exnInfo ts ints,
+      Definition WfSystemInst pcc := forall rf mem mepcc exnInfo ts stat ints,
           ValidRf rf ->
           FuncSystem /\
-          match systemInst (Build_UserThreadState rf pcc, mem) (Build_SystemThreadState mepcc exnInfo ts, ints) with
+          match systemInst (Build_UserThreadState rf pcc, mem) (Build_SystemThreadState mepcc exnInfo ts stat, ints) with
           | Ok ((Build_UserThreadState rf' pcc', mem'),
-                  (Build_SystemThreadState mepcc' exnInfo' ts', ints')) =>
+                  (Build_SystemThreadState mepcc' exnInfo' ts' stat', ints')) =>
             let caps := (pcc :: capsOfRf rf) ++ (mepcc :: capsOfTS ts) in
             let caps' := (pcc' :: capsOfRf rf') ++ (mepcc' :: capsOfTS ts') in
             In Perm.Exec pcc.(capPerms)
@@ -689,7 +694,7 @@ Section Machine.
 
         Definition exceptionState (exnInfo: EXNInfo): (UserContext * SystemContext) * SameThreadEvent :=
           (((Build_UserThreadState rf mepcc, mem),
-             (Build_SystemThreadState pcc exnInfo sts.(thread_trustedStack), ints)
+             (Build_SystemThreadState pcc exnInfo sts.(thread_trustedStack) sts.(thread_alive), ints)
            ), Ev_Exception).
 
         Definition threadStepFunction: (UserContext * SystemContext) * SameThreadEvent :=
@@ -743,10 +748,12 @@ Section Machine.
           (idleThreadsEq: forall n, n <> m1.(machine_curThreadId) ->
                             nth_error m2.(machine_threads) n = nth_error m1.(machine_threads) n)
           (stepOk: exists thread userSt' sysSt',
-                   nth_error m1.(machine_threads) m1.(machine_curThreadId) = Some thread /\
-                   ThreadStep ((thread.(thread_userState), m1.(machine_memory)),
-                               (thread.(thread_systemState), m1.(machine_interruptStatus)))
-                              ((userSt', m2.(machine_memory)), (sysSt', m2.(machine_interruptStatus)), ev) /\
+              nth_error m1.(machine_threads) m1.(machine_curThreadId) = Some thread /\
+              (* Only live threads can take a step. *)
+              thread.(thread_systemState).(thread_alive) = ThreadAlive /\ 
+              ThreadStep ((thread.(thread_userState), m1.(machine_memory)),
+                          (thread.(thread_systemState), m1.(machine_interruptStatus)))
+                         ((userSt', m2.(machine_memory)), (sysSt', m2.(machine_interruptStatus)), ev) /\
                    nth_error m2.(machine_threads) m2.(machine_curThreadId) = Some (Build_Thread userSt' sysSt')),
           SameThreadStep m1 m2 (Ev_SameThread m2.(machine_curThreadId) ev).
 
