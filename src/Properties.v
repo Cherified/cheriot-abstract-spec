@@ -591,32 +591,50 @@ Module Configuration.
   Hint Resolve Inv_curThread : invariants.
 End Configuration.
 
+(* This module describes the pre- and post-conditions of the switcher
+   (https://github.com/CHERIoT-Platform/cheriot-rtos/blob/main/sdk/core/switcher/entry.S).
+
+   We focus on the following entry points of the switcher:
+     - compartment_switcher_entry: we can assume compartments have a
+       forward sentry to this point.
+     - exception_entry_asm: in user mode, MEPCC points here. So upon
+       exception, we jump to the switcher's exception entry point.
+
+   The switcher passes backwards sentries to:
+      - switcher_after_compartment_call
+      - handle_error_handler_return
+   We assume that compartments may have long-lasting capabilities to
+   these return points.
+
+   We define pre- and post-conditions in terms of how the switcher
+   updates the registers and memory as a function of the state at time
+   of call/ret into the switcher. We want to allow interrupts in the
+   switcher where possible (basically everywhere other than the
+   interrupt handler). Thus, the switcher needs to be correct even
+   when other threads run concurrently.
+
+   We obtain a notion of atomicity by enforcing that the switcher
+   operates only on register file, thread-local stack memory regions,
+   and read-only global memory. This ensures that the switcher behaves
+   as if it were atomic, with straightforward postconditions that are
+   a function only of the state at time of call/ret.
+
+   Notes:
+   - We have specified the behavior of the interrupt handler as
+     switching threads atomically.
+   - The MTDC register nominally points to the trusted stack, which
+     is a first-class citizen in our spec.
+   - Instructions in the switcher might use the MTDC register (and
+     other system registers). We'll probably want to add more system
+     registers or register-spill-areas to the trusted
+     stack. Instructions that clobber the MTDC or register spill
+     area used in context switching should be viewed as atomic
+     steps, with interrupts disabled.
+ *)
 Module SwitcherProperty.
   Import ListNotations.
   Import Configuration.
   Import Separation.
-
-  (* We focus on the following entry points of the switcher:
-     - compartment_switcher_entry (we can assume compartments have a
-       forward sentry to this point)
-     - exception_entry_asm (in user mode, MEPCC should point here)
-
-     The switcher passes backwards sentries to:
-     - switcher_after_compartment_call
-     - handle_error_handler_return:
-
-     Notes:
-     - We have specified the behavior of the interrupt handler as
-       switching threads atomically.
-     - The MTDC register nominally points to the trusted stack, which
-       is a first-class citizen in our spec.
-     - Instructions in the switcher might use the MTDC register (and
-       other system registers). We'll probably want to add more system
-       registers or register-spill-areas to the trusted
-       stack. Instructions that clobber the MTDC or register spill
-       area used in context switching should be viewed as atomic
-       steps, with interrupts disabled.
-   *)
 
   Section WithContext.
     Context [ISA: ISA_params].
@@ -656,7 +674,6 @@ Module SwitcherProperty.
                                     (~(exists p, In (idx, p) spec)) ->
                                     RegProp rf idx default
         }.
-
     End Utils.
     
     Section WithConfig.
@@ -1435,6 +1452,7 @@ Module SwitcherProperty.
     End WithConfig.
   End WithContext.
 End SwitcherProperty.
+
 (* If a (malicious) compartment is not transitively-reachable from a
    protected compartment, then it should never have access to the
    protected compartment's memory regions.
@@ -2393,36 +2411,4 @@ Module ThreadIsolatedMonotonicity.
     Qed.
   End WithContext. 
 End ThreadIsolatedMonotonicity.
-
-
-(* Isolated compartment:
-   - if a compartment has no export entries, and its import entries
-     only consist of sentries to libraries, then no other compartment
-     can access the isolated compartment's caps.
-   - intermediate lemma: on a compartment call, we
- *)
-   
-
-
-(* Invariant: if a (isolated) compartment always sanitizes its caps such that
-   - as a caller, all arguments have LG unset
-   - as a callee, it never passes caps that have access to its globals in the return argument
-     --> how to enforce this?
-   then other compartments should only have temporary access to its caps
-   -> that is, the only caps a thread in a different compartment should have access to belonging to 
- *)
-                                                                              
-(* (* Let's keep caps in a canonical form... *) *)
-(* Record CapEquiv (c1 c2: Cap) := { *)
-(*     capEquiv_Sealed: c1.(capSealed) = c2.(capSealed); *)
-(*     capEquiv_Perms:  EqSet c1.(capPerms) c2.(capPerms); *)
-(*     capEquiv_capCanStore: EqSet c1.(capCanStore) c2.(capCanStore); *)
-(*     capEquiv_capCanBeStored: EqSet c1.(capCanBeStored) c2.(capCanBeStored); *)
-(*     capEquiv_capSealingKeys: EqSet c1.(capSealingKeys) c2.(capSealingKeys); *)
-(*     capEquiv_capAddrs: EqSet c1.(capAddrs) c2.(capAddrs); *)
-(*     capEquiv_capKeepPerms: EqSet c1.(capKeepPerms) c2.(capKeepPerms); *)
-(*     capEquiv_capKeepCanStore: EqSet c1.(capKeepCanStore) c2.(capKeepCanStore); *)
-(*     capEquiv_capKeepCanBeStored: EqSet c1.(capKeepCanBeStored) c2.(capKeepCanBeStored); *)
-(*     capEquiv_capCursor: c1.(capCursor) = c2.(capCursor) *)
-(* }. *)
 
