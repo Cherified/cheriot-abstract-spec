@@ -175,6 +175,15 @@ Section Machine.
       | _ => false
       end.
 
+    Definition isForwardSentry (c: Cap) :=
+      match c.(capSealed) with
+      | Some (inl CallEnableInterrupt) => true 
+      | Some (inl CallDisableInterrupt) => true
+      | Some (inl CallInheritInterrupt) => true
+      | _ => false
+      end.
+
+
     Definition isSealedDataCap (c: Cap) :=
       match c.(capSealed) with
       | Some (inr _) => true
