@@ -359,6 +359,7 @@ Section Machine.
     Notation PCC := Cap (only parsing).
     Notation MEPCC := Cap (only parsing). (* While MEPCC can become invalid architecturally,
                                              it shouldn't if the switcher is correct *)
+    Notation MTCC := Cap (only parsing).
     Definition EXNInfo := Bytes.
     Notation RegIdx := nat (only parsing).
 
@@ -405,11 +406,12 @@ Section Machine.
       In CHERIoT, only MEPCC is a first class entity; the rest are objects in memory *)
     Record SystemThreadState :=
       { thread_mepcc: MEPCC;
+        thread_mtcc:  MTCC;
         thread_exceptionInfo: EXNInfo;
         thread_trustedStack: TrustedStack;
         thread_alive: ThreadAliveStatus
       }.
-    Definition capsOfSystemTS sts := sts.(thread_mepcc) :: capsOfTS sts.(thread_trustedStack).
+    Definition capsOfSystemTS sts := sts.(thread_mepcc) :: sts.(thread_mtcc) :: capsOfTS sts.(thread_trustedStack).
 
     Record Thread := {
         thread_userState : UserThreadState;
@@ -501,26 +503,26 @@ Section Machine.
     Section SystemInst.
       Variable systemInst: UserContext -> SystemContext -> Result ExnInfo (UserContext * SystemContext).
 
-      Definition FuncSystem := forall rf pcc mepcc exnInfo ts stat ints m1 m2,
-          ReachableMemSame m1 m2 ((pcc :: capsOfRf rf) ++ (mepcc :: capsOfTS ts)) ->
+      Definition FuncSystem := forall rf pcc mepcc mtcc exnInfo ts stat ints m1 m2,
+          ReachableMemSame m1 m2 ((pcc :: capsOfRf rf) ++ (mepcc :: mtcc :: capsOfTS ts)) ->
           match systemInst (Build_UserThreadState rf pcc, m1)
-                  (Build_SystemThreadState mepcc exnInfo ts stat, ints),
+                  (Build_SystemThreadState mepcc mtcc exnInfo ts stat, ints),
                 systemInst (Build_UserThreadState rf pcc, m2)
-                                       (Build_SystemThreadState mepcc exnInfo ts stat, ints) with
+                                       (Build_SystemThreadState mepcc mtcc exnInfo ts stat, ints) with
           | Ok ((uts1, m1'), sc1), Ok ((uts2, m2'), sc2) =>
               uts1 = uts2 /\ sc1 = sc2 /\ UpdatedMemSame m1 m2 m1' m2'
           | Exn e1, Exn e2 => e1 = e2
           | _, _ => False
           end.
 
-      Definition WfSystemInst pcc := forall rf mem mepcc exnInfo ts stat ints,
+      Definition WfSystemInst pcc := forall rf mem mepcc mtcc exnInfo ts stat ints,
           ValidRf rf ->
           FuncSystem /\
-          match systemInst (Build_UserThreadState rf pcc, mem) (Build_SystemThreadState mepcc exnInfo ts stat, ints) with
+          match systemInst (Build_UserThreadState rf pcc, mem) (Build_SystemThreadState mepcc mtcc exnInfo ts stat, ints) with
           | Ok ((Build_UserThreadState rf' pcc', mem'),
-                  (Build_SystemThreadState mepcc' exnInfo' ts' stat', ints')) =>
-            let caps := (pcc :: capsOfRf rf) ++ (mepcc :: capsOfTS ts) in
-            let caps' := (pcc' :: capsOfRf rf') ++ (mepcc' :: capsOfTS ts') in
+                  (Build_SystemThreadState mepcc' mtcc' exnInfo' ts' stat', ints')) =>
+            let caps := (pcc :: capsOfRf rf) ++ (mepcc :: mtcc :: capsOfTS ts) in
+            let caps' := (pcc' :: capsOfRf rf') ++ (mepcc' :: mtcc' :: capsOfTS ts') in
             In Perm.Exec pcc.(capPerms)
             /\ In Perm.System pcc.(capPerms)
             /\ ValidMemUpdate mem caps mem'
@@ -700,10 +702,11 @@ Section Machine.
         Definition sts := fst sc.
         Definition ints := snd sc.
         Definition mepcc := (fst sc).(thread_mepcc).
+        Definition mtcc := (fst sc).(thread_mtcc).
 
         Definition exceptionState (exnInfo: EXNInfo): (UserContext * SystemContext) * SameThreadEvent :=
-          (((Build_UserThreadState rf mepcc, mem),
-             (Build_SystemThreadState pcc exnInfo sts.(thread_trustedStack) sts.(thread_alive), ints)
+          (((Build_UserThreadState rf mtcc, mem),
+             (Build_SystemThreadState pcc mtcc exnInfo sts.(thread_trustedStack) sts.(thread_alive), ints)
            ), Ev_Exception).
 
         Definition threadStepFunction: (UserContext * SystemContext) * SameThreadEvent :=

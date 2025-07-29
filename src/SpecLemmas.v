@@ -700,7 +700,9 @@ Section WithContext.
       destruct (in_dec Perm.t_eq_dec Perm.System (capPerms (thread_pcc userSt)));
         [ clear hwf_user; rename i into hmode| clear hwf_sys].
       - specialize hwf_sys with (1 := hmode) (2 := hpre) (mem := mem)
-                                (mepcc := thread_mepcc sysSt) (exnInfo := thread_exceptionInfo sysSt)
+                                (mepcc := thread_mepcc sysSt)
+                                (mtcc := thread_mtcc sysSt)
+                                (exnInfo := thread_exceptionInfo sysSt)
                                 (ts := thread_trustedStack sysSt) (ints := istatus)
                                 (stat := thread_alive sysSt).
         setoid_rewrite hinst in hwf_sys. destruct_products. auto.
