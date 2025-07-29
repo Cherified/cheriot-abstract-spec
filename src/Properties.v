@@ -1370,7 +1370,9 @@ Module SwitcherProperty.
           Definition ZeroArg (numArgs: nat) (regArgNum: nat) (init_rf: RegisterFile) (regIdx: nat) : CapOrBytes -> Prop :=
             fun v => RegP init_rf regIdx (fun old => v = if Nat.leb numArgs regArgNum then
                                                               inr zeroBytes
-                                                            else old).
+                                                         else old).
+
+          (* Zero non-argument registers. *)
           Definition CompartmentCall_PostRf_Ok
             (istatus: InterruptStatus) 
             (init_rf: RegisterFile)
@@ -1410,15 +1412,21 @@ Module SwitcherProperty.
       
           (* ---------------- POSTCONDITION ----------------------- *)
           (* If the switcher returns back to user mode after an compartment call, then either
-           * 1) The call succeeded:
-                - initial csp was ok
-                - initial t1 points to sealed export table entry
-                - spill registers below where csp points
-                - add new frame to trusted stack (csp at time of invocation - spill slots)
-                - chop off and zero stack from newCSPBase to base 
-           * 2) Not enough stack; return to caller with a0 = -ENOTENOUGHSTACK; a1 = 0
-                TODO: current code spills and then reloads registers? 
-           * 3) Invalid CSP (or otherwise?): unwind the stack
+           * 1) The call succeeded.
+                This implies that:
+                - initial csp was a valid csp.
+                - initial t1 points to sealed export table entry.
+                - there was enough stack space (TODO).
+
+                The switcher will:
+                - Spill the pcc/cgp/s0/s1 below where the csp points.
+                - Add a new frame to the trusted stack, with the CSP
+                  corresponding to the CSP at time of invocation -
+                  SPILL_SLOT_SIZE.
+                - Chop off and zero stack from the base to the new CSP's cursor.
+           * 2) There was not enough stack.
+                Return to the callee with a0 = -ENOTENOUGHSTACK and a1 = 0.
+           * 3) The CSP was invalid (or an error occurred otherwise): unwind the stack.
            *)
 
           Definition compartmentCallStackOk 
@@ -1438,30 +1446,33 @@ Module SwitcherProperty.
           Definition CCall_Post_Ok
             (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
             (exists sealedCapToExportTable compartment entry exnInfo' init_csp,  
-              ValidCSP init_csp /\ 
+              ValidCSP init_csp /\
+              (* Initially, t1 contains a cap sealed with the
+                 switcher's key that points to an export table entry. *)
               (RegP (rf st_init) (SWITCHER_SEALED_ARG_REG rfidx) (eq (inl sealedCapToExportTable))) /\ 
               (sealedCapToExportTable.(capSealed) = Some (inr config.(configSwitcher).(Switcher_key))) /\
               let unsealedCapToExportTable := setCapSealed sealedCapToExportTable None in
               LookupExportTableCompartmentAndEntry config unsealedCapToExportTable = Some (compartment, entry) /\
               RegP (rf st_init) (rf_sp rfidx) (eq (inl init_csp)) /\
-              let newTCSPBase := init_csp.(capCursor) - SPILL_SLOT_SIZE  in
-              let newTCSP := setCapCursor init_csp newTCSPBase in 
+              let newTCSPCursor := init_csp.(capCursor) - SPILL_SLOT_SIZE  in
+              let newTCSP := setCapCursor init_csp newTCSPCursor in 
               let newFrame := {| trustedStackFrame_CSP := newTCSP;
                                  trustedStackFrame_calleeExportTable := unsealedCapToExportTable;
                                  trustedStackFrame_errorCounter := 0
                               |} in 
-              sc st = ({| thread_mepcc := MEPCC;
+              sc st = ({| thread_mepcc := mepcc st_init ;
+                          thread_mtcc := MTCC;
                           thread_exceptionInfo := exnInfo';
                           thread_trustedStack := Build_TrustedStack (newFrame::(sts st).(thread_trustedStack).(trustedStack_frames));
                           thread_alive := thread_alive (sts st_init) 
                        |}, entry.(exportEntryInterruptStatus)) /\
-              (* PCC *)
+              (* PCC: points to compartment PCC offsetted by export entry offset. *)
               pcc st = updateCapCursor compartment.(compartmentPCC) (Nat.add entry.(exportEntryOffset)) /\
-              (* RF *)
-              let csp' := (postCompartmentCallCSP init_csp newTCSPBase)  in
+              (* RF: zero non-argument registers.  *)
+              let csp' := (postCompartmentCallCSP init_csp newTCSPCursor)  in
               (CompartmentCall_PostRfSpec_Ok (rf st_init) entry csp' compartment (rf st)) /\
-              (* MEM *)
-              compartmentCallStackOk newTCSP (mem st_init) (mem st)).
+              (* TODO!!!: MEM *)
+              compartmentCallStackOk csp' (mem st_init) (mem st)).
 
           (* TODO: check this. Also too strong.
              We could relax this to say they're all caller-reachable caps or values 
