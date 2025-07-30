@@ -296,6 +296,10 @@ Module Configuration.
         In addr compartment.(compartmentPCC).(capAddrs) ->
         MemEquivalentAtAddr config.(configInitMemory) mem addr.
 
+    Definition NonStackMemPreserved (config: Config) (tid: nat) (mem1 mem2: FullMemory): Prop :=
+      forall addr, ~(AddrInStack config tid addr) ->
+                   MemEquivalentAtAddr mem1 mem2 addr.
+
     Definition ExportTablesUnchanged (config: Config) (mem: FullMemory) : Prop :=
       forall addr compartment,
         In compartment config.(configCompartments) ->
@@ -718,12 +722,12 @@ Module SwitcherProperty.
          - All registers listed in the spec satisfy the listed property.
          - All other registers satisfy the default property.
        *)
-      Record RfSpec (spec: RfSpecT) (rf: RegisterFile) (default: CapOrBytes -> Prop) : Prop :=
+      Record RfSpec (spec: RfSpecT) (rf: RegisterFile) (default: nat -> CapOrBytes -> Prop) : Prop :=
         { RfSpec_ValidRF: ValidRf rf
         ; RfSpec_props : forall idx p, In (idx, p) spec -> RegP rf idx p
         ; RfSpec_other: forall idx, idx < ISA_NREGS ->
                                     (~(exists p, In (idx, p) spec)) ->
-                                    RegP rf idx default
+                                    RegP rf idx (default idx)
         }.
 
           Definition ValidUntrustedCSP (cap: Cap) :=
@@ -983,7 +987,7 @@ Module SwitcherProperty.
             (ret1: CapOrBytes -> Prop) :=
             RfSpec (PostRf_UnwindStack frame.(trustedStackFrame_CSP) init_mem ret0 ret1)
             rf
-            (eq (inr zeroBytes)).
+            (fun _ => eq (inr zeroBytes)).
 
           (* ------------ POSTCONDITION -----------------------------
            * Pop off the top stack frame and return to the previous
@@ -1168,7 +1172,7 @@ Module SwitcherProperty.
             (rf: RegisterFile) :=
             exists cgp, compartment.(compartmentCGP) = Some cgp /\
             RfSpec (ExceptionEntry_PostRf_Stackful csp cgp exnInfo) rf
-                   (eq (inr zeroBytes)).
+                   (fun _ => eq (inr zeroBytes)).
   
           Definition ExceptionEntry_PostRf_Stackless
             (csp: Cap) (* derived from tcsp *)
@@ -1192,9 +1196,13 @@ Module SwitcherProperty.
             BaseAddr frame.(trustedStackFrame_CSP) base /\
             let tcsp := frame.(trustedStackFrame_CSP) in
             let newCSP :=
-              setCapCursor (updateCapAddrs tcsp (filter (Nat.ltb tcsp.(capCursor)))) base in 
+              (* Only keep permissions for addresses below the tcsp's
+              cursor, which should point to the callee's topmost stack
+              address at time of call. *)
+              setCapCursor (updateCapAddrs tcsp (filter (Nat.ltb tcsp.(capCursor))))
+                           base in 
             RfSpec (ExceptionEntry_PostRf_Stackless tcsp cgp exnInfo) rf
-                   (eq (inr zeroBytes)).
+                   (fun _ => eq (inr zeroBytes)).
 
           (* Error handler PCCs are created by incrementing the compartment's PCC by an offset. *)
           Definition ValidErrorHandlerPCC (handlerT: handlerType) (compartment: Compartment) (pcc: Cap) : Prop :=
@@ -1268,6 +1276,7 @@ Module SwitcherProperty.
                             \/ ExceptionEntry_Post_Stackless tid st_init st
                             \/ Post_UnwindStackForced tid st_init st
                             \/ ThreadDead st
+            ; EEPost_OnlyStackChanged: NonStackMemPreserved config tid (mem st_init) (mem st)
             }.
   
   
@@ -1342,7 +1351,8 @@ Module SwitcherProperty.
                *)
                (* ExceptionEntry_PostInstallContext tid st_init st \/ *)
                 Post_UnwindStackForced tid st_init st \/
-                ThreadDead st
+                  ThreadDead st
+            ; ERPost_OnlyStackChanged: NonStackMemPreserved config tid (mem st_init) (mem st)
             }.
 
           Definition ExceptionReturnOk :=
@@ -1373,6 +1383,7 @@ Module SwitcherProperty.
                                                          else old).
 
           (* Zero non-argument registers. *)
+          (* TODO: check istatus *)
           Definition CompartmentCall_PostRf_Ok
             (istatus: InterruptStatus) 
             (init_rf: RegisterFile)
@@ -1392,11 +1403,12 @@ Module SwitcherProperty.
             ; (rf_t0 rfidx, ZeroArg numArgs 6 init_rf (rf_t0 rfidx))
             ].
 
-         (* TODO: check alignment and underflow. *) 
-         (* Alternatively, could define in terms of restricting the initial csp. *) 
-          Definition postCompartmentCallCSP (init_csp: Cap) (newBase: Addr): Cap :=
-           let newCursor := newBase - STACK_ENTRY_RESERVED_SPACE in
-           setCapCursor (updateCapAddrs init_csp (filter(Nat.ltb newBase))) newCursor.
+          (* TODO: check alignment and underflow. *) 
+          (* Alternatively, could define in terms of restricting the initial csp. *)
+          Definition postCompartmentCallCSP (init_csp: Cap) (newTop: Addr): Cap :=
+          (* Reserve some compartment-invocation local space. *)
+          let newCursor := newTop - STACK_ENTRY_RESERVED_SPACE in
+          setCapCursor (updateCapAddrs init_csp (filter(Nat.ltb newTop))) newCursor.
 
           Definition CompartmentCall_PostRfSpec_Ok
             (init_rf: RegisterFile)                       
@@ -1408,7 +1420,7 @@ Module SwitcherProperty.
             RfSpec (CompartmentCall_PostRf_Ok entry.(exportEntryInterruptStatus) init_rf 
                                               cgp csp entry.(exportEntryNumArgs))
                    rf 
-                   (eq (inr zeroBytes)).
+                   (fun _ => eq (inr zeroBytes)).
       
           (* ---------------- POSTCONDITION ----------------------- *)
           (* If the switcher returns back to user mode after an compartment call, then either
@@ -1429,23 +1441,32 @@ Module SwitcherProperty.
            * 3) The CSP was invalid (or an error occurred otherwise): unwind the stack.
            *)
 
-          Definition compartmentCallStackOk 
-            (csp: Cap) (mem: FullMemory) (mem': FullMemory) :=
-            exists baseAddr,
-            BaseAddr csp baseAddr /\
-            (* Zero stack *)
-            (forall addr, In addr csp.(capAddrs) ->
-                     readByte mem addr = zeroByte /\
-                     readTag mem (toCapAddr addr) = false) /\
-            (* All other mem is unchanged. *)
-            (forall addr, (In addr csp.(capAddrs) -> False) ->
-                     readByte mem' addr = readByte mem addr /\
-                     readTag mem' (toCapAddr addr) = readTag mem (toCapAddr addr)).
+          Definition compartmentCalleeStackZeroed
+            (newcsp: Cap) (mem: FullMemory) (mem': FullMemory) :=
+            (forall addr, In addr newcsp.(capAddrs) ->
+                       readByte mem' addr = zeroByte /\
+                       readTag mem' (toCapAddr addr) = false).
+
+          Definition compartmentCallMemOk
+            (initcsp: Cap) (initrf: RegisterFile) (newcsp: Cap) (mem: FullMemory) (mem': FullMemory) :=
+            (* All addresses reachable by the new csp are zeroed. *)
+            compartmentCalleeStackZeroed newcsp mem mem' /\
+            (* Spill pcc(ra), cgp, and callee-saved registers *)
+            RegP initrf (rf_s0 rfidx) (WriteStack mem' (updateCapCursor initcsp (Nat.add (SPILL_SLOT_cs0 - SPILL_SLOT_SIZE)))) /\
+            RegP initrf (rf_s1 rfidx) (WriteStack mem' (updateCapCursor initcsp (Nat.add (SPILL_SLOT_cs1 - SPILL_SLOT_SIZE)))) /\
+            RegP initrf (rf_ra rfidx) (WriteStack mem' (updateCapCursor initcsp (Nat.add (SPILL_SLOT_pcc - SPILL_SLOT_SIZE)))) /\
+            RegP initrf (rf_gp rfidx) (WriteStack mem' (updateCapCursor initcsp (Nat.add (SPILL_SLOT_cgp - SPILL_SLOT_SIZE)))) /\
+            (* All csp addresses above initcsp are untouched. *)
+            (forall addr, In addr initcsp.(capAddrs) ->
+                          addr >= initcsp.(capCursor) ->
+                          MemEquivalentAtAddr mem mem' addr).
 
           (* TODO: check for stack size *)
           Definition CCall_Post_Ok
             (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
-            (exists sealedCapToExportTable compartment entry exnInfo' init_csp,  
+            (exists sealedCapToExportTable compartment entry exnInfo' init_csp,
+              (* The initial csp is a valid csp. *)
+              RegP (rf st_init) (rf_sp rfidx) (eq (inl init_csp)) /\
               ValidCSP init_csp /\
               (* Initially, t1 contains a cap sealed with the
                  switcher's key that points to an export table entry. *)
@@ -1453,13 +1474,16 @@ Module SwitcherProperty.
               (sealedCapToExportTable.(capSealed) = Some (inr config.(configSwitcher).(Switcher_key))) /\
               let unsealedCapToExportTable := setCapSealed sealedCapToExportTable None in
               LookupExportTableCompartmentAndEntry config unsealedCapToExportTable = Some (compartment, entry) /\
-              RegP (rf st_init) (rf_sp rfidx) (eq (inl init_csp)) /\
+              (* The new TCSP is the initial CSP decremented by SPILL_SLOT_SIZE. *)
               let newTCSPCursor := init_csp.(capCursor) - SPILL_SLOT_SIZE  in
-              let newTCSP := setCapCursor init_csp newTCSPCursor in 
+              let newTCSP := setCapCursor init_csp newTCSPCursor in
+              (* Add a new frame to the trusted stack, containing the
+                 new TCSP and the cap to the callee's export table. *)
               let newFrame := {| trustedStackFrame_CSP := newTCSP;
                                  trustedStackFrame_calleeExportTable := unsealedCapToExportTable;
                                  trustedStackFrame_errorCounter := 0
-                              |} in 
+                              |} in
+              (* Set interrupt status based on the export entry's interrupt status. *)
               sc st = ({| thread_mepcc := mepcc st_init ;
                           thread_mtcc := MTCC;
                           thread_exceptionInfo := exnInfo';
@@ -1468,51 +1492,42 @@ Module SwitcherProperty.
                        |}, entry.(exportEntryInterruptStatus)) /\
               (* PCC: points to compartment PCC offsetted by export entry offset. *)
               pcc st = updateCapCursor compartment.(compartmentPCC) (Nat.add entry.(exportEntryOffset)) /\
-              (* RF: zero non-argument registers.  *)
+              (* RF: zero non-argument registers. Chop off stack above the new TCSP. *)
               let csp' := (postCompartmentCallCSP init_csp newTCSPCursor)  in
               (CompartmentCall_PostRfSpec_Ok (rf st_init) entry csp' compartment (rf st)) /\
-              (* TODO!!!: MEM *)
-              compartmentCallStackOk csp' (mem st_init) (mem st)).
+              (* Mem:
+                 - compartment callee stack is zeroed
+                 - spill registers at init_csp.(capCursor)
+                 - all memory other than init_csp.(capCursor) to base of stack should be unchanged
+              *)
+              compartmentCalleeStackZeroed csp' (mem st_init) (mem st)).
 
-          (* TODO: check this. Also too strong.
-             We could relax this to say they're all caller-reachable caps or values 
-           *)
           Definition CCall_PostRf_NotEnoughStack
             (rf_init: RegisterFile)
             : RfSpecT :=
-            let eq_rf_init idx := fun v => RegP rf_init (rf_sp rfidx) (eq v) in 
-            [ (rf_ra rfidx, eq_rf_init (rf_ra rfidx)) (* TODO *)
-            ; (rf_gp rfidx, eq_rf_init (rf_gp rfidx))
-            ; (rf_sp rfidx, eq_rf_init (rf_sp rfidx))
-            ; (rf_tp rfidx, eq_rf_init (rf_tp rfidx))
-            ; (rf_t0 rfidx, eq_rf_init (rf_t0 rfidx))
-            ; (rf_t1 rfidx, eq_rf_init (rf_t1 rfidx))
-            ; (rf_t2 rfidx, eq_rf_init (rf_t2 rfidx))
-            ; (rf_s0 rfidx, eq_rf_init (rf_s0 rfidx))
-            ; (rf_s1 rfidx, eq_rf_init (rf_s1 rfidx))
-            ; (rf_a0 rfidx, eq (inr notEnoughStackValue))
+            [ (rf_a0 rfidx, eq (inr notEnoughStackValue))
             ; (rf_a1 rfidx, eq (inr zeroBytes))
-            ; (rf_a2 rfidx, eq_rf_init (rf_a2 rfidx))
-            ; (rf_a3 rfidx, eq_rf_init (rf_a3 rfidx))
-            ; (rf_a4 rfidx, eq_rf_init (rf_a4 rfidx))
-            ; (rf_a5 rfidx, eq_rf_init (rf_a5 rfidx))
             ].
 
           (* Trusted stack and interrupt status is not changed. *)
           Definition CCall_Post_NotEnoughStack
             (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
             (exists exnInfo',
-              sc st = ({| thread_mepcc := MEPCC;
+              sc st = ({| thread_mepcc := mepcc st_init;
+                          thread_mtcc := MTCC;
                           thread_exceptionInfo := exnInfo';
                           thread_trustedStack := thread_trustedStack (sts st_init);
                           thread_alive := thread_alive (sts st_init)  
                        |}, ints st_init)) /\
             (* mem is unchanged *)
             mem st = mem st_init /\
-            (* TOOD: pcc points to initial ra? *)
+            (* PCC: points to initial ra? *)
             (RegP (rf st_init) (rf_ra rfidx) (eq (inl (pcc st)))) /\ 
-            (* rf is mostly unchanged, other than return values *)
-            RfSpec (CCall_PostRf_NotEnoughStack (rf st_init)) (rf st) (eq (inr zeroBytes)).
+            (* Rf: unchanged, other than return values. We could relax
+               this to say other registers are all caller-reachable caps
+               or values. *)
+            RfSpec (CCall_PostRf_NotEnoughStack (rf st_init)) (rf st)
+                   (fun idx v => RegP (rf st_init) idx (eq v)).
 
           Record CompartmentCall_Post (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
           { CCPost_Mode: ~(InSystemMode st)
@@ -1520,11 +1535,9 @@ Module SwitcherProperty.
                           CCall_Post_NotEnoughStack tid st_init st \/
                           Post_UnwindStackForced tid st_init st \/
                           ThreadDead st
+          ; CCPost_OnlyStackChanged: NonStackMemPreserved config tid (mem st_init) (mem st)
           }.
 
-          (* For all sequences of thread steps, the thread stays in *)
-          (* system mode until it returns to user mode with the stated postcondition. *)
-          (* - TODO: eventually it always returns? *)
           Definition CompartmentCallOk :=
            forall tid init,
             CompartmentCall_Pre tid init ->
@@ -1535,7 +1548,6 @@ Module SwitcherProperty.
               init.
 
         End CompartmentCall.
-
 
         (* Pop a frame from the trusted stack, leaving registers in
            the state expected by the caller of a cross-compartment
@@ -1556,7 +1568,8 @@ Module SwitcherProperty.
           Record CompartmentReturn_Post (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
           { CRetPost_Mode: ~(InSystemMode st)
           ; CRetPost_Cases: Post_UnwindStackReturnOk tid st_init st \/
-                            ThreadDead st
+                              ThreadDead st
+          ; CRetPost_OnlyStackChanged: NonStackMemPreserved config tid (mem st_init) (mem st)
           }.
 
           Definition CompartmentReturnOk :=
