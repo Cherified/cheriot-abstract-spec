@@ -670,8 +670,10 @@ End Configuration.
    We obtain a notion of atomicity by enforcing that the switcher
    operates only on register file, thread-local stack memory regions,
    and read-only global memory. This ensures that the switcher behaves
-   as if it were atomic, with straightforward postconditions that are
-   a function only of the state at time of call/ret.
+   as if it were atomic, as the effect of its actions on memory are
+   disjoint from other threads' effects, and maintains straightforward
+   postconditions that are a function only of the state at time of
+   call/ret.
 
    Notes:
    - We have specified the behavior of the interrupt handler as
@@ -1561,14 +1563,14 @@ Module SwitcherProperty.
 
           Record CompartmentReturn_Pre (tid: nat) (st: ThreadState) : Prop :=
           { CRetReturn_PCCAddr: pcc st = CompartmentCallPCC
-          ; CRetReturn_TrustedStack: ValidTrustedStack (sts st).(thread_trustedStack)
+          ; CRetReturn_TrustedStack: ValidTrustedStack config (sts st).(thread_trustedStack)
           ; CRetReturn_Invariant: CompartmentCall_Invariant tid st st
           }.
 
           Record CompartmentReturn_Post (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
           { CRetPost_Mode: ~(InSystemMode st)
           ; CRetPost_Cases: Post_UnwindStackReturnOk tid st_init st \/
-                              ThreadDead st
+                            ThreadDead st
           ; CRetPost_OnlyStackChanged: NonStackMemPreserved config tid (mem st_init) (mem st)
           }.
 
@@ -1583,26 +1585,7 @@ Module SwitcherProperty.
          
         End CompartmentReturn.
       
-      (* (* We want to define the behavior of the switcher as a function *)
-      (*    of thread-local state (register file, CSP-region of memory, *)
-      (*    system thread state) + read-only switcher state. We want to *)
-      (*    guarantee disjointness of other threads updates from *)
-      (*    thread-local memory regions. *)
-
-      (*    Then if we jump to the switcher's exception handler: *)
-      (*    - For some sequence of thread steps, P UNTIL Q *)
-      (*      - Q (Post): returns to usermode /\ R holds *)
-      (*      - P (Invariant): - it should act as a function of thread-local + read-only switcher state *)
-      (*           - not usermode  *)
-      (*      - R: post condition of exception handler, in terms of initial state *)
-      (*        - A good exception handler was found and we jumped to it *)
-      (*    - No guarantee of availability unless we add EVENTUALLY Q *)
-      (*  *) *)
-
-      (* (* TODO: fetchAddrs *) *)
-     
-   
-      End WithSwitcherParams.
+     End WithSwitcherParams.
     End WithConfig.
   End WithContext.
 End SwitcherProperty.
