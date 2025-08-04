@@ -1811,9 +1811,10 @@ Module CompartmentIsolationValidation.
             Some (Build_Thread
                     (Build_UserThreadState
                        (thread_rf (thread_userState thread))
-                       (thread_mepcc (thread_systemState thread)))
+                       (thread_mtcc (thread_systemState thread)))
                     (Build_SystemThreadState
                        (thread_pcc (thread_userState thread))
+                       (thread_mtcc (thread_systemState thread))
                        exn 
                        (thread_trustedStack (thread_systemState thread))
                        status 
@@ -1833,7 +1834,7 @@ Module CompartmentIsolationValidation.
           { exfalso.
             eapply ThreadInUserCompartmentDoesNotHaveSystemPerm; eauto.
             cbv[ThreadHasSystemPerm]; cbn.
-            erewrite MEPCC_ok by (eapply HUserMode; eauto).
+            erewrite MTCC_ok by (eapply HUserMode; eauto).
             cbn. eauto.
           }
           { rewrite hsame in * by lia.
@@ -1850,7 +1851,7 @@ Module CompartmentIsolationValidation.
           destruct (PeanoNat.Nat.eq_dec (machine_curThreadId m) n); subst; option_simpl; cbn.
           { exfalso. apply ht_userMode.
             cbn.
-            erewrite MEPCC_ok by (eapply HUserMode; eauto).
+            erewrite MTCC_ok by (eapply HUserMode; eauto).
             cbn. eauto.
           }
           { rewrite hsame in * by lia.
@@ -2243,7 +2244,7 @@ Module CompartmentIsolationValidation.
           destruct hvalid. destruct_products. unfold hd_error in *.
           simpl_match; option_simpl.
           match goal with
-          | H: ValidTrustedStackFrame _ _ _ _ _ _ |- _ => destruct H
+          | H: ValidTrustedStackFrame _ _ _ _ _ |- _ => destruct H
           end; destruct_products; option_simpl; simplify_tupless; eauto.
         Qed.
 
