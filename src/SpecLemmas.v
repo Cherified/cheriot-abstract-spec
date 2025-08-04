@@ -181,10 +181,10 @@ Section WithContext.
       cbv[setCapSealed]. destruct c; intros; cbn in *; subst; auto.
     Qed.
     Lemma setCapSealed_inv:
-      forall (x: Cap) y z,
-        setCapSealed (setCapSealed x y) z = setCapSealed x z.
+      forall (x: Cap) (optSeal optSeal': option SealT),
+        setCapSealed (setCapSealed x optSeal) optSeal' = setCapSealed x optSeal'.
     Proof.
-      cbv[setCapSealed]. reflexivity.
+      reflexivity.
     Qed.
 
   End CapStepLemmas.
