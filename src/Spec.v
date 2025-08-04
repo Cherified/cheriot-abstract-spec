@@ -1,46 +1,6 @@
 From Stdlib Require Import List Lia Bool Nat NArith.
 Set Primitive Projections.
-
-Notation EqDecider f := (forall x y, BoolSpec (x = y) (x <> y) (f x y)).
-
-Section EqSet.
-  Context [A: Type].
-  Variable l1 l2: list A.
-  Definition EqSet := forall x, In x l1 <-> In x l2.
-
-  Theorem Eq_imp_EqSet: l1 = l2 -> EqSet.
-  Proof.
-    unfold EqSet; intros; subst; tauto.
-  Qed.
-
-  Definition Subset := forall x, In x l1 -> In x l2.
-
-End EqSet.
-
-Fixpoint listSumToInl [A B: Type] (l: list (A+B)) : list A :=
-  match l with
-  | nil => nil
-  | x :: xs => match x with
-               | inl y => y :: listSumToInl xs
-               | _ => listSumToInl xs
-               end
-  end.
-
-Theorem seqInBounds n: forall b v,
-    b <= v < b + n -> In v (seq b n).
-Proof.
-  induction n; simpl; intros.
-  - lia.
-  - destruct (PeanoNat.Nat.eq_dec b v); [auto|right].
-    apply IHn.
-    lia.
-Qed.
-
-Definition is_some [A] (a: option A) : bool :=
-  match a with
-  | Some _ => true
-  | _ => false
-  end.
+From cheriot Require Import Utils.
 
 Class ISA_params := {
     ISA_LG_CAPSIZE_BYTES : nat;
@@ -458,12 +418,6 @@ Section Machine.
         Definition UpdatedMemSame := UpdatedDataSame /\ UpdatedTagSame.
       End UpdatedMemSame.
     End ReachableMemSame.
-
-    (* TODO: Should e be a parameter in Result? *)
-    Inductive Result {e t} :=
-    | Ok : t -> Result
-    | Exn : e -> Result.
-    Arguments Result : clear implicits.
 
     Section ValidState.
       Definition ValidRf (rf: RegisterFile) : Prop :=
