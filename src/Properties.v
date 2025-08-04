@@ -440,7 +440,7 @@ Module Configuration.
     Definition MTCC (config: Config) : Cap :=
       mkUnsealedPCC (switcherFootprint config) config.(configSwitcher).(Switcher_AddrOf_exception_entry_asm). 
 
-    (* MEPCC initially points to the switcher's exception entry path *)
+    (* MTCC initially points to the switcher's exception entry path *)
     Record UserModeOk (config: Config) (t: Thread ) : Prop :=
       { MTCC_ok: t.(thread_systemState).(thread_mtcc) = (MTCC config)}.
 
@@ -651,7 +651,7 @@ End Configuration.
    We focus on the following entry points of the switcher:
      - compartment_switcher_entry: we can assume compartments have a
        forward sentry to this point.
-     - exception_entry_asm: in user mode, MEPCC points here. So upon
+     - exception_entry_asm: in user mode, MTCC points here. So upon
        exception, we jump to the switcher's exception entry point.
 
    The switcher passes backwards sentries to:
@@ -898,10 +898,14 @@ Module SwitcherProperty.
 
         (* The switcher depends only on the thread's stack and
            read-only memory (switcher's code and export tables).
-           TODO: scheduler? We could relax the below and make it
-           depend only on stack and read-only memory, but then we
-           wouldn't be parameterizing properly over other
-           compartment's code.
+
+           TODO: in the RTOS, the switcher calls the scheduler, which
+           is outside the switcher's code region. We could consider
+           relaxing the below and make it depend on the stack and all
+           read-only memory (but the switcher's behavior should not be
+           affected by other compartment's read-only
+           memory). Alternatively, we could special case the
+           scheduler.
          *)
         Definition SwitcherMemEquivAtThread (tid: nat) (mem1 mem2: FullMemory) : Prop :=
           MemEquivalentAtThread config tid mem1 mem2 /\
@@ -1005,7 +1009,7 @@ Module SwitcherProperty.
              - all other registers: zeroed.
            * PCC: restored from the stack
            * Stack: zeroed from base up to and including spilled registers.
-           * Trusted stack: pop topmost frame. Ensure MEPCC is equal to MEPCC.
+           * Trusted stack: pop topmost frame. Ensure mtcc is equal to MTCC.
            *
            * The switcher should not trust or preserve any of the initial
            * register file values, other than return values in ret0 and ret1.

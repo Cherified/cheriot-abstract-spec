@@ -418,7 +418,7 @@ Section Machine.
     | ThreadDead.
 
     (* SystemThreadState is a first class entity like TrustedStack.
-      In CHERIoT, only MEPCC is a first class entity; the rest are objects in memory *)
+      In CHERIoT, only MEPCC and MTCC are first class entities; the rest are objects in memory *)
     Record SystemThreadState :=
       { thread_mepcc: MEPCC;
         thread_mtcc:  MTCC;
@@ -585,7 +585,6 @@ Section Machine.
               e1 = e2
           | _, _ => False
           end.
-      (* TODO: PCC unsealed? *)
       Definition WfCallSentryInst (src: RegIdx) (optLink: option RegIdx):= forall rf pcc ints mem,
           ValidRf rf ->
           src < ISA_NREGS /\
