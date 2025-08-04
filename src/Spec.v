@@ -292,7 +292,8 @@ Section Machine.
           /\ Subset (seq a sz) auth.(capAddrs).
 
         Definition StPermForCap (auth: Cap) (capa: CapAddr) :=
-          StPermForAddr auth (fromCapAddr capa) ISA_CAPSIZE_BYTES.
+          StPermForAddr auth (fromCapAddr capa) ISA_CAPSIZE_BYTES /\
+          In Perm.Cap auth.(capPerms).
 
         Definition ValidMemCapUpdate :=
           forall capa stDataCap, readCap mem capa <> readCap mem' capa ->
@@ -536,6 +537,7 @@ Section Machine.
           | Ok (pcc', rf', ints') =>
             let caps := pcc :: capsOfRf rf in
             In Perm.Exec pcc.(capPerms) /\
+            isSealed pcc = false /\
             (exists src_cap,
                nth_error rf src = Some (inl src_cap) /\
                In Perm.Exec src_cap.(capPerms) /\
@@ -552,7 +554,7 @@ Section Machine.
                  (forall idx, idx <> link -> nth_error rf' idx = nth_error rf idx)
                  /\ (exists linkCap,
                         nth_error rf' link = Some (inl linkCap)
-                        /\ RestrictUnsealed pcc linkCap (* TODO: Check correctness *)
+                        /\ RestrictUnsealed pcc (setCapSealed linkCap None) (* TODO: Check correctness *)
                         /\ linkCap.(capSealed) = Some (inl (if ints
                                                             then RetEnableInterrupt
                                                             else RetDisableInterrupt))

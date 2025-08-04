@@ -94,6 +94,10 @@ Section Option.
   Proof.
     destruct x; congruence.
   Qed.
+
+  Definition from_option {A B} (f : A -> B) (y : B) (mx : option A) : B :=
+    match mx with None => y | Some x => f x end.
+
 End Option.
 
 Ltac option_simpl :=
@@ -241,6 +245,38 @@ Section ListUpdate.
   Qed.
 End ListUpdate.
 
+Lemma nth_error_Some' :
+  forall [A: Type] (l: list A) (n: nat) (a: A),
+    nth_error l n = Some a ->
+    n < length l.
+Proof.
+  intros. eapply nth_error_Some. by eapply Some_not_None.
+Qed.
+Ltac saturate_list:=
+  repeat match goal with
+  | H: nth_error ?xs ?idx = Some _ |- _ =>
+      let H' := fresh H "len" in 
+      learn_hyp (nth_error_Some' _ _ _ H) as H'
+  | H: nth_error ?xs ?idx = Some _ |- _ =>
+      let H' := fresh H "In" in 
+      learn_hyp (nth_error_In _ _ H) as H'
+  | H: Forall2 _ _ _ |- _ =>
+      let H' := fresh H "len" in 
+      learn_hyp (Forall2_length H) as H'
+    end.
+Ltac unsafe_saturate_list :=
+  saturate_list;
+  repeat match goal with
+  | H: In ?xs ?x |- _ =>
+      lazymatch goal with
+      | H': nth_error xs _ = Some x |- _ => fail 1
+      | |- _ =>
+          let H' := fresh H "nth_error" in
+          learn_hyp (In_nth_error _ _ H) as H'
+      end
+  end.
+
+
 Fixpoint listSumToInl [A B: Type] (l: list (A+B)) : list A :=
   match l with
   | nil => nil
@@ -249,6 +285,36 @@ Fixpoint listSumToInl [A B: Type] (l: list (A+B)) : list A :=
                | _ => listSumToInl xs
                end
   end.
+Lemma In_listSumToInl:
+  forall A B (xs: list (A+B)) x,
+  In (inl x) xs ->
+  In x (listSumToInl xs).
+Proof.
+  induction xs; cbn; auto.
+  intros * H. inv H; subst; auto.
+  - constructor. auto.
+  - apply IHxs in H0. case_match; [right | ]; auto.
+Qed.
+Lemma listSumToInl_In:
+  forall A B (xs: list (A+B)) x,
+  In x (listSumToInl xs) ->
+  In (inl x) xs.
+Proof.
+  induction xs; cbn; auto.
+  intros. case_match; subst.
+  - inv H; auto.
+  - apply IHxs in H. auto.
+Qed.
+
+Lemma listSumToInl_iff:
+  forall A B (xs: list (A+B)) x,
+  In x (listSumToInl xs) <->
+  In (inl x) xs.
+Proof.
+  split.
+  - apply listSumToInl_In.
+  - apply In_listSumToInl.
+Qed.
 
 Theorem seqInBounds n: forall b v,
     b <= v < b + n -> In v (seq b n).
@@ -259,3 +325,10 @@ Proof.
     apply IHn.
     lia.
 Qed.
+
+Ltac simplify_nat :=
+  repeat match goal with
+  | H: _ <? _ = true |- _ => rewrite PeanoNat.Nat.ltb_lt in H
+  | H: _ <? _ = false |- _ => rewrite PeanoNat.Nat.ltb_nlt in H
+  | _ => lia                                                                       
+  end.

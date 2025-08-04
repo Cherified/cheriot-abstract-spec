@@ -5,6 +5,7 @@ From cheriot Require Import Spec Utils Tactics.
 
 Create HintDb invariants.
 Import ListNotations.
+Create HintDb ReachableCap.
 
 Set Nested Proofs Allowed.
 
@@ -41,10 +42,20 @@ Section WithContext.
       exists p cs cbs ,
         ReachableAddr mem caps a 1 p cs cbs /\ (In Perm.Store p).
 
+    (* Addresses reachable with execute permission. *)
+    Definition ReachableExecAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
+      exists p cs cbs ,
+        ReachableAddr mem caps a 1 p cs cbs /\ (In Perm.Exec p).
+
     (* Addresses reachable with read or write permission. *)
     Definition ReachableRWAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
       ReachableReadAddr mem caps a \/
-      ReachableWriteAddr mem caps a.
+        ReachableWriteAddr mem caps a.
+
+    (* Addresses reachable with read, write, or execute permission. *)
+    Definition ReachableRWXAddr (mem: FullMemory) (caps: list Cap) (a: Addr) :=
+      exists p cs cbs,
+        ReachableAddr mem caps a 1 p cs cbs /\ (In Perm.Load p \/ In Perm.Store p \/ In Perm.Exec p).
 
     Definition RWAddressesDisjoint (mem: FullMemory) (c1 c2: list Cap) : Prop :=
       forall a,
@@ -79,6 +90,101 @@ Section WithContext.
            | |- _ => progress (simplify_Subset || auto)
            end.
       all: by (apply internal_Label_dec_bl || apply Perm.internal_t_dec_bl).
+    Qed.
+    Lemma RestrictCapSealingKeysSubset:
+      forall (c c': Cap),
+      Restrict c c' ->
+      Subset c'.(capSealingKeys) c.(capSealingKeys).
+    Proof.
+      cbv[Restrict]. intros. case_match;
+        destruct H; cbv[EqSet Subset] in *; auto.
+      intros. rewrite<-restrictSealedSealingKeysEq; auto.
+    Qed.
+    Lemma RestrictCapUnsealingKeysSubset:
+      forall (c c': Cap),
+      Restrict c c' ->
+      Subset c'.(capUnsealingKeys) c.(capUnsealingKeys).
+    Proof.
+      cbv[Restrict]. intros. case_match;
+        destruct H; cbv[EqSet Subset] in *; auto.
+      intros. rewrite<-restrictSealedUnsealingKeysSubset; auto.
+    Qed.
+    Lemma RestrictSealedEq:
+      forall (c c': Cap),
+      Restrict c c' ->
+      c.(capSealed) = c'.(capSealed).      
+    Proof.
+      cbv[Restrict]. intros. case_match;
+        destruct H; cbv[SealEq] in *; rewrite_solve.
+    Qed.
+    Lemma RestrictCapAddrsSubset:
+      forall (c c': Cap),
+      Restrict c c' ->
+      Subset c'.(capAddrs) c.(capAddrs).
+    Proof.
+      cbv[Restrict]. intros. case_match;
+        destruct H; cbv[EqSet Subset] in *; auto.
+      intros. rewrite<-restrictSealedAddrsEq; auto.
+    Qed.
+
+    Lemma RestrictSetCapUnsealed:
+      forall (y z: Cap),            
+        Restrict y z ->
+        Restrict (setCapSealed y None) (setCapSealed z None).
+    Proof.
+      intros. cbv[Restrict] in *. cbv[setCapSealed]. cbn.
+      case_match; inv H; constructor; cbv[SealEq]; cbn; auto.
+      all: cbv [EqSet Subset] in *; intros *; 
+                 try match goal with
+                 | H: _ |- _ => rewrite H 
+                 end; auto.
+    Qed.
+
+    Lemma RestrictRefl: forall (x: Cap), Restrict x x.
+    Proof.
+      intros. cbv[Restrict].
+      case_match; constructor; cbv[EqSet Subset SealEq]; auto.
+      all: reflexivity.
+    Qed.
+
+    Lemma RestrictTrans:
+      forall (x y z: Cap),
+        Restrict x y -> Restrict y z -> Restrict x z.
+    Proof.
+      cbv[Restrict]. intros. repeat case_match;
+      repeat match goal with
+      | H: RestrictSealed _ _ |- _ => destruct H
+      | H: RestrictUnsealed _ _ |- _ => destruct H
+        end; constructor; cbv[EqSet SealEq Subset] in *; auto; try rewrite_solve.
+      all: intros *;
+           try match goal with
+           | H: _ |- _ => rewrite H 
+           end; auto.
+      all: repeat match goal with
+           | _ => progress option_simpl 
+           | H: _ = Some _ |- _ => rewrite H in *
+           | H: _ = None |- _ => rewrite H in *
+             end.
+    Qed.
+
+    Lemma RestrictUnsealedOk:
+      forall (c1 c2: Cap),
+        RestrictUnsealed c1 c2 ->
+        isSealed c1 = false ->
+        Restrict c1 c2.
+    Proof.
+      cbv[Restrict isSealed]. intros. by case_match. 
+    Qed.
+    Lemma setCapSealedNoneEq:
+      forall (c: Cap), capSealed c = None -> setCapSealed c None = c.
+    Proof.
+      cbv[setCapSealed]. destruct c; intros; cbn in *; subst; auto.
+    Qed.
+    Lemma setCapSealed_inv:
+      forall (x: Cap) (optSeal optSeal': option SealT),
+        setCapSealed (setCapSealed x optSeal) optSeal' = setCapSealed x optSeal'.
+    Proof.
+      reflexivity.
     Qed.
 
   End CapStepLemmas.
@@ -122,6 +228,8 @@ Section WithContext.
       - repeat destruct H1; subst; auto.
       - constructor; auto.
     Qed.
+
+
   End ReachableCapLemmas.
 
   Section MemUpdateLemmas.
@@ -214,6 +322,28 @@ Section WithContext.
       cbv[ReachableRWAddr]. intros; destruct_products.
       destruct H; [ left; by (eapply ReachableReadAddr_ValidUpdate) | right; by (eapply ReachableWriteAddr_ValidUpdate) ].
     Qed.
+    Lemma ReachableAddrSubset:
+      forall caps' mem addr sz p cs cbs caps,
+        ReachableAddr mem caps' addr sz p cs cbs ->
+        Subset caps' caps ->
+        ReachableAddr mem caps addr sz p cs cbs.
+    Proof.
+      cbv[Subset].
+      intros. inv H.
+      constructor; auto.
+      eapply ReachableCapIncrease; eauto.
+    Qed.
+
+      Lemma ReachableRWXAddrSubset:
+        forall mem caps addr caps',
+          ReachableRWXAddr mem caps' addr ->
+          Subset caps' caps ->
+          ReachableRWXAddr mem caps addr.
+      Proof.
+        cbv[ReachableRWXAddr]. 
+        intros. destruct_products.
+        do 3 eexists; split; eauto; eapply ReachableAddrSubset; eauto.
+      Qed.
 
     Lemma ReachableCaps_ValidUpdate:
       forall mem mem' caps caps' cs,
@@ -260,7 +390,7 @@ Section WithContext.
         StPermForCap mem caps' addr capa.
     Proof.
       cbv[StPermForCap].
-      intros. destruct_products.
+      intros. destruct_products. split; auto.
       eapply StPermForAddrSubset; eauto.
     Qed.
     Lemma ValidMemTagRemovalSubset:
@@ -526,6 +656,18 @@ Section WithContext.
     Qed.
   End SeparationLemmas.
 
+  Section CapsOf.
+    Lemma SubsetCapsOfUserTS:
+      forall (thread: Thread), 
+        Subset (capsOfUserTS (thread_userState thread)) (capsOfThread thread).
+    Proof.
+      cbv[Subset capsOfThread].
+      intros. rewrite in_app_iff. auto. 
+    Qed.          
+
+  End CapsOf.
+
+
   Section WFInstructionLemmas.
     Lemma ValidRfUpdate:
       forall rf rf' v idx,
@@ -626,3 +768,6 @@ Section WithContext.
     Qed.
   End Step.
 End WithContext.
+
+Hint Resolve RestrictSetCapUnsealed: ReachableCap.
+
