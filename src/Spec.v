@@ -21,9 +21,14 @@ Module Perm.
   Scheme Equality for t.
 End Perm.
 
+Class MachineTypeParams := {
+    Byte : Type;
+    Key : Type
+}.
+
 Section Machine.
   Context [ISA: ISA_params].
-  Context {Byte Key: Type}.
+  Context {machineTypeParams: MachineTypeParams}.
   Definition Addr := nat.
   Definition CapAddr := nat.
   Definition toCapAddr (a: Addr): CapAddr := Nat.shiftr a ISA_LG_CAPSIZE_BYTES.
@@ -125,6 +130,11 @@ Section Machine.
   Definition writeBytes (mem: FullMemory) := writeMemBytes (fst mem).
   Definition writeTag (mem: FullMemory) := writeTagTag (snd mem).
   Definition writeCap (mem: FullMemory) := writeMemTagCap (fst mem) (snd mem).
+  Definition writeCapOrBytes (mem: FullMemory) (a: Addr) (v: CapOrBytes) : FullMemory :=
+    match v with
+    | inl cap => writeCap mem (toCapAddr a) cap
+    | inr bytes => (writeBytes mem a bytes, snd mem)
+    end.    
 
   Definition ExnInfo := Bytes.
 
@@ -142,11 +152,52 @@ Section Machine.
          capKeepCanBeStored := c.(capKeepCanBeStored);
          capCursor := c.(capCursor)
       |}.
+    Definition setCapCursor (c: Cap) (cursor: Addr) : Cap :=
+      {| capSealed := c.(capSealed);
+         capPerms := c.(capPerms);
+         capCanStore := c.(capCanStore);
+         capCanBeStored := c.(capCanBeStored);
+         capSealingKeys := c.(capSealingKeys);
+         capUnsealingKeys := c.(capUnsealingKeys);
+         capAddrs := c.(capAddrs);
+         capKeepPerms := c.(capKeepPerms);
+         capKeepCanStore := c.(capKeepCanStore);
+         capKeepCanBeStored := c.(capKeepCanBeStored);
+         capCursor := cursor
+      |}.
+    Definition updateCapAddrs (c: Cap) (update: list Addr -> list Addr) : Cap :=
+      {| capSealed := c.(capSealed);
+         capPerms := c.(capPerms);
+         capCanStore := c.(capCanStore);
+         capCanBeStored := c.(capCanBeStored);
+         capSealingKeys := c.(capSealingKeys);
+         capUnsealingKeys := c.(capUnsealingKeys);
+         capAddrs := update c.(capAddrs);
+         capKeepPerms := c.(capKeepPerms);
+         capKeepCanStore := c.(capKeepCanStore);
+         capKeepCanBeStored := c.(capKeepCanBeStored);
+         capCursor := c.(capCursor) 
+      |}.
+
+
+    Definition updateCapCursor (c: Cap) (fn: Addr -> Addr) : Cap :=
+      setCapCursor c (fn c.(capCursor)).
+
+
     Definition isSentry (c: Cap) :=
       match c.(capSealed) with
       | Some (inl _) => true
       | _ => false
       end.
+
+    Definition isForwardSentry (c: Cap) :=
+      match c.(capSealed) with
+      | Some (inl CallEnableInterrupt) => true 
+      | Some (inl CallDisableInterrupt) => true
+      | Some (inl CallInheritInterrupt) => true
+      | _ => false
+      end.
+
 
     Definition isSealedDataCap (c: Cap) :=
       match c.(capSealed) with
@@ -323,6 +374,7 @@ Section Machine.
     Notation PCC := Cap (only parsing).
     Notation MEPCC := Cap (only parsing). (* While MEPCC can become invalid architecturally,
                                              it shouldn't if the switcher is correct *)
+    Notation MTCC := Cap (only parsing).
     Definition EXNInfo := Bytes.
     Notation RegIdx := nat (only parsing).
 
@@ -361,14 +413,20 @@ Section Machine.
       }.
     Definition capsOfUserTS uts := uts.(thread_pcc) :: capsOfRf uts.(thread_rf).
 
+    Inductive ThreadAliveStatus :=
+    | ThreadAlive
+    | ThreadDead.
+
     (* SystemThreadState is a first class entity like TrustedStack.
-       In CHERIoT, only MEPCC is a first class entity; the rest are objects in memory *)
+      In CHERIoT, only MEPCC and MTCC are first class entities; the rest are objects in memory *)
     Record SystemThreadState :=
       { thread_mepcc: MEPCC;
+        thread_mtcc:  MTCC;
         thread_exceptionInfo: EXNInfo;
-        thread_trustedStack: TrustedStack
+        thread_trustedStack: TrustedStack;
+        thread_alive: ThreadAliveStatus
       }.
-    Definition capsOfSystemTS sts := sts.(thread_mepcc) :: capsOfTS sts.(thread_trustedStack).
+    Definition capsOfSystemTS sts := sts.(thread_mepcc) :: sts.(thread_mtcc) :: capsOfTS sts.(thread_trustedStack).
 
     Record Thread := {
         thread_userState : UserThreadState;
@@ -460,26 +518,26 @@ Section Machine.
     Section SystemInst.
       Variable systemInst: UserContext -> SystemContext -> Result ExnInfo (UserContext * SystemContext).
 
-      Definition FuncSystem := forall rf pcc mepcc exnInfo ts ints m1 m2,
-          ReachableMemSame m1 m2 ((pcc :: capsOfRf rf) ++ (mepcc :: capsOfTS ts)) ->
+      Definition FuncSystem := forall rf pcc mepcc mtcc exnInfo ts stat ints m1 m2,
+          ReachableMemSame m1 m2 ((pcc :: capsOfRf rf) ++ (mepcc :: mtcc :: capsOfTS ts)) ->
           match systemInst (Build_UserThreadState rf pcc, m1)
-                  (Build_SystemThreadState mepcc exnInfo ts, ints),
+                  (Build_SystemThreadState mepcc mtcc exnInfo ts stat, ints),
                 systemInst (Build_UserThreadState rf pcc, m2)
-                                       (Build_SystemThreadState mepcc exnInfo ts, ints) with
+                                       (Build_SystemThreadState mepcc mtcc exnInfo ts stat, ints) with
           | Ok ((uts1, m1'), sc1), Ok ((uts2, m2'), sc2) =>
               uts1 = uts2 /\ sc1 = sc2 /\ UpdatedMemSame m1 m2 m1' m2'
           | Exn e1, Exn e2 => e1 = e2
           | _, _ => False
           end.
 
-      Definition WfSystemInst pcc := forall rf mem mepcc exnInfo ts ints,
+      Definition WfSystemInst pcc := forall rf mem mepcc mtcc exnInfo ts stat ints,
           ValidRf rf ->
           FuncSystem /\
-          match systemInst (Build_UserThreadState rf pcc, mem) (Build_SystemThreadState mepcc exnInfo ts, ints) with
+          match systemInst (Build_UserThreadState rf pcc, mem) (Build_SystemThreadState mepcc mtcc exnInfo ts stat, ints) with
           | Ok ((Build_UserThreadState rf' pcc', mem'),
-                  (Build_SystemThreadState mepcc' exnInfo' ts', ints')) =>
-            let caps := (pcc :: capsOfRf rf) ++ (mepcc :: capsOfTS ts) in
-            let caps' := (pcc' :: capsOfRf rf') ++ (mepcc' :: capsOfTS ts') in
+                  (Build_SystemThreadState mepcc' mtcc' exnInfo' ts' stat', ints')) =>
+            let caps := (pcc :: capsOfRf rf) ++ (mepcc :: mtcc :: capsOfTS ts) in
+            let caps' := (pcc' :: capsOfRf rf') ++ (mepcc' :: mtcc' :: capsOfTS ts') in
             In Perm.Exec pcc.(capPerms)
             /\ In Perm.System pcc.(capPerms)
             /\ ValidMemUpdate mem caps mem'
@@ -527,7 +585,6 @@ Section Machine.
               e1 = e2
           | _, _ => False
           end.
-
       Definition WfCallSentryInst (src: RegIdx) (optLink: option RegIdx):= forall rf pcc ints mem,
           ValidRf rf ->
           src < ISA_NREGS /\
@@ -537,7 +594,6 @@ Section Machine.
           | Ok (pcc', rf', ints') =>
             let caps := pcc :: capsOfRf rf in
             In Perm.Exec pcc.(capPerms) /\
-            isSealed pcc = false /\
             (exists src_cap,
                nth_error rf src = Some (inl src_cap) /\
                In Perm.Exec src_cap.(capPerms) /\
@@ -660,10 +716,11 @@ Section Machine.
         Definition sts := fst sc.
         Definition ints := snd sc.
         Definition mepcc := (fst sc).(thread_mepcc).
+        Definition mtcc := (fst sc).(thread_mtcc).
 
         Definition exceptionState (exnInfo: EXNInfo): (UserContext * SystemContext) * SameThreadEvent :=
-          (((Build_UserThreadState rf mepcc, mem),
-             (Build_SystemThreadState pcc exnInfo sts.(thread_trustedStack), ints)
+          (((Build_UserThreadState rf mtcc, mem),
+             (Build_SystemThreadState pcc mtcc exnInfo sts.(thread_trustedStack) sts.(thread_alive), ints)
            ), Ev_Exception).
 
         Definition threadStepFunction: (UserContext * SystemContext) * SameThreadEvent :=
@@ -690,10 +747,13 @@ Section Machine.
           end.
 
         Definition fetchAddrsInBounds := Subset (fetchAddrs mem pcc.(capCursor)) pcc.(capAddrs)
-                                         /\ In pcc.(capCursor) pcc.(capAddrs).
+                                         /\ In pcc.(capCursor) pcc.(capAddrs)
+                                         /\ isSealed pcc = false
+                                         /\ In Perm.Exec pcc.(capPerms).                                                            
+
 
         Inductive ThreadStep : ((UserContext * SystemContext) * SameThreadEvent) -> Prop :=
-        | GoodUserThreadStep (inBounds: fetchAddrsInBounds) : ThreadStep threadStepFunction
+        | GoodThreadStep (inBounds: fetchAddrsInBounds) : ThreadStep threadStepFunction
         | BadUserFetch (notInBounds: ~ fetchAddrsInBounds) : ThreadStep (exceptionState pccNotInBounds).
       End WithContext.
 
@@ -714,10 +774,12 @@ Section Machine.
           (idleThreadsEq: forall n, n <> m1.(machine_curThreadId) ->
                             nth_error m2.(machine_threads) n = nth_error m1.(machine_threads) n)
           (stepOk: exists thread userSt' sysSt',
-                   nth_error m1.(machine_threads) m1.(machine_curThreadId) = Some thread /\
-                   ThreadStep ((thread.(thread_userState), m1.(machine_memory)),
-                               (thread.(thread_systemState), m1.(machine_interruptStatus)))
-                              ((userSt', m2.(machine_memory)), (sysSt', m2.(machine_interruptStatus)), ev) /\
+              nth_error m1.(machine_threads) m1.(machine_curThreadId) = Some thread /\
+              (* Only live threads can take a step. *)
+              thread.(thread_systemState).(thread_alive) = ThreadAlive /\ 
+              ThreadStep ((thread.(thread_userState), m1.(machine_memory)),
+                          (thread.(thread_systemState), m1.(machine_interruptStatus)))
+                         ((userSt', m2.(machine_memory)), (sysSt', m2.(machine_interruptStatus)), ev) /\
                    nth_error m2.(machine_threads) m2.(machine_curThreadId) = Some (Build_Thread userSt' sysSt')),
           SameThreadStep m1 m2 (Ev_SameThread m2.(machine_curThreadId) ev).
 
@@ -745,6 +807,10 @@ Module CHERIoTValidation.
   | Executable (GL: bool) (SR: bool) (LM: bool) (LG: bool) (* Implicit: EX, LD, MC *)
   | Sealing (GL: bool) (U0: bool) (SE: bool) (US: bool) (* Implicit: None *).
 
+  Instance machineTypeParams : MachineTypeParams :=
+    { Byte := N;
+      Key := N
+    }.
   Record cheriot_cap :=
   { reserved: bool;
     permissions: CompressedPerm;
@@ -758,7 +824,7 @@ Module CHERIoTValidation.
 
   Record Perm :=
     {
-      EX : bool; (* PERMIT_EXECuTE *)
+      EX : bool; (* PERMIT_EXECUTE *)
       GL : bool; (* GLOBAL *)
       LD : bool; (* PERMIT_LOAD *)
       SD : bool; (* PERMIT_STORE *)
@@ -860,7 +926,7 @@ Module CHERIoTValidation.
         |}
     end.
 
-  Definition mk_abstract_cap (c: cheriot_cap) : @Cap N :=
+  Definition mk_abstract_cap (c: cheriot_cap) : Cap :=
     let d := decompress_perm c.(permissions) in
     {|capSealed := if d.(EX)
                    then match c.(otype) with

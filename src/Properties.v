@@ -10,79 +10,45 @@ Create HintDb lists.
 Hint Resolve nth_error_In : lists.
 
 Set Nested Proofs Allowed.
-
 Import Separation.
-Ltac finish_Separated :=
-  match goal with
-  | H: Separated ?xs,
-    H1: nth_error ?xs ?t1 = Some ?s1,
-    H2: nth_error ?xs ?t2 = Some ?s2,
-    H3: In ?addr ?s1,
-    H4: In ?addr ?s2,
-    H5: ?t1 <> ?t2 |- _ =>
-      exfalso; eapply H with (2 := H1) (3 := H2) (4 := H3) (5 := H4);
-      solve[option_simpl; auto; lia]
-  | _ => progress(option_simpl; lia)
-  end.
-
-Ltac prepare_Separated :=
-  try match goal with
-      | H1: nth_error ?xs ?t1 = Some ?s1,
-        H2: nth_error ?xs ?t2 = Some ?s2,
-        H3: In ?addr ?s1,
-        H4: In ?addr ?s2
-        |- _ =>
-        let Heq := fresh in   
-        assert_fresh (t1 = t2) as Heq;
-        [ destruct (PeanoNat.Nat.eq_dec t1 t2); [ by auto | ]  | subst ]
-    end.
-
-Ltac simplify_Separated :=
-  prepare_Separated; try solve[finish_Separated].
-
 
 (* Defining the valid initial states of a machine in terms of
    compartments and thread initialization. *)
 Module Configuration.
-  Section WithContext. 
+  Section WithContext.
     Context [ISA: ISA_params].
-    Context {Byte Key: Type}.
-    Context {capEncodeDecode: @CapEncodeDecode Byte Key}.
-    Notation Cap := (@Cap Key).
-    Notation CapOrBytes := (@CapOrBytes Byte Key).
-    Notation FullMemory := (@FullMemory Byte).
-    Notation TrustedStackFrame := (@TrustedStackFrame Key).
+    Context {machineTypeParams: MachineTypeParams}.
+    Context {capEncodeDecode: CapEncodeDecode}.
 
     Record ExportEntry : Type := {
         exportEntryOffset: nat; 
         exportEntryStackSize: nat;
         exportEntryNumArgs: nat;
         exportEntryInterruptStatus: InterruptStatus
+      }.
+
+    Inductive handlerType :=
+    | Stackful
+    | Stackless.
+    
+    Record ErrorHandler := {
+        errorHandlerOffset: nat; (* Offset from compartment's PCC *)
+        errorHandlerType: handlerType
     }.
 
-    Record ExportTable := {
-        exportTablePCC: Cap;
-        exportTableCGP: Cap;
-        exportTableErrorHandlerOffsets: list nat; 
-        exportTableEntries: list ExportEntry
-    }.
-    
     (* Simplifying, for now, and eliding MMIO and shared objects. *)
     Inductive ImportEntry :=
     | ImportEntry_SealedCapToExportEntry (c: Cap)
     | ImportEntry_SentryToLibraryFunction (c: Cap).
 
     Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
-    Context {decode: list Byte -> @Inst _ _ _ capEncodeDecode}.
-    Context {pccNotInBounds : @EXNInfo Byte}.
-    Notation Machine := (@Machine Byte Key).
+    Context {decode: list Byte -> @Inst _ _ capEncodeDecode}.
+    Context {pccNotInBounds : EXNInfo}.
     Notation AddrOffset := nat (only parsing).
     Notation MachineStep := (MachineStep fetchAddrs decode pccNotInBounds).
     Notation PCC := Cap (only parsing).
     Notation SameThreadStep := (SameThreadStep fetchAddrs decode pccNotInBounds).
-    Notation RegisterFile := (@RegisterFile Byte Key).
     Notation ThreadStep := (ThreadStep fetchAddrs decode pccNotInBounds).
-    Notation Thread := (@Thread Byte Key).
 
     Record InitialThreadMetadata := {
         (* initThreadEntryPoint: Addr; *)
@@ -91,51 +57,78 @@ Module Configuration.
         initThreadCompartment: nat
     }.
 
-    (* TODO: sealing keys *)
+    (* TODO: MMIO *)
     Record Compartment := {
         compartmentPCC: Cap; (* Code and read-only data, including import entries *)
         compartmentCGP: option Cap; (* If None, then this compartment is a library. *)
+        compartmentImports: list ImportEntry;
+        compartmentErrorHandlers: list ErrorHandler; 
         compartmentExports: list ExportEntry;
-        compartmentImports: list ImportEntry
+        compartmentExportTableAddrs: list Addr; (* Addresses where export table entries are stored. *)
+        compartmentSealingCaps: list Cap; (* Sealing and unsealing caps *)
       }.
 
     Definition isLibrary (c: Compartment) :=
       match c.(compartmentCGP) with
       | None => true
       | _ => false
-      end.               
+      end.
+
+    (* Compartments can have sealed forward sentries to
+       compartment_switcher_entry. When in user mode, compartments'
+       MTCC points to exception_entry_asm. The switcher may pass
+       sealed backwards sentries to switcher_after_compartment_call
+       and error_handler_return.
+     *)
+    Record SwitcherConfig := {
+        Switcher_compartmentIdx: nat;
+        Switcher_AddrOf_compartment_switcher_entry: Addr;
+        Switcher_AddrOf_exception_entry_asm : Addr;
+        Switcher_AddrOf_switcher_after_compartment_call: Addr;
+        Switcher_AddrOf_error_handler_return: Addr;
+        Switcher_key: Key; (* The switcher's exclusive key *)
+    }.
+
     (* The initial state of a machine is defined in terms of its
        compartments, libraries, the trusted switcher, the initial
        state of the threads, and the initial memory. *)
     Record Config := {
         configCompartments: list Compartment;
-        configSwitcher: nat; (* Index of the switcher*)
         configThreads : list InitialThreadMetadata;
         configInitMemory: FullMemory;
-        configSwitcherKey: Key
+        configSwitcher: SwitcherConfig;
     }.
     Definition compartmentFootprint (compartment: Compartment) : list Addr :=
-      compartment.(compartmentPCC).(capAddrs) ++
-                                     (from_option capAddrs [] compartment.(compartmentCGP)).
+        compartment.(compartmentPCC).(capAddrs) ++
+        (from_option capAddrs [] compartment.(compartmentCGP)).
 
     Definition stackFootprint (t: InitialThreadMetadata) : list Addr :=
       t.(initThreadCSP).(capAddrs).
+
+    Definition exportTableFootprint (c: Compartment) :=
+      c.(compartmentExportTableAddrs).
 
     Definition capsOfImportEntry (ie: ImportEntry) :=
       match ie with
       | ImportEntry_SealedCapToExportEntry c => c
       | ImportEntry_SentryToLibraryFunction c => c
       end.                                                    
-    (* The set of capabilities a compartment initially has access to.
-       TODO: sealing keys 
-     *)
+    (* The set of capabilities a compartment initially has access to. *)
     Definition capsOfCompartment (c: Compartment) :=
-      [c.(compartmentPCC)] ++ (from_option (fun cgp => [cgp]) [] c.(compartmentCGP)) ++ (map capsOfImportEntry c.(compartmentImports)).
+      [c.(compartmentPCC)]
+      ++ (from_option (fun cgp => [cgp]) [] c.(compartmentCGP))
+      ++ (map capsOfImportEntry c.(compartmentImports))
+      ++ (c.(compartmentSealingCaps)).
 
     Definition AddrInCompartment (config: Config) (cid: nat) (addr: Addr): Prop :=
       exists compartment,
         nth_error config.(configCompartments) cid = Some compartment /\
-        In addr (compartmentFootprint compartment).
+          In addr (compartmentFootprint compartment).
+
+    Definition AddrInStack (config: Config) (tid: nat) (addr: Addr): Prop :=
+      exists meta,
+        nth_error config.(configThreads) tid = Some meta /\
+        In addr (stackFootprint meta).
 
     (* The total set of capabilities reachable from a compartment are
        the PCC+CGP+imports. *)
@@ -153,58 +146,105 @@ Module Configuration.
       forall a, ReachableRWXAddr mem (capsOfCompartment compartment) a ->
                     In a (compartmentFootprint compartment).
                 
-    (* TODO *)
     Definition ValidUnsealedCap (c: Cap) : Prop :=
       In c.(capCursor) c.(capAddrs) /\ c.(capSealed) = None.
 
+    (* Any sentries initially reachable from a compartment must be present in the import table. *)
     Definition SentriesOnlyFromImportTables (mem: FullMemory) (compartment: Compartment) : Prop :=
       forall cap,
         ReachableCap mem (capsOfCompartment compartment) cap ->
         isSentry cap = true ->
         In (ImportEntry_SentryToLibraryFunction cap) compartment.(compartmentImports).
 
-     Definition SealedDataCapsOnlyFromImportTables (mem: FullMemory) (compartment: Compartment) : Prop :=
-      forall cap,
-        ReachableCap mem (capsOfCompartment compartment) cap ->
-        isSealedDataCap cap = true ->
-        In (ImportEntry_SealedCapToExportEntry cap) compartment.(compartmentImports).
+    Definition SealedDataCapsOnlyFromImportTables (mem: FullMemory) (compartment: Compartment) : Prop :=
+     forall cap,
+       ReachableCap mem (capsOfCompartment compartment) cap ->
+       isSealedDataCap cap = true ->
+       In (ImportEntry_SealedCapToExportEntry cap) compartment.(compartmentImports).
 
-     Definition InLibraryFootprint (config: Config) (cap: Cap) :=
-       exists library, In library config.(configCompartments) /\
-                         isLibrary library = true /\
-                         Subset cap.(capAddrs) (compartmentFootprint library).
-     
-     Definition WFImportEntry (config: Config) (importEntry: ImportEntry) :=
-         ( forall cap, importEntry = ImportEntry_SentryToLibraryFunction cap ->
-                       isSentry cap = true /\
-                       InLibraryFootprint config cap) /\
-         (forall cap, importEntry = ImportEntry_SealedCapToExportEntry cap ->
-                      cap.(capSealed) = Some (inr config.(configSwitcherKey))).
-   
+    (* A capability is in a library of its addresses belong to a library *)
+    Definition InLibraryFootprint (config: Config) (cap: Cap) :=
+      exists library, In library config.(configCompartments) /\
+                      isLibrary library = true /\
+                        Subset cap.(capAddrs) (compartmentFootprint library).
+
+    Definition InExportTableFootprint (config: Config) (cap: Cap) :=
+      exists compartment, In compartment config.(configCompartments) /\
+                          Subset cap.(capAddrs) (exportTableFootprint compartment).
+
+    Definition ValidPCCPerms cap :=
+      Subset cap.(capPerms) [Perm.Exec;Perm.System;Perm.Load;Perm.Cap] (* No store, sealing, unsealing *) 
+      /\ ~(In Local cap.(capCanStore)). (* No SL *)
+
+    Definition ValidCGPPerms cap :=
+      Subset cap.(capPerms) [Perm.Exec;Perm.System;Perm.Load;Perm.Store;Perm.Cap] (* No sealing, unsealing *) 
+      /\ ~(In Local cap.(capCanStore)). (* No SL *)
+
+    Definition WFImportEntry (config: Config) (importEntry: ImportEntry) :=
+        (* All sentries to library functions are indeed sentries to library functions. *)
+        (forall cap, importEntry = ImportEntry_SentryToLibraryFunction cap ->
+                     isForwardSentry cap = true /\
+                     InLibraryFootprint config cap /\
+                     ValidPCCPerms cap  
+        ) /\
+        (* All sealed caps to export entries are sealed with the switcher key and point to an export table.*)
+        (forall cap, importEntry = ImportEntry_SealedCapToExportEntry cap ->
+                     cap.(capSealed) = Some (inr config.(configSwitcher).(Switcher_key)) /\
+                     ~(In Perm.Store cap.(capPerms)) /\
+                     InExportTableFootprint config cap
+        ).
+
+    Definition ValidSealingCap (c: Cap) :=
+      Subset c.(capPerms) [Perm.Sealing;Perm.Unsealing].
+    
     Record WFCompartment (config: Config) (c: Compartment) :=
-      { WFCompartment_ReachableRWXAddr:
-          InitialCompartmentAddressesOk config.(configInitMemory) c
-      ; WFCompartment_InitialCaps:
-          AllReachableCaps config.(configInitMemory) (capsOfCompartment c)
-      ; WFCompartment_PCC: c.(compartmentPCC).(capSealed) = None
+      {
+        (* All RWX addresses reachable by a compartment belong to the compartment's footprint. *)
+        WFCompartment_ReachableRWXAddr: InitialCompartmentAddressesOk config.(configInitMemory) c
+        (* All caps reachable by a compartment can be derived from its
+           initial auditable set of capabilities (PCC, CGP, import
+           entries, sealing caps). *)
+      ; WFCompartment_InitialCaps: AllReachableCaps config.(configInitMemory) (capsOfCompartment c)
+        (* Compartment's PCC is sensible. *)
+      ; WFCompartment_PCC: c.(compartmentPCC).(capSealed) = None /\
+                             ValidPCCPerms c.(compartmentPCC)
+        (* Compartment's CGP is sensible. *)
+      ; WFCompartment_CGP: forall cgp, c.(compartmentCGP) = Some cgp ->
+                                       cgp.(capSealed) = None /\
+                                       ValidCGPPerms cgp
+        (* All sentries reachable by a compartment were declared in import tables. *) 
       ; WFCompartment_Sentries: SentriesOnlyFromImportTables config.(configInitMemory) c
+        (* All sealed data caps were declared in import tables. *) 
       ; WFCompartment_SealedDataCap: SealedDataCapsOnlyFromImportTables config.(configInitMemory) c
       ; WFCompartment_ImportEntries: forall entry, In entry c.(compartmentImports) -> WFImportEntry config entry
+        (* Valid sealing/unsealing caps *) 
+      ; WFCompartment_SealingCaps: Forall ValidSealingCap c.(compartmentSealingCaps)
+      ; (* No one has access to seal with the switcher's key *)
+        WFCompartment_SwitcherSealingKey: Forall (fun c => ~(In Perm.Sealing c.(capPerms) /\
+                                                             In config.(configSwitcher).(Switcher_key) c.(capSealingKeys)))
+                                                 c.(compartmentSealingCaps)
       }.                                                                       
 
     Definition WFSwitcher (c: Compartment) : Prop := True.
-
+    Definition switcherIdx config := (config.(configSwitcher).(Switcher_compartmentIdx)).
+    
     Definition ConfigFootprints (config: Config) :=
         (* (configMMIOAddrs config) :: *)
           (map compartmentFootprint config.(configCompartments))
-            ++ (map stackFootprint config.(configThreads)).
+            ++ (map stackFootprint config.(configThreads))
+            ++ (map exportTableFootprint config.(configCompartments)).
 
     Record WFConfig (config: Config) := {
+        (* Compartments, stack, and export table occupy disjoint memory regions. *)
         WFConfig_footprintDisjoint: Separated (ConfigFootprints config);
         WFConfig_compartmentMemory: Forall (WFCompartment config) config.(configCompartments);
-        WFConfig_switcher: exists c, nth_error config.(configCompartments) config.(configSwitcher) = Some c /\
-                                WFSwitcher c
-        (* WFConfig_importEntriesOk: ImportEntriesOk config *)
+        WFConfig_switcher: exists c, nth_error config.(configCompartments) (switcherIdx config) = Some c /\
+                                       WFSwitcher c;
+        (* The switcher's unsealing key belongs only to the switcher's compartment *)
+        WFConfig_switcherSecret: forall c id cap, nth_error config.(configCompartments) id = Some c /\
+                                                In cap c.(compartmentSealingCaps) /\
+                                                In config.(configSwitcher).(Switcher_key) cap.(capUnsealingKeys) ->
+                                                id = switcherIdx config
     }.
 
     Record ThreadInv (meta: InitialThreadMetadata) (t: Thread) : Prop :=
@@ -226,32 +266,138 @@ Module Configuration.
         In addr (compartmentFootprint compartment) ->
         AddrHasProvenance config addr (Provenance_Compartment cid).
 
+    (* Memory is equivalent at an addr if the byte is the same and
+    the tag corresponding to the address is the same. *)
+
+    Definition MemEquivalentAtAddr (mem1 mem2: FullMemory) (addr: Addr) :=
+      readByte mem1 addr = readByte mem2 addr /\
+        (readTag mem1 (toCapAddr addr) = readTag mem2 (toCapAddr addr)).
+
+    (* Thread-local memory is equivalent if addresses in the
+       thread's stack are equivalent. *)
+    Definition MemEquivalentAtThread (config: Config) (tid: nat) (mem1 mem2: FullMemory) : Prop :=
+      forall addr, AddrInStack config tid addr ->
+                   MemEquivalentAtAddr mem1 mem2 addr.
+    Notation ThreadState := (UserContext * SystemContext)%type.
+
+    Definition InSystemMode (st: ThreadState) : Prop :=
+      In Perm.System (Spec.pcc st).(capPerms).
+    Definition ThreadInSystemMode (t: Thread) :=
+      In Perm.System t.(thread_userState).(thread_pcc).(capPerms).
+
+    Definition SwitcherCodeUnchanged (config: Config) (mem: FullMemory) : Prop :=
+      forall addr, AddrInCompartment config
+                     config.(configSwitcher).(Switcher_compartmentIdx) addr ->
+                   MemEquivalentAtAddr config.(configInitMemory) mem addr.
+
+    Definition ReadOnlyMemUnchanged (config: Config) (mem: FullMemory) : Prop :=
+      forall addr compartment,
+        In compartment config.(configCompartments) ->
+        In addr compartment.(compartmentPCC).(capAddrs) ->
+        MemEquivalentAtAddr config.(configInitMemory) mem addr.
+
+    Definition NonStackMemPreserved (config: Config) (tid: nat) (mem1 mem2: FullMemory): Prop :=
+      forall addr, ~(AddrInStack config tid addr) ->
+                   MemEquivalentAtAddr mem1 mem2 addr.
+
+    Definition ExportTablesUnchanged (config: Config) (mem: FullMemory) : Prop :=
+      forall addr compartment,
+        In compartment config.(configCompartments) ->
+        In addr compartment.(compartmentExportTableAddrs) ->
+        MemEquivalentAtAddr config.(configInitMemory) mem addr.
+
+    Record GlobalMemInvariants (config: Config) (mem: FullMemory) : Prop :=
+      { Inv_ReadOnlyMem: ReadOnlyMemUnchanged config mem
+      ; Inv_ExportTableMem: ExportTablesUnchanged config mem
+      }.
+
     Record GlobalInvariant (config: Config) (m: Machine) : Prop :=
     { Inv_curThread: m.(machine_curThreadId) < length m.(machine_threads)
     ; Inv_threads : Forall2 ThreadInv config.(configThreads) m.(machine_threads)
+    (* ; Inv_mem: GlobalMemInvariants config m.(machine_memory) *) (* TODO: prove these *)
     }.
 
-    (* TODO *)
-    Context {LookupExportTableCompartment: Config -> Cap -> FullMemory -> option nat}.
+    (* Based on the initial configuration, we can statically determine
+       whether a capability corresponds to a compartment's export table
+       entry and if so, which compartment and which entry.
+       TOOD: add a well-formedness condition as below.
+     *)
+    Context (LookupExportTableCompartmentId: Config -> Cap -> option (nat * nat)).
+    Definition WFLookupExportTableCompartmentId :=
+      forall config cap cid eid,
+        LookupExportTableCompartmentId config cap = Some (cid,eid) ->
+        exists compartment entry,
+          nth_error config.(configCompartments) cid = Some compartment /\
+          Subset cap.(capAddrs) compartment.(compartmentExportTableAddrs) /\
+          nth_error compartment.(compartmentExports) eid = Some entry.  
+
+    Definition LookupExportTableCompartment (config: Config) (cap: Cap) :=
+      match LookupExportTableCompartmentId config cap with
+      | Some (cid, _) =>
+          nth_error config.(configCompartments) cid
+      | None => None
+      end.
+
+    Definition LookupExportTableCompartmentAndEntry (config: Config) (cap: Cap) :=
+     match LookupExportTableCompartmentId config cap with
+     | Some (cid, eid) =>
+         match nth_error config.(configCompartments) cid with
+         | Some compartment => 
+             match nth_error compartment.(compartmentExports) eid with
+             | Some entry => Some (compartment, entry)
+             | None => None 
+             end
+         | None => None 
+         end
+     | None => None
+     end.
+
+    Definition mkCSP' (addrs: list Addr) (cursor: Addr) : Cap :=
+      {| capSealed := None;
+         capPerms := [Perm.Load;Perm.Store;Perm.Cap];
+         capCanStore := [Local;NonLocal];
+         capCanBeStored := [Local];
+         capSealingKeys := [];
+         capUnsealingKeys := [];
+         capAddrs := addrs;
+         capKeepPerms := [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
+         capKeepCanStore := [Local;NonLocal];
+         capKeepCanBeStored := [Local;NonLocal]; 
+         capCursor := cursor 
+      |}. 
+
+    Definition mkCSP (base: Addr) (len: nat) (cursor: Addr) : Cap :=
+      mkCSP' (seq base len) cursor.
+
+    Definition ValidCSP (csp: Cap) :=
+      exists base len addr,
+      In addr (seq base len) /\
+      csp = mkCSP base len addr.
 
     Record ValidTrustedStackFrame
       (config: Config)
-      (mem: FullMemory) (frame: TrustedStackFrame) (meta: InitialThreadMetadata)
+      (frame: TrustedStackFrame) (meta: InitialThreadMetadata)
       (cid: nat): Prop :=
-      { ValidTrustedStackFrame_calleeCap:
-        LookupExportTableCompartment config
-          frame.(trustedStackFrame_calleeExportTable)
-          mem = Some cid
+      { (* Trusted stack frame should point to an export table. *)
+        ValidTrustedStackFrame_calleeCap:
+        exists eid, LookupExportTableCompartmentId config frame.(trustedStackFrame_calleeExportTable)
+                    = Some (cid, eid)
+        (* Trusted stack CSP should always be a valid CSP that's a subset of the initial CSP. *)
       ; ValidTrustedStackFrame_CSP :
+          ValidCSP frame.(trustedStackFrame_CSP) /\
           Restrict meta.(initThreadCSP) frame.(trustedStackFrame_CSP)
-      }.                                                                                 
+      }.
+    Definition ValidTrustedStack (config: Config) (trustedStack: TrustedStack) : Prop :=
+     (forall frame, In frame trustedStack.(trustedStack_frames) ->
+               ValidCSP frame.(trustedStackFrame_CSP) /\
+               (exists compartment entry, 
+                   LookupExportTableCompartmentAndEntry config frame.(trustedStackFrame_calleeExportTable) = Some (compartment, entry) /\
+                   compartment.(compartmentCGP) <> None)).
+     
 
-    Definition ValidCSP (csp: Cap) :=
-      csp.(capSealingKeys) = [] /\
-      csp.(capUnsealingKeys ) = [] /\
-      csp.(capSealed) = None.
     Record ValidInitialThread (config: Config) (meta: InitialThreadMetadata) (t: Thread) : Prop :=
       { ValidInitialThread_caps:
+        (* Initially, a thread can only access the caps corresponding to its initial compartment along with the CSP *)
         exists compartment,
           nth_error config.(configCompartments) meta.(initThreadCompartment) = Some compartment /\
             forall c,
@@ -259,35 +405,58 @@ Module Configuration.
               ReachableCap config.(configInitMemory)
                            (meta.(initThreadCSP)::capsOfCompartment compartment)
                            c
+        (* Threads are initialized with an initial call frame belonging to the initial compartment. *)
       ; ValidInitialThread_trustedStack:
           exists frame, t.(thread_systemState).(thread_trustedStack).(trustedStack_frames) =
                           [frame] /\
-                          ValidTrustedStackFrame config config.(configInitMemory) frame meta meta.(initThreadCompartment)
-      ; ValidInitialThread_stackUntagged: (* No caps in initial stack --> TODO: fix spec*)
+                          ValidTrustedStackFrame config frame meta meta.(initThreadCompartment)
+        (* No caps in initial stack --> TODO: fix spec *)
+      ; ValidInitialThread_stackUntagged: 
         forall capa, Subset (seq (fromCapAddr capa) ISA_CAPSIZE_BYTES) (stackFootprint meta) ->
                      readTag config.(configInitMemory) capa = false
       ; ValidInitialCSP: ValidCSP meta.(initThreadCSP)
       }.
 
-      Record ValidMEPCC (mepcc: Cap) : Prop :=
-      { MEPCC_HasSystemPerm: In Perm.System mepcc.(capPerms) }.
+    Definition mkUnsealedPCC (addrs: list Addr) (cursor: Addr) := 
+      {| capSealed := None;
+         capPerms := [Perm.Exec;Perm.System;Perm.Load;Perm.Cap];
+         capCanStore := [NonLocal];
+         capCanBeStored := [Local; NonLocal]; 
+         capSealingKeys := [];  
+         capUnsealingKeys := [];
+         capAddrs := addrs;          
+         capKeepPerms := [Perm.Exec;Perm.System;Perm.Load;Perm.Cap;Perm.Sealing;Perm.Unsealing];
+         capKeepCanStore := [Local;NonLocal];
+         capKeepCanBeStored := [Local;NonLocal];
+         capCursor := cursor; 
+      |}.
 
-      Record UserModeOk (t: Thread ) : Prop :=
-        { MEPCC_ok: ValidMEPCC t.(thread_systemState).(thread_mepcc) }.
+    Definition switcherFootprint (config: Config) :=
+      match nth_error config.(configCompartments) config.(configSwitcher).(Switcher_compartmentIdx) with
+      | Some compartment => compartment.(compartmentPCC).(capAddrs)
+      | None => []                                             
+      end.
 
-      Definition ThreadHasSystemPerm (t: Thread) : Prop :=
-        In Perm.System t.(thread_userState).(thread_pcc).(capPerms).
+    Definition MTCC (config: Config) : Cap :=
+      mkUnsealedPCC (switcherFootprint config) config.(configSwitcher).(Switcher_AddrOf_exception_entry_asm). 
 
-      Definition UserModeInvariant (m: Machine) : Prop :=
-        forall thread, In thread m.(machine_threads) ->
-                       (~ ThreadHasSystemPerm thread) ->
-                       UserModeOk thread.
+    (* MTCC initially points to the switcher's exception entry path *)
+    Record UserModeOk (config: Config) (t: Thread ) : Prop :=
+      { MTCC_ok: t.(thread_systemState).(thread_mtcc) = (MTCC config)}.
+
+    Definition ThreadHasSystemPerm (t: Thread) : Prop :=
+      In Perm.System t.(thread_userState).(thread_pcc).(capPerms).
+
+    Definition UserModeInvariant (config: Config) (m: Machine) : Prop :=
+      forall thread, In thread m.(machine_threads) ->
+                     (~ ThreadHasSystemPerm thread) ->
+                     UserModeOk config thread.
                     
     Record ValidInitialState (config: Config) (m: Machine) : Prop :=
       { ValidInit_memory: m.(machine_memory) = config.(configInitMemory)
       ; ValidInit_threads: Forall2 (ValidInitialThread config) config.(configThreads) m.(machine_threads) 
       ; ValidInit_invariant: GlobalInvariant config m
-      ; ValidInit_userMode: UserModeInvariant m
+      ; ValidInit_userMode: UserModeInvariant config m
       }.
 
     Hint Resolve Inv_curThread : invariants.
@@ -307,9 +476,11 @@ Module Configuration.
       rewrite nth_error_app. rewrite length_map.
       case_match; simplify_nat.
       saturate_list.
-      rewrite nth_error_map.
+      rewrite nth_error_app. rewrite length_map.
       replace (length (configCompartments config) + tid - length (configCompartments config)) with tid by lia.
-      rewrite hthread. cbn. eexists; split; eauto.
+      case_match; simplify_nat; auto.
+      rewrite nth_error_map.
+      rewrite hthread. auto.
     Qed.
 
     Lemma compartmentInConfigFootprint:
@@ -327,6 +498,12 @@ Module Configuration.
     Qed.
 
     Section Proofs.
+
+      Definition AddrInSwitcherFootprint (config: Config) (addr: Addr) :=
+        AddrInCompartment config (switcherIdx config) addr.
+      Definition AddrsInSwitcherFootprint (config: Config) (addr: list Addr) :=
+        forall a, In a addr -> AddrInCompartment config (switcherIdx config) a.
+
       Ltac saturate_footprints := 
         repeat match goal with
           | H: nth_error (configThreads _) _ = Some ?thread,
@@ -468,6 +645,955 @@ Module Configuration.
   Hint Resolve Inv_curThread : invariants.
 End Configuration.
 
+(* This module describes the pre- and post-conditions of the switcher
+   (https://github.com/CHERIoT-Platform/cheriot-rtos/blob/main/sdk/core/switcher/entry.S).
+
+   We focus on the following entry points of the switcher:
+     - compartment_switcher_entry: we can assume compartments have a
+       forward sentry to this point.
+     - exception_entry_asm: in user mode, MTCC points here. So upon
+       exception, we jump to the switcher's exception entry point.
+
+   The switcher passes backwards sentries to:
+      - switcher_after_compartment_call
+      - handle_error_handler_return
+   We assume that compartments may have long-lasting capabilities to
+   these return points.
+
+   We define pre- and post-conditions in terms of how the switcher
+   updates the registers and memory as a function of the state at time
+   of call/ret into the switcher. We want to allow interrupts in the
+   switcher where possible (basically everywhere other than the
+   interrupt handler). Thus, the switcher needs to be correct even
+   when other threads run concurrently.
+
+   We obtain a notion of atomicity by enforcing that the switcher
+   operates only on register file, thread-local stack memory regions,
+   and read-only global memory. This ensures that the switcher behaves
+   as if it were atomic, as the effect of its actions on memory are
+   disjoint from other threads' effects, and maintains straightforward
+   postconditions that are a function only of the state at time of
+   call/ret.
+
+   Notes:
+   - We have specified the behavior of the interrupt handler as
+     switching threads atomically.
+   - The MTDC register nominally points to the trusted stack, which
+     is a first-class citizen in our spec.
+   - Instructions in the switcher might use the MTDC register (and
+     other system registers). We'll probably want to add more system
+     registers or register-spill-areas to the trusted
+     stack. Instructions that clobber the MTDC or register spill
+     area used in context switching should be viewed as atomic
+     steps, with interrupts disabled.
+ *)
+Module SwitcherProperty.
+  Import ListNotations.
+  Import Configuration.
+  Import Separation.
+
+  Section WithContext.
+    Context [ISA: ISA_params].
+    Context {machineTypeParams: MachineTypeParams}.
+    Context {capEncodeDecode: CapEncodeDecode}.
+    Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
+    Context {fetchAddrsOk: FetchAddrsOk fetchAddrs}.
+    Context {pccNotInBounds : EXNInfo}.
+    Notation AddrOffset := nat (only parsing).
+    Notation PCC := Cap (only parsing).
+    Notation State := (Machine * Trace)%type.
+    Context {LookupExportTableCompartmentId: Config -> Cap -> option (nat * nat)}.
+    Notation LookupExportTableCompartment := (LookupExportTableCompartment LookupExportTableCompartmentId).
+    Notation LookupExportTableCompartmentAndEntry := (LookupExportTableCompartmentAndEntry LookupExportTableCompartmentId).
+
+    Notation ValidInitialState := (@ValidInitialState _ _ _ LookupExportTableCompartmentId).
+    Notation ValidInitialThread := (@ValidInitialThread _ _ _ LookupExportTableCompartmentId).
+    Context {decode: list Byte -> @Inst _ _ capEncodeDecode}.
+    Notation MachineStep := (MachineStep fetchAddrs decode pccNotInBounds).
+    Notation ThreadStep := (ThreadStep fetchAddrs decode pccNotInBounds).
+    Notation ThreadState := (UserContext * SystemContext)%type.
+    Notation ValidTrustedStack := (ValidTrustedStack LookupExportTableCompartmentId).
+    Section Utils.
+      (* Notation to specfy properties of register files. *)
+      Definition RfSpecT : Type := list (nat * (CapOrBytes -> Prop)).
+      Definition RegP (rf: RegisterFile) (idx : nat) (P: CapOrBytes -> Prop) :=
+        exists v, nth_error rf idx = Some v /\ P v.
+
+      (* A register file satisfies a spec if:
+         - It's a valid rf.
+         - All registers listed in the spec satisfy the listed property.
+         - All other registers satisfy the default property.
+       *)
+      Record RfSpec (spec: RfSpecT) (rf: RegisterFile) (default: nat -> CapOrBytes -> Prop) : Prop :=
+        { RfSpec_ValidRF: ValidRf rf
+        ; RfSpec_props : forall idx p, In (idx, p) spec -> RegP rf idx p
+        ; RfSpec_other: forall idx, idx < ISA_NREGS ->
+                                    (~(exists p, In (idx, p) spec)) ->
+                                    RegP rf idx (default idx)
+        }.
+
+          Definition ValidUntrustedCSP (cap: Cap) :=
+            (* Has SL permissions -- TODO: should SL not have NonLocal? *)
+            In Local cap.(capCanStore) /\
+            cap.(capSealed) = None.
+
+          (* Assumes Local and Store permissions are checked elsewhere *)
+          Definition WriteStack (mem: FullMemory) (authCap: Cap) (v: CapOrBytes) :=
+            (* Addresses are authorized. *)
+            Subset (seq (toCapAddr (authCap.(capCursor))) ISA_CAPSIZE_BYTES) authCap.(capAddrs) /\
+            (* Memory contains the new value. *)
+              readCap mem (toCapAddr (authCap.(capCursor))) = v /\
+            (* If the auth cap does not have cap permissions, then can't write caps. *)
+            (~(In Perm.Cap authCap.(capPerms)) -> exists bytes, v = inr bytes) /\
+            In Perm.Store authCap.(capPerms).
+
+         (* Relaxing and allowing tags to be dropped here. *)
+          Definition readMemTagCapOk (mem: FullMemory) (authCap: Cap) (res: CapOrBytes) : Prop :=
+            authCap.(capSealed) = None /\
+            In Perm.Load authCap.(capPerms) /\ 
+            Subset (seq authCap.(capCursor) ISA_CAPSIZE_BYTES) authCap.(capAddrs) /\
+            match readCap mem authCap.(capCursor) with
+            | inl cap => 
+               (In Perm.Cap authCap.(capPerms) ->
+                res = inl (attenuate authCap cap)) /\
+               ((In Perm.Cap authCap.(capPerms) -> False) ->
+                res = inr (capToBytes cap))
+            | inr bytes =>
+               res = inr bytes 
+            end.
+
+    End Utils.
+    
+    Section WithConfig.
+      Variable config: Config.
+      Variable (pf_wf_config: WFConfig config).
+      Notation MTCC := (MTCC config).
+
+      Definition CompartmentCallPCC : Cap :=
+        mkUnsealedPCC (switcherFootprint config)
+          config.(configSwitcher).(Switcher_AddrOf_compartment_switcher_entry).
+      Definition CompartmentReturnPCC : Cap :=
+        mkUnsealedPCC (switcherFootprint config)
+          config.(configSwitcher).(Switcher_AddrOf_switcher_after_compartment_call).
+      Definition ErrorHandlerReturnPCC : Cap :=
+        mkUnsealedPCC (switcherFootprint config)
+          config.(configSwitcher).(Switcher_AddrOf_error_handler_return). 
+
+      (* TODO: move these under Configuration and prove they are inductively preserved. *)
+      Record UserModeInvariants (meta: InitialThreadMetadata) (t: Thread) : Prop :=
+      { UserInv_MTCC := t.(thread_systemState).(thread_mepcc) = MTCC
+      ; UserInv_TrustedStack := ValidTrustedStack config t.(thread_systemState).(thread_trustedStack)
+      }.    
+      
+      Record ThreadInv' (meta: InitialThreadMetadata) (t: Thread) : Prop :=
+      { Inv_validRf : ValidRf t.(thread_userState).(thread_rf)
+      ; Inv_userMode: ~(ThreadInSystemMode t) -> UserModeInvariants meta t
+      }.                                                                    
+
+      Record GlobalInvariants (m: Machine) : Prop :=
+      { Inv_Mem: GlobalMemInvariants config m.(machine_memory)
+      ; Inv_Threads: Forall2 ThreadInv' config.(configThreads) m.(machine_threads)
+      }.
+
+      Section WithSwitcherParams.
+        (* TODO: consider generalizing into e.g. argument registers,
+        caller/callee-saved registers, return registers, etc. *)
+        Record ConcreteRf :=
+          { rf_ra : nat;
+            rf_gp : nat;
+            rf_sp : nat;
+            rf_tp: nat;
+            rf_t0: nat;
+            rf_t1: nat; (* Sealed cap to callee export table entry *)
+            rf_t2: nat; 
+            rf_s0: nat;
+            rf_s1: nat;
+            rf_a0 : nat;
+            rf_a1 : nat;
+            rf_a2 : nat;
+            rf_a3 : nat;
+            rf_a4 : nat;
+            rf_a5 : nat;
+          }.
+
+        Definition SWITCHER_SEALED_ARG_REG := rf_t1.
+
+        (* TODO: constrain spill slot appropriately, or generalize. *)
+        Class SWITCHER_PARAMS (rf: ConcreteRf) :=
+          { SPILL_SLOT_cs0 : nat; (* < 4 *)
+            SPILL_SLOT_cs1 : nat; (* < 4 *)
+            SPILL_SLOT_pcc : nat; (* < 4 *)
+            SPILL_SLOT_cgp : nat; (* < 4 *)
+            STACK_ENTRY_RESERVED_SPACE: nat;
+            zeroByte: Byte;
+            compartmentFailValue: list Byte;
+            notEnoughStackValue: list Byte;
+            exnDecode: ExnInfo -> (Bytes * Bytes) (* mcause * mtval *);
+            capCursorOfBytes: Bytes -> Addr
+          }.
+        Definition SPILL_SLOT_SIZE := 4 * ISA_CAPSIZE_BYTES. 
+
+        (* NB: this could be left abstract, as long as we take care to
+           zero areas of the stack on cross-compartment paths. But for
+           clarity, we make this concrete for now.
+         *)
+        Definition rfidx :=
+          {| rf_ra := 1; 
+             rf_gp := 2;
+             rf_sp := 3;
+             rf_tp := 4;
+             rf_t0 := 5;
+             rf_t1 := 6;
+             rf_t2 := 7;
+             rf_s0 := 8;
+             rf_s1 := 9;
+             rf_a0 := 10;
+             rf_a1 := 11;
+             rf_a2 := 12;
+             rf_a3 := 13;
+             rf_a4 := 14;
+             rf_a5 := 15 
+          |}.
+
+        (* Context {rfidx: ConcreteRf}. *)
+        Context {switcher: SWITCHER_PARAMS rfidx}.
+        Definition zeroBytes : list Byte :=
+          map (fun _ => zeroByte) (seq 0 ISA_CAPSIZE_BYTES). 
+        Definition capCursorOfCapOrBytes (v: CapOrBytes) := 
+          match v with
+          | inl cap => cap.(capCursor)
+          | inr bytes => capCursorOfBytes bytes 
+          end.
+
+
+        Definition mtval exnInfo := snd (exnDecode exnInfo).
+        Definition mcause exnInfo := fst (exnDecode exnInfo).
+
+        (* The error handler returns a IRQ-enabling reverse sentry to
+           the error handler return address of the switcher. *)
+        Definition errorHandlerReturnCap : Cap :=
+          setCapSealed ErrorHandlerReturnPCC (Some (inl RetEnableInterrupt)).
+
+        (* After a compartment call, the switcher returns a backwards
+           sentry to .Lswitcher_after_compartment_call. *)
+        Definition switcherAfterCompartmentCallCap (istatus: InterruptStatus): Cap :=
+          let sentry := match istatus with
+                        | InterruptsEnabled => RetEnableInterrupt
+                        | InterruptsDisabled => RetDisableInterrupt
+                        end in 
+          setCapSealed CompartmentReturnPCC (Some (inl sentry)).
+
+        (* While in the switcher, we have ASR, our PCC is in the
+           switcher's footprint, and fetch succeeds.
+           Fetch is assumed to succeed especially in the exception
+           handling path of the switcher, as MEPCC is clobbed along
+           this path.
+         *)
+        Record In_Switcher_Invariant
+          (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
+        { EE_Inv_Mode: InSystemMode st
+        ; EE_Inv_SwitcherPCC: AddrsInSwitcherFootprint config (pcc st).(capAddrs)
+        ; EE_Inv_fetchAddrs: fetchAddrsInBounds fetchAddrs st
+        }.
+
+        (* The switcher depends only on the thread's stack and
+           read-only memory (switcher's code and export tables).
+
+           TODO: in the RTOS, the switcher calls the scheduler, which
+           is outside the switcher's code region. We could consider
+           relaxing the below and make it depend on the stack and all
+           read-only memory (but the switcher's behavior should not be
+           affected by other compartment's read-only
+           memory). Alternatively, we could special case the
+           scheduler.
+         *)
+        Definition SwitcherMemEquivAtThread (tid: nat) (mem1 mem2: FullMemory) : Prop :=
+          MemEquivalentAtThread config tid mem1 mem2 /\
+          SwitcherCodeUnchanged config mem2 /\
+          ExportTablesUnchanged config mem2.
+
+        Definition ThreadStepOk st1 st2 :=
+          exists ev, ThreadStep st1 (st2, ev).
+
+        Section UnwindingStack.
+          (* Pop off the top stack frame and return to the previous
+           * caller. This is only possible if there is at least one stack fram left.
+           * After unwinding the stack, the switcher:
+           * - restores callee-saved values s0/s1
+           * - restores the csp at time of cross-compartment call
+           * - restores saved cgp
+           * - restores saved pcc
+           * - zeroes non-return registers
+           * - zeroes the stack
+           *)
+          (* The lowest address. *)
+          Definition BaseAddr (c: Cap) (addr: Addr) : Prop := 
+            In addr c.(capAddrs) /\
+            (forall a', In a' c.(capAddrs) -> addr <= a').
+
+          (* All addresses from base (inclusive) to top (noninclusive)
+          along with their associated tags are zeroed/invalidated. *)
+          Definition zeroedStack (base top: Addr) (mem: FullMemory) :=
+            (forall addr, base <= addr < top ->
+                     readByte mem addr = zeroByte /\
+                     readTag mem (toCapAddr addr) = false).
+
+          (* The trusted stack's csp stores the csp at time of caller
+             invocation after spilling callee-saved registers (that
+             is, the csp decremented by SPILL_SLOT_SIZE with PCC,CGP,
+             and callee-saved registers saved onto the stack).
+
+             To unwind the stack, we must zero the stack memory from
+             stack base to tcsp + SPILL_SLOT_SIZE.
+           *)
+          Definition unwindStackOk
+            (tcsp: Cap) (mem: FullMemory) (mem': FullMemory) :=
+            exists baseAddr,
+            BaseAddr tcsp baseAddr /\
+            (* Zero stack *)
+            (zeroedStack baseAddr (tcsp.(capCursor) + SPILL_SLOT_SIZE) mem') /\
+            (* Stack had permission to store in the range *)
+            (forall addr, baseAddr <= addr < (tcsp.(capCursor) + SPILL_SLOT_SIZE) ->
+                          In addr tcsp.(capAddrs)) /\
+            (* All other memory is unchanged. *)
+            (forall addr, (baseAddr <= addr < tcsp.(capCursor) + SPILL_SLOT_SIZE -> False) ->
+                     readByte mem' addr = readByte mem addr /\
+                     readTag mem' (toCapAddr addr) = readTag mem (toCapAddr addr)).
+
+          (* Assumes auth cap is a valid CSP and checked elsewhere. *)
+          Definition ReadStack (mem: FullMemory) (authCap: Cap) (v: CapOrBytes) :=
+            Subset (seq (toCapAddr (authCap.(capCursor))) ISA_CAPSIZE_BYTES) authCap.(capAddrs) /\
+            readCap mem (toCapAddr (authCap.(capCursor))) = v.
+
+          Definition PostRf_UnwindStack
+            (tcsp: Cap) (* Topmost trusted stack frame's csp *)
+            (init_mem: FullMemory)
+            (ret0: CapOrBytes -> Prop)
+            (ret1: CapOrBytes -> Prop)
+            : RfSpecT :=
+            let readCapAtCSPOffset offset :=
+              ReadStack init_mem (updateCapCursor tcsp (Nat.add (offset * ISA_CAPSIZE_BYTES))) in 
+              (* TODO: optionally relax ra *)
+            [ (rf_ra rfidx, readCapAtCSPOffset SPILL_SLOT_pcc)
+            ; (rf_gp rfidx, readCapAtCSPOffset SPILL_SLOT_cgp)
+              (* Restore caller stack pointer and increment by SPILL_SLOT_SIZE. *)
+            ; (rf_sp rfidx, eq (inl (updateCapCursor tcsp (Nat.add SPILL_SLOT_SIZE))))
+              (* Restore callee saved registers. *)
+            ; (rf_s0 rfidx, readCapAtCSPOffset SPILL_SLOT_cs0)
+            ; (rf_s1 rfidx, readCapAtCSPOffset SPILL_SLOT_cs1)
+            ; (rf_a0 rfidx, ret0)
+            ; (rf_a1 rfidx, ret1)
+            ].
+  
+          Definition PostRfSpec_UnwindStack
+            (frame: TrustedStackFrame)
+            (init_mem: FullMemory)
+            (rf: RegisterFile)
+            (ret0: CapOrBytes -> Prop)
+            (ret1: CapOrBytes -> Prop) :=
+            RfSpec (PostRf_UnwindStack frame.(trustedStackFrame_CSP) init_mem ret0 ret1)
+            rf
+            (fun _ => eq (inr zeroBytes)).
+
+          (* ------------ POSTCONDITION -----------------------------
+           * Pop off the top stack frame and return to the previous
+           * caller. This is only possible if there is at least one stack fram left.
+           * 
+           * After unwinding the stack:
+           * Register file:
+             - s0/s1: callee-saved values restored from the stack.
+             - cgp: cgp restored from the stack.
+             - csp: restored from trusted stack to csp at time of cross-compartment call.
+             - ra: new PCC restored from the stack. This could be zeroed but is not in the current implementation.
+             - a0/a1: return values.
+             - all other registers: zeroed.
+           * PCC: restored from the stack
+           * Stack: zeroed from base up to and including spilled registers.
+           * Trusted stack: pop topmost frame. Ensure mtcc is equal to MTCC.
+           *
+           * The switcher should not trust or preserve any of the initial
+           * register file values, other than return values in ret0 and ret1.
+           * Notably, stack zeroing is based on the trusted stack csp.
+           * 
+           * TODO: check interrupt status 
+           * TODO: CSR_MSHWM 
+           *)
+          Definition Post_UnwindStackBase
+            (ret0: RegisterFile -> CapOrBytes -> Prop)
+            (ret1: RegisterFile -> CapOrBytes -> Prop)
+            (tid: nat) (st_init: ThreadState) (st: ThreadState)
+            : Prop :=
+            exists frame frame' frames exnInfo,
+              let tcsp := frame.(trustedStackFrame_CSP) in
+              ValidCSP tcsp /\
+              trustedStack_frames (thread_trustedStack (sts st_init)) = frame::frame'::frames /\
+              sc st = ({| thread_mepcc := (pcc st); (* TODO: relax this. *)
+                          thread_mtcc := MTCC; 
+                          thread_exceptionInfo := exnInfo;
+                          thread_trustedStack := Build_TrustedStack (frame'::frames);
+                          thread_alive := thread_alive (sts st_init)
+                       |}, ints st_init) /\
+              (* mem': Zero stack region of callee. *)
+              unwindStackOk tcsp (mem st_init) (mem st) /\
+              (* Restore PCC from stack. *)
+              (let readCapAtCSPOffset offset :=
+                 ReadStack (mem st_init) (updateCapCursor tcsp (Nat.add (offset * ISA_CAPSIZE_BYTES))) in 
+                 readCapAtCSPOffset SPILL_SLOT_pcc (inl (pcc st))) /\
+              (* rf: restore callee-saved registers and return arguments. *)
+              (PostRfSpec_UnwindStack frame (mem st_init) (rf st)
+                                      (ret0 (rf st_init)) (ret1 (rf st_init))
+              ).
+
+          (* Return compartmentFailValue for a forced unwind. *)
+          Definition Post_UnwindStackForced
+            (tid: nat) (st_init: ThreadState) (st: ThreadState) :=
+            Post_UnwindStackBase
+              (fun rf_init => eq (inr compartmentFailValue))
+              (fun rf_init => eq (inr zeroBytes))
+              tid st_init st.
+
+          Definition Post_UnwindStackReturnOk
+            (tid: nat) (st_init: ThreadState) (st: ThreadState) :=
+            Post_UnwindStackBase
+              (fun rf_init v => RegP rf_init (rf_a0 rfidx) (eq v))
+              (fun rf_init v => RegP rf_init (rf_a1 rfidx) (eq v))
+              tid st_init st.
+
+          Definition ThreadDead (st: ThreadState) :=
+            (sts st).(thread_alive) = ThreadDead.
+
+          (* Switcher invariant should hold for any memory that is
+           * equivalent to st_init at the thread's stack + switcher + export-table regions.
+           *)
+          Definition SwitcherEntry_Invariant
+            (tid: nat) (st_init: ThreadState) (st: ThreadState) :=
+            forall mem',
+            SwitcherMemEquivAtThread tid (mem st_init) mem' ->
+            In_Switcher_Invariant tid st_init ((fst (uc st), mem'), sc st).
+
+        End UnwindingStack.
+
+        Section ExceptionHandler.
+          Definition ExceptionEntry_Invariant
+            (tid: nat) (st_init: ThreadState) (st: ThreadState) :=
+            SwitcherEntry_Invariant tid st_init st.
+
+          (* Initially, the pcc should be equal to the user's MTCC 
+             (which points to the exception entry point of the switcher)
+             and the invariant should hold, for any memory that is
+             equivalent at stack+switcher addresses.
+           *)
+          Record ExceptionEntry_Pre (tid: nat) (st: ThreadState) : Prop :=
+            { EEPre_PCCAddr: pcc st = MTCC
+            ; EEPre_TrustedStack: ValidTrustedStack config (sts st).(thread_trustedStack)
+            ; EEPre_Invariant: ExceptionEntry_Invariant tid st st 
+            }.
+
+          (* ---------------- POSTCONDITION ----------------------- *)
+          (* Corresponds to exception_entry_asm.
+             Notes:
+             - Currently this path clobbers mtdc and the trusted
+               stack's register spill context. To enable interrupts, we
+               probably want to use mscratchc and a disjoint spill
+               context.
+             - The current implementation reads/writes from an
+               untrusted csp that might point to globals.
+             - TODO: Here, we assume we checked the integrity of the csp.
+
+             If the switcher returns back to user mode after an exception, then either:
+             1) There was an error handler on the topmost frame and
+                the PCC points to the error handler's entrypoint.
+                Register file: 
+                - ra: backwards sentry to switcher's error handler return.
+                - gp: pristine target compartment cgp, as pointed to
+                      by the trusted stack's callee export table.
+                - sp:
+                  - stackless: target compartment stack pointer at
+                    time of invocation (as stored in the trusted
+                    stack), from base to tcsp's cursor. Address is set to tcsp's base.
+                    -> NB!!: this means a compartment can regain stack caps after an exception!.
+                  - stackful: untrusted CSP, validated to be on the
+                    stack, with a register spill frame below.
+                - a0,a1,a2:
+                  i) stackful:
+                     - a0 = invocation stack with register spill frame there and above
+                     - a1 = mcause
+                     - a2 = mtval
+                  ii) stackless: a0 = mcause
+                     - a1 = mtval
+                     - a2 = zero
+                - all other registers: zeroed.
+
+                PCC: valid PCC at one of the error handler's entrypoints (computed
+                by taking compartment PCC and incrementing by an
+                offset).
+
+                Stack: if stackful, store register spill frame below
+                where csp points (taking PCC to be what MEPCC points
+                to). If stackless, stack is unchanged.
+
+                TrustedStack: increment error counter of topmost frame.
+                Interrupt status: enabled.
+
+             2) An error handler does not exist and we are not the
+                bottommost frame. We unwind the stack and return to the
+                previous caller.
+                - Zero the stack
+                - Pop a frame from the trusted stack, leaving registers
+                  in the state expected by the caller of a
+                  cross-compartment call
+                  + pcc := csp[SPILL_SLOT_PCC]
+                  + cgp := csp[SPILL_SLOT_cgp]
+                  + s0 := csp[SPILL_SLOT_cs0]
+                  + s1 := csp[SPILL_SLOT_cs1]
+                  + a0 = -ECOMPARTMENTFAIL
+                  + other registers are zero
+             3) An error handler does not exist and we are at the bottommost frame.
+                - Exit the thread? TODO.
+           *)
+
+          Definition NREGS_TO_SPILL := 15.
+          (* registers + PCC *)
+          Definition SPILL_FRAME_SIZE := (NREGS_TO_SPILL + 1) * ISA_CAPSIZE_BYTES.
+
+          Definition ExceptionEntry_PostRf_Stackful
+            (csp: Cap)  (* untrusted csp at time of invocation *)
+            (cgp: Cap)  (* pristine cgp *)
+            (exnInfo: ExnInfo)
+            : RfSpecT :=
+            (* Make space for the register save frame on the stack. *)
+            let newCSP := updateCapCursor csp (Nat.sub SPILL_FRAME_SIZE) in 
+            [ (rf_ra rfidx, eq (inl errorHandlerReturnCap))
+              ; (rf_gp rfidx, eq (inl cgp))
+              ; (rf_sp rfidx, eq (inl newCSP))
+              ; (rf_a0 rfidx, eq (inl newCSP))
+              ; (rf_a1 rfidx, eq (inr (mcause exnInfo)))
+              ; (rf_a2 rfidx, eq (inr (mtval  exnInfo)))
+            ].
+  
+          Definition ExceptionEntry_PostRfSpec_Stackful
+            (csp: Cap)
+            (compartment: Compartment)
+            (exnInfo: ExnInfo)
+            (rf: RegisterFile) :=
+            exists cgp, compartment.(compartmentCGP) = Some cgp /\
+            RfSpec (ExceptionEntry_PostRf_Stackful csp cgp exnInfo) rf
+                   (fun _ => eq (inr zeroBytes)).
+  
+          Definition ExceptionEntry_PostRf_Stackless
+            (csp: Cap) (* derived from tcsp *)
+            (cgp: Cap)  (* pristine cgp *)
+            (exnInfo: ExnInfo) 
+            : RfSpecT :=
+            [ (rf_ra rfidx, eq (inl errorHandlerReturnCap))
+            ; (rf_gp rfidx, eq (inl cgp))
+            ; (rf_sp rfidx, eq (inl csp))
+            ; (rf_a0 rfidx, eq (inr (mcause exnInfo)))
+            ; (rf_a1 rfidx, eq (inr (mtval  exnInfo)))
+              (* a2 and other regs are zero *)
+            ].
+
+          Definition ExceptionEntry_PostRfSpec_Stackless
+            (frame: TrustedStackFrame)                      
+            (compartment: Compartment)
+            (exnInfo: ExnInfo)
+            (rf: RegisterFile) :=
+            exists cgp base, compartment.(compartmentCGP) = Some cgp /\
+            BaseAddr frame.(trustedStackFrame_CSP) base /\
+            let tcsp := frame.(trustedStackFrame_CSP) in
+            let newCSP :=
+              (* Only keep permissions for addresses below the tcsp's
+              cursor, which should point to the callee's topmost stack
+              address at time of call. *)
+              setCapCursor (updateCapAddrs tcsp (filter (Nat.ltb tcsp.(capCursor))))
+                           base in 
+            RfSpec (ExceptionEntry_PostRf_Stackless tcsp cgp exnInfo) rf
+                   (fun _ => eq (inr zeroBytes)).
+
+          (* Error handler PCCs are created by incrementing the compartment's PCC by an offset. *)
+          Definition ValidErrorHandlerPCC (handlerT: handlerType) (compartment: Compartment) (pcc: Cap) : Prop :=
+            exists offset,
+              In (Build_ErrorHandler offset handlerT) compartment.(compartmentErrorHandlers) /\
+              pcc = updateCapCursor compartment.(compartmentPCC) (Nat.add offset).
+
+         
+          (* Add a register save context right below the csp. *)
+          Definition spillRegisterFileForErrorHandlerOk 
+            (csp: Cap) (rf: RegisterFile) (mepcc: Cap) (mem: FullMemory) (mem': FullMemory) :=
+            (* Cap is on the stack and has store permissions. *)
+            ValidUntrustedCSP csp /\
+            (* Decrement the untrusted csp by SPILL_FRAME_SIZE *)
+            let csp := updateCapCursor csp (Nat.sub SPILL_FRAME_SIZE) in 
+            (* Store PCC (mepcc) with the tag cleared. *)
+            WriteStack mem' csp (inr (capToBytes mepcc)) /\
+            (* Store all (15) registers. *)
+            Forall (fun idx => RegP rf idx (WriteStack mem' (updateCapCursor csp (Nat.add (idx * ISA_CAPSIZE_BYTES))))) (seq 1 NREGS_TO_SPILL) /\
+            (* All other mem is unchanged. *)
+            (forall addr, (csp.(capCursor) <= addr < csp.(capCursor) + SPILL_FRAME_SIZE -> False) ->
+                     readByte mem' addr = readByte mem addr /\
+                     readTag mem' (toCapAddr addr) = readTag mem (toCapAddr addr)).
+         
+          Definition increment_errorCounter (f: TrustedStackFrame) :=
+            {| trustedStackFrame_CSP := f.(trustedStackFrame_CSP);
+               trustedStackFrame_calleeExportTable := f.(trustedStackFrame_calleeExportTable);
+               trustedStackFrame_errorCounter := S f.(trustedStackFrame_errorCounter)
+            |}.
+ 
+          Definition ExceptionEntry_Post_Stackful
+            (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
+            exists exnInfo' frame frames compartment mem' csp,
+             (* Untrusted csp is a cap *)
+             RegP (rf st_init) (rf_sp rfidx) (eq (inl csp)) /\
+             trustedStack_frames (thread_trustedStack (sts st_init)) = frame::frames /\
+             (* Enable interrupts *) 
+             sc st = ({| thread_mepcc := mepcc st_init;
+                         thread_mtcc := MTCC;
+                         thread_exceptionInfo := exnInfo';
+                         thread_trustedStack := Build_TrustedStack ((increment_errorCounter frame)::frames);
+                         thread_alive := thread_alive (sts st_init)
+                      |}, InterruptsEnabled) /\
+             LookupExportTableCompartment config frame.(trustedStackFrame_calleeExportTable) = Some compartment /\
+             (* Mem': spill register file onto stack pointed to by csp. *)
+             spillRegisterFileForErrorHandlerOk csp (rf st) (mepcc st) (mem st) (mem') /\
+             (* Set PCC to error handler's pcc *)
+             ValidErrorHandlerPCC Stackful compartment (pcc st) /\
+             (* Update register file and zero other registers. *)
+             (ExceptionEntry_PostRfSpec_Stackful csp compartment (sts st).(thread_exceptionInfo)) (rf st).
+
+          (* Note that this does not use the untrusted csp. *)
+          Definition ExceptionEntry_Post_Stackless
+            (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
+            exists exnInfo' frame frames compartment mem',
+             trustedStack_frames (thread_trustedStack (sts st_init)) = frame::frames /\
+             sc st = ({| thread_mepcc := mepcc st_init;
+                         thread_mtcc := MTCC;
+                         thread_exceptionInfo := exnInfo';
+                         thread_trustedStack := Build_TrustedStack ((increment_errorCounter frame)::frames);
+                         thread_alive := thread_alive (sts st_init) 
+                      |}, InterruptsEnabled) /\
+             LookupExportTableCompartment config frame.(trustedStackFrame_calleeExportTable) = Some compartment /\
+             mem' = mem st (* memory is unchanged *) /\
+             (ValidErrorHandlerPCC Stackless compartment (pcc st)) /\
+             (ExceptionEntry_PostRfSpec_Stackless frame compartment (sts st).(thread_exceptionInfo)) (rf st).
+     
+          Record ExceptionEntry_Post (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
+            { EEPost_Mode: ~(InSystemMode st)
+            ; EEPost_Cases: ExceptionEntry_Post_Stackful tid st_init st
+                            \/ ExceptionEntry_Post_Stackless tid st_init st
+                            \/ Post_UnwindStackForced tid st_init st
+                            \/ ThreadDead st
+            ; EEPost_OnlyStackChanged: NonStackMemPreserved config tid (mem st_init) (mem st)
+            }.
+  
+  
+          (* For all sequences of thread steps, the thread stays in 
+             system mode until it returns to user mode with the stated postcondition.
+             - Alternatively, we can say the thread's PCC points to the switcher/scheduler region.
+             - TODO: liveness?
+           *)
+          Definition ExceptionHandlerOk :=
+           forall tid init,
+            ExceptionEntry_Pre tid init ->
+            Combinators.until
+              ThreadStepOk
+              (fun st => InSystemMode st /\ ExceptionEntry_Invariant tid init st)
+              (fun st => ~(InSystemMode st) /\ ExceptionEntry_Post tid init st)
+              init.
+
+        (* TODO: lift thread-local property to machine. This should
+           hold because the switcher only operates on its register
+           file, thread-local stack, and read-only memory.
+         *)
+        End ExceptionHandler.
+
+        Section ExceptionReturn.
+          Definition ExceptionReturn_Invariant (tid: nat) (st_init: ThreadState) (st: ThreadState) :=
+            SwitcherEntry_Invariant tid st_init st.
+
+          Record ExceptionReturn_Pre (tid: nat) (st: ThreadState) : Prop :=
+          { ERPre_PCCAddr: pcc st = ErrorHandlerReturnPCC
+          ; ERPre_TrustedStack: ValidTrustedStack config (sts st).(thread_trustedStack)
+          ; ERPre_Invariant: ExceptionReturn_Invariant tid st st
+          }.
+                             
+          (* (* Why does the code use the CSP from the argument rather than the trusted CSP? *) *)
+          (* (* TODO!!!: needs interrupts disabled to install context; can read globals *) *)
+          (* (* a0 = 0: argument is zero *) *)
+          (* (* TODO: need to add trusted stack spill frame *) *)
+          (* Definition ExceptionEntry_PostInstallContext *)
+          (*   (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop := *)
+          (*   (* Precondition *) *)
+          (*   (RegP (rf st_init) (rf_a0 rfidx) (eq (inr zeroBytes))) /\ *)
+          (*   (* Postcondition *) *)
+          (*   exists exnInfo' cspCap frame frames compartment, *)
+          (*     trustedStack_frames (thread_trustedStack (sts st_init)) = frame::frames /\ *)
+          (*     LookupExportTableCompartment config frame.(trustedStackFrame_calleeExportTable) = Some compartment /\ *)
+          (*     RegP (rf st_init) (rf_sp rfidx) (eq (inl cspCap)) /\ *)
+          (*     sc st = ({| thread_mepcc := mepcc st_init; *)
+          (*                 thread_mtcc := MTCC; *)
+          (*                 thread_exceptionInfo := exnInfo'; *)
+          (*                 thread_trustedStack := thread_trustedStack (sts st_init); *)
+          (*                 thread_alive := thread_alive (sts st_init)   *)
+          (*              |}, ints st_init) /\ *)
+          (*      (* mem is unchanged *) *)
+          (*      mem st = mem st_init /\ *)
+          (*      (* csp is untrusted *) *)
+          (*      ValidUntrustedCSP cspCap /\ (* TODO!!! not true in current switcher. *) *)
+          (*      (* pcc is compartment PCC set to address of mepcc stored on stack *) *)
+          (*      (exists mepcc, readMemTagCapOk (mem st_init) cspCap mepcc /\ *)
+          (*                pcc st = setCapCursor compartment.(compartmentPCC) (capCursorOfCapOrBytes mepcc)) /\ *)
+          (*      (* load register file *) *)
+          (*      Forall (fun idx => RegP (rf st) idx *)
+          (*                              (readMemTagCapOk (mem st_init) (updateCapCursor cspCap (Nat.add (idx * ISA_CAPSIZE_BYTES))))) *)
+          (*             (seq 1 NREGS_TO_SPILL). *)
+
+          Record ExceptionReturn_Post (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
+            { ERPost_Mode: ~(InSystemMode st)
+            ; ERPost_Cases: 
+              (* Note: the switcher may be rewritten to decouple the
+                 install context path from the exception return path and
+                 ensure the switcher only touches local state.
+                 https://github.com/CHERIoT-Platform/cheriot-rtos/issues/559
+               *)
+               (* ExceptionEntry_PostInstallContext tid st_init st \/ *)
+                Post_UnwindStackForced tid st_init st \/
+                  ThreadDead st
+            ; ERPost_OnlyStackChanged: NonStackMemPreserved config tid (mem st_init) (mem st)
+            }.
+
+          Definition ExceptionReturnOk :=
+           forall tid init,
+            ExceptionReturn_Pre tid init ->
+            Combinators.until
+              ThreadStepOk
+              (fun st => InSystemMode st /\ ExceptionReturn_Invariant tid init st)
+              (fun st => ~(InSystemMode st) /\ ExceptionReturn_Post tid init st)
+              init.
+         
+        End ExceptionReturn.
+
+        Section CompartmentCall.
+          Definition CompartmentCall_Invariant (tid: nat) (st_init: ThreadState) (st: ThreadState) :=
+            SwitcherEntry_Invariant tid st_init st.
+
+          Record CompartmentCall_Pre (tid: nat) (st: ThreadState) : Prop :=
+          { CCallPre_PCCAddr: pcc st = CompartmentCallPCC
+          ; CCallPre_TrustedStack: ValidTrustedStack config (sts st).(thread_trustedStack)
+          ; CCallPre_Invariant: CompartmentCall_Invariant tid st st
+          (* ; CCallPre_RA: *) (* caller return address, because we entered via a forward sentry *)
+          }.
+
+          Definition ZeroArg (numArgs: nat) (regArgNum: nat) (init_rf: RegisterFile) (regIdx: nat) : CapOrBytes -> Prop :=
+            fun v => RegP init_rf regIdx (fun old => v = if Nat.leb numArgs regArgNum then
+                                                              inr zeroBytes
+                                                         else old).
+
+          (* Zero non-argument registers. *)
+          (* TODO: check istatus *)
+          Definition CompartmentCall_PostRf_Ok
+            (istatus: InterruptStatus) 
+            (init_rf: RegisterFile)
+            (cgp: Cap)   (* cgp associated with new compartment *) 
+            (csp: Cap)   (* csp associated with new compartment *) 
+            (numArgs: nat)
+            : RfSpecT :=
+            [ (rf_ra rfidx, eq (inl (switcherAfterCompartmentCallCap istatus)))
+            ; (rf_gp rfidx, eq (inl cgp))
+            ; (rf_sp rfidx, eq (inl csp))    
+            ; (rf_a0 rfidx, ZeroArg numArgs 0 init_rf (rf_a0 rfidx))
+            ; (rf_a1 rfidx, ZeroArg numArgs 1 init_rf (rf_a1 rfidx))
+            ; (rf_a2 rfidx, ZeroArg numArgs 2 init_rf (rf_a2 rfidx))
+            ; (rf_a3 rfidx, ZeroArg numArgs 3 init_rf (rf_a3 rfidx))
+            ; (rf_a4 rfidx, ZeroArg numArgs 4 init_rf (rf_a4 rfidx))
+            ; (rf_a5 rfidx, ZeroArg numArgs 5 init_rf (rf_a5 rfidx))
+            ; (rf_t0 rfidx, ZeroArg numArgs 6 init_rf (rf_t0 rfidx))
+            ].
+
+          (* TODO: check alignment and underflow. *) 
+          (* Alternatively, could define in terms of restricting the initial csp. *)
+          Definition postCompartmentCallCSP (init_csp: Cap) (newTop: Addr): Cap :=
+          (* Reserve some compartment-invocation local space. *)
+          let newCursor := newTop - STACK_ENTRY_RESERVED_SPACE in
+          setCapCursor (updateCapAddrs init_csp (filter(Nat.ltb newTop))) newCursor.
+
+          Definition CompartmentCall_PostRfSpec_Ok
+            (init_rf: RegisterFile)                       
+            (entry: ExportEntry)
+            (csp: Cap)
+            (compartment: Compartment) 
+            (rf: RegisterFile) :=
+            exists cgp , compartment.(compartmentCGP) = Some cgp /\
+            RfSpec (CompartmentCall_PostRf_Ok entry.(exportEntryInterruptStatus) init_rf 
+                                              cgp csp entry.(exportEntryNumArgs))
+                   rf 
+                   (fun _ => eq (inr zeroBytes)).
+      
+          (* ---------------- POSTCONDITION ----------------------- *)
+          (* If the switcher returns back to user mode after an compartment call, then either
+           * 1) The call succeeded.
+                This implies that:
+                - initial csp was a valid csp.
+                - initial t1 points to sealed export table entry.
+                - there was enough stack space (TODO).
+
+                The switcher will:
+                - Spill the pcc/cgp/s0/s1 below where the csp points.
+                - Add a new frame to the trusted stack, with the CSP
+                  corresponding to the CSP at time of invocation -
+                  SPILL_SLOT_SIZE.
+                - Chop off and zero stack from the base to the new CSP's cursor.
+           * 2) There was not enough stack.
+                Return to the callee with a0 = -ENOTENOUGHSTACK and a1 = 0.
+           * 3) The CSP was invalid (or an error occurred otherwise): unwind the stack.
+           *)
+
+          Definition compartmentCalleeStackZeroed
+            (newcsp: Cap) (mem: FullMemory) (mem': FullMemory) :=
+            (forall addr, In addr newcsp.(capAddrs) ->
+                       readByte mem' addr = zeroByte /\
+                       readTag mem' (toCapAddr addr) = false).
+
+          Definition compartmentCallMemOk
+            (initcsp: Cap) (initrf: RegisterFile) (newcsp: Cap) (mem: FullMemory) (mem': FullMemory) :=
+            (* All addresses reachable by the new csp are zeroed. *)
+            compartmentCalleeStackZeroed newcsp mem mem' /\
+            (* Spill pcc(ra), cgp, and callee-saved registers *)
+            RegP initrf (rf_s0 rfidx) (WriteStack mem' (updateCapCursor initcsp (Nat.add (SPILL_SLOT_cs0 - SPILL_SLOT_SIZE)))) /\
+            RegP initrf (rf_s1 rfidx) (WriteStack mem' (updateCapCursor initcsp (Nat.add (SPILL_SLOT_cs1 - SPILL_SLOT_SIZE)))) /\
+            RegP initrf (rf_ra rfidx) (WriteStack mem' (updateCapCursor initcsp (Nat.add (SPILL_SLOT_pcc - SPILL_SLOT_SIZE)))) /\
+            RegP initrf (rf_gp rfidx) (WriteStack mem' (updateCapCursor initcsp (Nat.add (SPILL_SLOT_cgp - SPILL_SLOT_SIZE)))) /\
+            (* All csp addresses above initcsp are untouched. *)
+            (forall addr, In addr initcsp.(capAddrs) ->
+                          addr >= initcsp.(capCursor) ->
+                          MemEquivalentAtAddr mem mem' addr).
+
+          (* TODO: check for stack size *)
+          Definition CCall_Post_Ok
+            (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
+            (exists sealedCapToExportTable compartment entry exnInfo' init_csp,
+              (* The initial csp is a valid csp. *)
+              RegP (rf st_init) (rf_sp rfidx) (eq (inl init_csp)) /\
+              ValidCSP init_csp /\
+              (* Initially, t1 contains a cap sealed with the
+                 switcher's key that points to an export table entry. *)
+              (RegP (rf st_init) (SWITCHER_SEALED_ARG_REG rfidx) (eq (inl sealedCapToExportTable))) /\ 
+              (sealedCapToExportTable.(capSealed) = Some (inr config.(configSwitcher).(Switcher_key))) /\
+              let unsealedCapToExportTable := setCapSealed sealedCapToExportTable None in
+              LookupExportTableCompartmentAndEntry config unsealedCapToExportTable = Some (compartment, entry) /\
+              (* The new TCSP is the initial CSP decremented by SPILL_SLOT_SIZE. *)
+              let newTCSPCursor := init_csp.(capCursor) - SPILL_SLOT_SIZE  in
+              let newTCSP := setCapCursor init_csp newTCSPCursor in
+              (* Add a new frame to the trusted stack, containing the
+                 new TCSP and the cap to the callee's export table. *)
+              let newFrame := {| trustedStackFrame_CSP := newTCSP;
+                                 trustedStackFrame_calleeExportTable := unsealedCapToExportTable;
+                                 trustedStackFrame_errorCounter := 0
+                              |} in
+              (* Set interrupt status based on the export entry's interrupt status. *)
+              sc st = ({| thread_mepcc := mepcc st_init ;
+                          thread_mtcc := MTCC;
+                          thread_exceptionInfo := exnInfo';
+                          thread_trustedStack := Build_TrustedStack (newFrame::(sts st).(thread_trustedStack).(trustedStack_frames));
+                          thread_alive := thread_alive (sts st_init) 
+                       |}, entry.(exportEntryInterruptStatus)) /\
+              (* PCC: points to compartment PCC offsetted by export entry offset. *)
+              pcc st = updateCapCursor compartment.(compartmentPCC) (Nat.add entry.(exportEntryOffset)) /\
+              (* RF: zero non-argument registers. Chop off stack above the new TCSP. *)
+              let csp' := (postCompartmentCallCSP init_csp newTCSPCursor)  in
+              (CompartmentCall_PostRfSpec_Ok (rf st_init) entry csp' compartment (rf st)) /\
+              (* Mem:
+                 - compartment callee stack is zeroed
+                 - spill registers at init_csp.(capCursor)
+                 - all memory other than init_csp.(capCursor) to base of stack should be unchanged
+              *)
+              compartmentCalleeStackZeroed csp' (mem st_init) (mem st)).
+
+          Definition CCall_PostRf_NotEnoughStack
+            (rf_init: RegisterFile)
+            : RfSpecT :=
+            [ (rf_a0 rfidx, eq (inr notEnoughStackValue))
+            ; (rf_a1 rfidx, eq (inr zeroBytes))
+            ].
+
+          (* Trusted stack and interrupt status is not changed. *)
+          Definition CCall_Post_NotEnoughStack
+            (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
+            (exists exnInfo',
+              sc st = ({| thread_mepcc := mepcc st_init;
+                          thread_mtcc := MTCC;
+                          thread_exceptionInfo := exnInfo';
+                          thread_trustedStack := thread_trustedStack (sts st_init);
+                          thread_alive := thread_alive (sts st_init)  
+                       |}, ints st_init)) /\
+            (* mem is unchanged *)
+            mem st = mem st_init /\
+            (* PCC: points to initial ra? *)
+            (RegP (rf st_init) (rf_ra rfidx) (eq (inl (pcc st)))) /\ 
+            (* Rf: unchanged, other than return values. We could relax
+               this to say other registers are all caller-reachable caps
+               or values. *)
+            RfSpec (CCall_PostRf_NotEnoughStack (rf st_init)) (rf st)
+                   (fun idx v => RegP (rf st_init) idx (eq v)).
+
+          Record CompartmentCall_Post (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
+          { CCPost_Mode: ~(InSystemMode st)
+          ; CCPost_Cases: CCall_Post_Ok tid st_init st \/
+                          CCall_Post_NotEnoughStack tid st_init st \/
+                          Post_UnwindStackForced tid st_init st \/
+                          ThreadDead st
+          ; CCPost_OnlyStackChanged: NonStackMemPreserved config tid (mem st_init) (mem st)
+          }.
+
+          Definition CompartmentCallOk :=
+           forall tid init,
+            CompartmentCall_Pre tid init ->
+            Combinators.until
+              ThreadStepOk
+              (fun st => InSystemMode st /\ CompartmentCall_Invariant tid init st)
+              (fun st => ~(InSystemMode st) /\ CompartmentCall_Post tid init st)
+              init.
+
+        End CompartmentCall.
+
+        (* Pop a frame from the trusted stack, leaving registers in
+           the state expected by the caller of a cross-compartment
+           call. The callee is responsible for zeroing unused return
+           registers; the switcher will zero other non-return argument
+           and temporary registers.
+        *)
+        Section CompartmentReturn.
+          Definition CompartmentReturn_Invariant (tid: nat) (st_init: ThreadState) (st: ThreadState) :=
+            SwitcherEntry_Invariant tid st_init st.
+
+          Record CompartmentReturn_Pre (tid: nat) (st: ThreadState) : Prop :=
+          { CRetReturn_PCCAddr: pcc st = CompartmentCallPCC
+          ; CRetReturn_TrustedStack: ValidTrustedStack config (sts st).(thread_trustedStack)
+          ; CRetReturn_Invariant: CompartmentCall_Invariant tid st st
+          }.
+
+          Record CompartmentReturn_Post (tid: nat) (st_init: ThreadState) (st: ThreadState) : Prop :=
+          { CRetPost_Mode: ~(InSystemMode st)
+          ; CRetPost_Cases: Post_UnwindStackReturnOk tid st_init st \/
+                            ThreadDead st
+          ; CRetPost_OnlyStackChanged: NonStackMemPreserved config tid (mem st_init) (mem st)
+          }.
+
+          Definition CompartmentReturnOk :=
+          forall tid init,
+           CompartmentReturn_Pre tid init ->
+           Combinators.until
+             ThreadStepOk
+             (fun st => InSystemMode st /\ CompartmentReturn_Invariant tid init st)
+             (fun st => ~(InSystemMode st) /\ CompartmentReturn_Post tid init st)
+             init.
+         
+        End CompartmentReturn.
+      
+     End WithSwitcherParams.
+    End WithConfig.
+  End WithContext.
+End SwitcherProperty.
+
 (* If a (malicious) compartment is not transitively-reachable from a
    protected compartment, then it should never have access to the
    protected compartment's memory regions.
@@ -482,25 +1608,16 @@ Module CompartmentIsolationValidation.
   Import Separation.
   Section WithContext.
     Context [ISA: ISA_params].
-    Context {Byte Key: Type}.
-    Context {capEncodeDecode: @CapEncodeDecode Byte Key}.
-    Notation FullMemory := (@FullMemory Byte).
-    Notation EXNInfo := (@EXNInfo Byte).
+    Context {machineTypeParams: MachineTypeParams}.
+    Context {capEncodeDecode: CapEncodeDecode}.
     Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
     Context {pccNotInBounds : EXNInfo}.
-    Notation Machine := (@Machine Byte Key).
-    Notation Cap := (@Cap Key).
-    Notation CapOrBytes := (@CapOrBytes Byte Key).
     Notation AddrOffset := nat (only parsing).
     Notation PCC := Cap (only parsing).
-    Notation Thread := (@Thread Byte Key).
-    Notation Trace := (@Trace Byte Key).
     Notation State := (Machine * Trace)%type.
-    Notation Event := (@Event Byte Key).
-    Notation Config := (@Config Byte Key).
-    Context {LookupExportTableCompartment: Config -> Cap -> FullMemory -> option nat}.
-    Notation ValidInitialState := (@ValidInitialState _ Byte Key _ LookupExportTableCompartment).
-    Notation ValidInitialThread := (@ValidInitialThread _ Byte Key _ LookupExportTableCompartment).
+    Context {LookupExportTableCompartmentId: Config -> Cap -> option (nat * nat)}.
+    Notation ValidInitialState := (@ValidInitialState _ _ _ LookupExportTableCompartmentId).
+    Notation ValidInitialThread := (@ValidInitialThread _ _ _ LookupExportTableCompartmentId).
 
     (* Compartments are connected on the audit graph.
        - Compartments can share libraries without being connected.
@@ -549,9 +1666,9 @@ Module CompartmentIsolationValidation.
             
     Definition ThreadInUserCompartment (config: Config) (mem: FullMemory) (t: Thread) (cid: nat) : Prop :=
       (~ ThreadHasSystemPerm t) /\
-      exists frame ,
+      exists frame eid,
         hd_error t.(thread_systemState).(thread_trustedStack).(trustedStack_frames) = Some frame /\
-        LookupExportTableCompartment config frame.(trustedStackFrame_calleeExportTable) mem = Some cid.
+        LookupExportTableCompartmentId config frame.(trustedStackFrame_calleeExportTable) = Some (cid, eid).
 
     Definition MutuallyIsolatedCompartment (config: Config) (idx1 idx2: nat) : Prop :=
       exists c1 c2,
@@ -598,7 +1715,7 @@ Module CompartmentIsolationValidation.
         (mem: FullMemory) (srcCaps: list Cap) (cid: nat): Prop :=
         (forall cap addr,
             ReachableCap mem srcCaps cap ->
-            cap.(capSealed) = Some (inr config.(configSwitcherKey)) ->
+            cap.(capSealed) = Some (inr config.(configSwitcher).(Switcher_key)) ->
             In addr cap.(capAddrs) ->
             AddrHasProvenance config addr (Provenance_Compartment cid) ->
             False).
@@ -633,7 +1750,7 @@ Module CompartmentIsolationValidation.
 
 
       Record InitialProperty' (st: State) : Prop :=
-        { Inv_UserMode: UserModeInvariant (fst st)
+        { Inv_UserMode: UserModeInvariant config (fst st)
         ; Inv_CompartmentIsolation: CompartmentIsolation (fst st)
         ; Inv_IsolatedThreads: CompartmentIsolatedThreads (fst st)
         }.                                                           
@@ -685,7 +1802,7 @@ Module CompartmentIsolationValidation.
       Qed.
 
       Lemma ExceptionStepOk__User :
-        forall m tr m' thread exn,
+        forall m tr m' thread exn status,
           GlobalInvariant config m ->
           InitialProperty' (m, tr) ->
           GlobalInvariant config m' ->
@@ -698,11 +1815,15 @@ Module CompartmentIsolationValidation.
             Some (Build_Thread
                     (Build_UserThreadState
                        (thread_rf (thread_userState thread))
-                       (thread_mepcc (thread_systemState thread)))
+                       (thread_mtcc (thread_systemState thread)))
                     (Build_SystemThreadState
                        (thread_pcc (thread_userState thread))
+                       (thread_mtcc (thread_systemState thread))
                        exn 
-                       (thread_trustedStack (thread_systemState thread)))) ->
+                       (thread_trustedStack (thread_systemState thread))
+                       status 
+                    )
+              ) ->
           machine_memory m = machine_memory m' ->
           InitialProperty' (m',(Ev_SameThread (machine_curThreadId m) Ev_Exception::tr)).
       Proof.
@@ -717,7 +1838,8 @@ Module CompartmentIsolationValidation.
           { exfalso.
             eapply ThreadInUserCompartmentDoesNotHaveSystemPerm; eauto.
             cbv[ThreadHasSystemPerm]; cbn.
-            eapply HUserMode; eauto.
+            erewrite MTCC_ok by (eapply HUserMode; eauto).
+            cbn. eauto.
           }
           { rewrite hsame in * by lia.
             eapply HIsolatedThreads; eauto with lists.
@@ -726,17 +1848,20 @@ Module CompartmentIsolationValidation.
         assert (CompartmentIsolation m') as hiso.
         { cbv[CompartmentIsolation]. eauto. }
 
-        assert (UserModeInvariant m') as huserMode.
+        assert (UserModeInvariant config m') as huserMode.
         { cbv[UserModeInvariant].
           intros * ht ht_userMode. 
           unsafe_saturate_list; destruct_products; option_simpl.
           destruct (PeanoNat.Nat.eq_dec (machine_curThreadId m) n); subst; option_simpl; cbn.
-          { exfalso. apply ht_userMode. eapply HUserMode; eauto. }
+          { exfalso. apply ht_userMode.
+            cbn.
+            erewrite MTCC_ok by (eapply HUserMode; eauto).
+            cbn. eauto.
+          }
           { rewrite hsame in * by lia.
             eapply HUserMode; eauto with lists.
           }
         }
-
         constructor; auto; cbn.
       Qed.
 
@@ -793,11 +1918,12 @@ Module CompartmentIsolationValidation.
         forall callSentryInst srcReg optLink userCtx mem istatus pcc' rf' istatus',
         ValidRf (thread_rf userCtx) ->
         WfCallSentryInst callSentryInst srcReg optLink ->
+        isSealed (thread_pcc userCtx) = false ->
         callSentryInst (userCtx, mem) istatus = Ok(pcc', rf', istatus') ->
         ReachableViaCallRet (capsOfUserTS userCtx) (pcc' :: capsOfRf rf'). 
       Proof.
         cbv[ReachableViaCallRet].
-        intros * hrf hwf hcall * hin'.
+        intros * hrf hwf hpcc_unsealed hcall * hin'.
         match goal with
         | H: ?callSentryInst ?userCtx ?istatus = Ok (?pcc', ?rf', ?istatus'),
             H1: WfCallSentryInst ?callSentryInst ?srcReg ?optLink |- _ =>
@@ -856,7 +1982,7 @@ Module CompartmentIsolationValidation.
           apply Perm.internal_t_dec_bl in Heqbr. subst. congruence.
       Qed.
 
-      Context {decode: list Byte -> @Inst _ _ _ capEncodeDecode}.
+      Context {decode: list Byte -> @Inst _ _ capEncodeDecode}.
       Notation SameThreadStep := (SameThreadStep fetchAddrs decode pccNotInBounds).
       Notation MachineStep := (MachineStep fetchAddrs decode pccNotInBounds).
 
@@ -1062,7 +2188,7 @@ Module CompartmentIsolationValidation.
       Proof.
         cbv[IsolatedFromCompartment].
         intros * hseparated (haddr & hsentries & hdata) hinit hthread hnot_reachable hmeta.
-        pose proof (ValidInitialCSP _ _ _ hinit) as hvalidcsp. consider @ValidCSP.
+        pose proof (ValidInitialCSP _ _ _ _ hinit) as hvalidcsp. consider @ValidCSP.
         destruct_products.
         split_ands.
         - cbv[AddrsIsolatedFromCompartment]. intros.
@@ -1070,42 +2196,51 @@ Module CompartmentIsolationValidation.
           consider ReachableRWXAddr. destruct_products. simplify_provenance.
           do 3 eexists; split; eauto.
           constructor; auto.
-          eapply ReachableCapRestrictCSP with (x := x.(initThreadCSP)); auto.
-          + eapply ValidInitialThread_stackUntagged; eauto.
+          assert ((capAddrs (mkCSP base len addr)) = stackFootprint x) as hfootprint.
+          { unfold stackFootprint. rewrite_solve. }
+          eapply ReachableCapRestrictCSP with (x := x.(initThreadCSP)); try rewrite hvalidcspr; auto.
+          + intros. eapply ValidInitialThread_stackUntagged; eauto.
+            unfold stackFootprint. rewrite hvalidcspr. auto.
           + rewrite setCapSealedNoneEq by auto. intros hrestrict.
             apply RestrictCapAddrsSubset in hrestrict. cbv[Subset] in *.
-            assert (In addr (stackFootprint x)).
-            { apply hrestrict. apply ina. constructor. auto. }
+            assert (In addr0 (stackFootprint x)).
+            { rewrite<-hfootprint. apply hrestrict. apply ina. constructor. auto. }
             saturate_footprints; saturate_list; simplify_Separated.
-          + eapply InitialThreadCapSubset; eauto.
+          + rewrite<-hvalidcspr. eapply InitialThreadCapSubset; eauto.
         - cbv[SentriesIsolatedFromCompartment]. intros.
           eapply hsentries; eauto; simplify_provenance; destruct_products.
-          eapply ReachableCapRestrictCSP with (x := x.(initThreadCSP)); auto.
-          + eapply ValidInitialThread_stackUntagged; eauto.
+          assert ((capAddrs (mkCSP base len addr)) = stackFootprint x) as hfootprint.
+          { unfold stackFootprint. rewrite_solve. }
+          eapply ReachableCapRestrictCSP with (x := x.(initThreadCSP)); try rewrite hvalidcspr; auto.
+          + intros. eapply ValidInitialThread_stackUntagged; eauto.
+            unfold stackFootprint. rewrite hvalidcspr. auto.
           + intros hrestrict. apply RestrictCapAddrsSubset in hrestrict. 
             fold (stackFootprint x) in *.
-            assert (In addr (stackFootprint x)).
-            { apply hrestrict. auto. }
+            assert (In addr0 (stackFootprint x)).
+            { rewrite<-hfootprint. apply hrestrict. auto. }
             saturate_footprints; saturate_list; simplify_Separated.
-          + eapply InitialThreadCapSubset; eauto.
+          + rewrite<-hvalidcspr. eapply InitialThreadCapSubset; eauto.
         - cbv[SealedDataCapsIsolatedFromCompartment]. intros.
           eapply hdata; eauto; simplify_provenance; destruct_products.
-          eapply ReachableCapRestrictCSP with (x := x.(initThreadCSP)); auto.
-          + eapply ValidInitialThread_stackUntagged; eauto.
+          assert ((capAddrs (mkCSP base len addr)) = stackFootprint x) as hfootprint.
+          { unfold stackFootprint. rewrite_solve. }
+          eapply ReachableCapRestrictCSP with (x := x.(initThreadCSP)); try rewrite hvalidcspr; auto.
+          + intros; eapply ValidInitialThread_stackUntagged; eauto.
+            rewrite<-hfootprint. auto.
           + intros hrestrict. apply RestrictCapAddrsSubset in hrestrict.
             fold (stackFootprint x) in *.
-            assert (In addr (stackFootprint x)).
-            { apply hrestrict; auto. }
+            assert (In addr0 (stackFootprint x)).
+            { rewrite<-hfootprint. apply hrestrict; auto. }
             saturate_footprints; saturate_list; simplify_Separated.
-          + eapply InitialThreadCapSubset; eauto.
+          + rewrite<-hvalidcspr. eapply InitialThreadCapSubset; eauto.
        Qed.
 
         Lemma ValidInitialThreadImpliesCompartment:
-          forall config meta thread cid frame compartment,
+          forall config meta thread cid frame compartment eid,
           ValidInitialThread config meta thread ->
           hd_error (trustedStack_frames (thread_trustedStack (thread_systemState thread))) =
             Some frame ->
-          LookupExportTableCompartment config (trustedStackFrame_calleeExportTable frame) (configInitMemory config) = Some cid ->
+          LookupExportTableCompartmentId config (trustedStackFrame_calleeExportTable frame)  = Some (cid, eid) ->
           nth_error (configCompartments config) cid = Some compartment ->
           cid = initThreadCompartment meta.
         Proof.
@@ -1114,7 +2249,7 @@ Module CompartmentIsolationValidation.
           simpl_match; option_simpl.
           match goal with
           | H: ValidTrustedStackFrame _ _ _ _ _ |- _ => destruct H
-          end; option_simpl; auto.
+          end; destruct_products; option_simpl; simplify_tupless; eauto.
         Qed.
 
       Lemma PCompartmentIsolation_InitThreads:
@@ -1173,31 +2308,19 @@ Module ThreadIsolatedMonotonicity.
   Import Separation.
   Section WithContext. 
     Context [ISA: ISA_params].
-    Context {Byte Key: Type}.
-    Context {capEncodeDecode: @CapEncodeDecode Byte Key}.
-    Notation FullMemory := (@FullMemory Byte).
-    Notation EXNInfo := (@EXNInfo Byte).
+    Context {machineTypeParams: MachineTypeParams}.
+    Context {capEncodeDecode: CapEncodeDecode}.
     Context {fetchAddrs: FullMemory -> Addr -> list Addr}.
-    Context {decode: list Byte -> @Inst _ _ _ capEncodeDecode}.
+    Context {decode: list Byte -> @Inst _ _ capEncodeDecode}.
     Context {pccNotInBounds : EXNInfo}.
-    Notation Machine := (@Machine Byte Key).
-    Notation Cap := (@Cap Key).
-    Notation CapOrBytes := (@CapOrBytes Byte Key).
     Notation AddrOffset := nat (only parsing).
     Notation MachineStep := (MachineStep fetchAddrs decode pccNotInBounds).
     Notation PCC := Cap (only parsing).
-    Notation Thread := (@Thread Byte Key).
-    Notation Trace := (@Trace Byte Key).
     Notation State := (Machine * Trace)%type.
-    Notation Event := (@Event Byte Key).
-    Notation Config := (@Config Byte Key).
     Notation SameThreadStep := (SameThreadStep fetchAddrs decode pccNotInBounds).
-    Notation ReachableCapSubset := (@ReachableCapSubset ISA Byte Key).
-    Notation RWAddressesDisjoint := (@RWAddressesDisjoint ISA Byte Key).
-    Notation WriteReadDisjoint := (@WriteReadDisjoint ISA Byte Key).
-    Context {LookupExportTableCompartment: Config -> Cap -> FullMemory -> option nat}.
-    Notation ValidInitialState := (@ValidInitialState _ Byte Key _ LookupExportTableCompartment).
-    Notation ValidInitialThread := (@ValidInitialThread _ Byte Key _ LookupExportTableCompartment). 
+    Context {LookupExportTableCompartmentId: Config -> Cap -> option (nat*nat)}.
+    Notation ValidInitialState := (@ValidInitialState _ _ _ LookupExportTableCompartmentId).
+    Notation ValidInitialThread := (@ValidInitialThread _ _ _ LookupExportTableCompartmentId). 
 
     Definition SameDomainEvent (ev: Event) : Prop :=
       match ev with
@@ -1314,7 +2437,7 @@ Module ThreadIsolatedMonotonicity.
         intros * hginv hinv hginv' hev hstep.
         pose proof hstep as hstep'.
         inv hstep. destruct_products.
-        inv stepOkrl.
+        inv stepOkrrl.
         rename H0 into hstep.
         revert hstep. cbv [threadStepFunction exceptionState uc sc fst snd].
         repeat (case_match; simplify_eq); try congruence.
@@ -1360,7 +2483,7 @@ Module ThreadIsolatedMonotonicity.
           - intros * hx hy.
             destruct (PeanoNat.Nat.eq_dec idx (m'.(machine_curThreadId))); subst.
             + rewrite threadIdEq in *.
-              rewrite stepOkrr in *. option_simpl.
+              rewrite stepOkrrr in *. option_simpl.
               assert (ThreadReachableCapSubset (machine_memory initialMachine) (machine_memory m)
                                          x thread) as hsubset0.
               { eapply InvariantImpliesThreadReachableCapSubset; eauto. }
@@ -1431,21 +2554,3 @@ Module ThreadIsolatedMonotonicity.
   End WithContext. 
 End ThreadIsolatedMonotonicity.
 
-
-(* Isolated compartment:
-   - if a compartment has no export entries, and its import entries
-     only consist of sentries to libraries, then no other compartment
-     can access the isolated compartment's caps.
-   - intermediate lemma: on a compartment call, we
- *)
-   
-
-
-(* Invariant: if a (isolated) compartment always sanitizes its caps such that
-   - as a caller, all arguments have LG unset
-   - as a callee, it never passes caps that have access to its globals in the return argument
-     --> how to enforce this?
-   then other compartments should only have temporary access to its caps
-   -> that is, the only caps a thread in a different compartment should have access to belonging to 
- *)
-                                                                              
